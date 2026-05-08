@@ -16,6 +16,8 @@
   </p>
 </div>
 
+> ⚠️ *Andromeda is under development. Any structure or feature may have its code and operational design altered in the interest of greater efficiency and security.*
+
 ---
 
 ## How we help teams adopt Ika and Encrypt
@@ -49,9 +51,9 @@ Andromeda is a **B2D (Business-to-Developer)** platform.
 Cases that Andromeda specifically unblocks — not generic Web3 use cases.
 
 - **Cross-chain smart wallets** — same identity drives signing across EVM, Solana, Bitcoin, Cosmos, NEAR and Aptos. The user signs into the app once and the dWallet derived from the OAuth subject is consistent across every client.
-- **DAO treasuries with on-chain rule enforcement** — a Solana Quasar program (`allowlist-destinations` + `velocity-guard`) holds the dWallet authority. The treasury can only interact with whitelisted programs, capped at N signatures per slot window, with no ability for the gateway to bypass the policy.
-- **Trading bots with scoped delegation** — `session-keys` grants a temporary key with `expires_at_slot`, `max_uses`, `max_amount_per_tx`, and `allowed_programs`. Multiple sessions per dWallet (up to 2³² concurrent), each with its own monotonic replay nonce.
-- **AI agents that sign transactions** — every REST route on the gateway is auto-mirrored as an MCP tool. Drop the endpoint into Claude Desktop or Cursor and the agent can call `ika.sign.submit`, `recovery.primary.submit`, or any other operation natively.
+- **DAO treasuries with on-chain rule enforcement** — a Solana Quasar program (allowlist-destinations + velocity-guard) holds the dWallet authority. The treasury can only interact with whitelisted programs, capped at N signatures per slot window, with no ability for the gateway to bypass the policy.
+- **Trading bots with scoped delegation** — the session-keys template grants a temporary key with on-chain limits on slot expiry, number of uses, amount per transaction, and allowed destination programs. Multiple sessions per dWallet (up to 2^32 concurrent), each with its own monotonic replay nonce.
+- **AI agents that sign transactions** — every REST route on the gateway is auto-mirrored as an MCP tool. Drop the endpoint into Claude Desktop or Cursor and the agent can call signing, recovery, or policy operations natively.
 - **Social recovery without a Solana wallet** — primary or M-of-N quorum recovery where the user signs a 32-byte challenge with whatever wallet they already own (MetaMask, Phantom, Keplr, Sui, BTC cold wallet, passkey). Andromeda pays gas and submits the Solana transaction.
 - **FHE-gated confidential signing** — authorisation logic that runs on encrypted inputs. The decision is signed by an ed25519 key held in HashiCorp Vault Transit, then validated by an on-chain Quasar program before the Ika signature is released.
 
@@ -71,14 +73,14 @@ Cases that Andromeda specifically unblocks — not generic Web3 use cases.
 ### Custody-free recovery
 - **Recovery layer (primary + M-of-N quorum)** — primary single-sig flow + multi-tx PDA staging quorum. No bound on quorum size.
 - **Cross-chain recovery schemes** — 7 off-chain ownership-proof schemes + 4 on-chain credential schemes, all validated by Solana precompiles. Zero attestor.
-- **On-chain RulesPolicy** — Quasar program that holds dWallet authority with PDA seeded by `init_authority_hash` (front-running protected), `Sysvar<Clock>` time source, strict WebAuthn challenge matching.
+- **On-chain RulesPolicy** — Quasar program that holds dWallet authority with the policy PDA seeded by an init-authority hash (front-running protected), the Solana clock as the only time source, and strict pattern matching on the WebAuthn challenge field.
 
 ### Policy templates
-- **8 Quasar policy templates** — `rules-policy`, `allowlist-destinations`, `velocity-guard`, `time-lock`, `oracle-conditional`, `passkey-step-up`, `fhe-gated`, `session-keys`. All audited, all wallet-agnostic.
-- **Session keys with multi-session** — up to 2³² concurrent sessions per dWallet, each with monotonic replay nonce binding `(message_digest, amount, destination_program, signature_nonce)`.
+- **8 Quasar policy templates** — rules-policy, allowlist-destinations, velocity-guard, time-lock, oracle-conditional, passkey-step-up, fhe-gated, session-keys. All audited, all wallet-agnostic.
+- **Session keys with multi-session** — up to 2^32 concurrent sessions per dWallet, each with a monotonic replay nonce that binds the message digest, amount, destination program, and signature nonce together.
 
 ### Confidential computing
-- **Confidential Workflows pipeline** — Encrypt FHE evaluation → Vault Transit ed25519 → Quasar `fhe-gated` policy → Ika signature. `ALLOWED_FHE_AUTHORITIES` allowlist + `decision_max_age_slots > 0` enforced on-chain.
+- **Confidential Workflows pipeline** — Encrypt FHE evaluation flows into Vault Transit ed25519, then into the Quasar fhe-gated policy, then into the Ika signature. An on-chain authority allowlist plus a non-zero decision-age window are enforced before any signature is released.
 
 ### On-chain awareness + future-sign
 - **Webhook-driven Future-Sign** — arm a trigger (oracle / slot / event / external webhook), Andromeda fires the signature when the condition matches.
@@ -86,28 +88,28 @@ Cases that Andromeda specifically unblocks — not generic Web3 use cases.
 - **HMAC-signed webhook system** — replay-protected (5-minute window), retries with backoff, dead-letter queue.
 
 ### Optional identity layer
-- **Identity Layer** — OAuth (Google/Apple/Twitter/GitHub) + email magic link + passkey-as-identity (WebAuthn PRF). Deterministic `walletAddress = sha256("<provider>:<subject>")` enables free cross-client recovery.
-- **Anti-enumeration + atomic single-use tokens** — `/email/request` always 200; tokens consumed via atomic `UPDATE WHERE consumed_at IS NULL`.
-- **PII encryption-at-rest** — AES-256-GCM envelope on `ika_identities.data`, `ika_identity_links.data`, `ika_identity_email_tokens.email`. DB dump leak ≠ PII leak.
-- **GDPR endpoints** — `GET /me/export` (full JSON dump) + `DELETE /me` (cascade purge).
+- **Identity Layer** — OAuth (Google/Apple/Twitter/GitHub) + email magic link + passkey-as-identity (WebAuthn PRF). The dWallet address is derived deterministically from the OAuth provider plus subject identifier, so any client doing OAuth on the same account derives the same wallet — cross-client recovery comes for free.
+- **Anti-enumeration + atomic single-use tokens** — the email-request endpoint always returns 200 (so attackers cannot probe which emails have accounts), and every token is consumed via an atomic single-use SQL update.
+- **PII encryption-at-rest** — AES-256-GCM envelope applied to identity records, account-link records, and email-token rows in Postgres. A DB dump leak does not become a PII leak.
+- **GDPR endpoints** — GET /me/export returns a full JSON dump of the user's identifiable data; DELETE /me cascades a purge across all linked records.
 
 ### API surface
-- **API key management with scopes and IP allowlist** — granular permissions (`read`, `write`, `admin`, `*`), CIDR allowlist per key, SHA-256 hashing, async `last_used_at` touch.
+- **API key management with scopes and IP allowlist** — granular permissions (read, write, admin, wildcard), CIDR allowlist per key, SHA-256 hashing, async last-used tracking.
 
 ### Developer experience
 - **MCP Server with auto-generated tools** — 60 tools auto-registered from the same route catalogue that drives REST. Drop into Claude Desktop or Cursor with zero glue code.
 - **Capabilities endpoint** — public introspection of what is wired in this deployment (engines, features, MCP transport, route count).
 - **OpenAPI 3.1 + curl + Postman** — every public endpoint comes with a typed schema and copy-paste examples in Node, Go, Python, Rust.
-- **SDK metadata endpoint** — `GET /v1/policies/{address}/sdk` returns a tarball URL + install command for a typed TypeScript client per deployed policy.
+- **SDK metadata endpoint** — for any deployed policy, the gateway returns a tarball URL plus an install command for a typed TypeScript client tailored to that policy.
 
 ### Operational excellence
 - **Idempotency-Key** — safe retries on every mutating endpoint, byte-identical replay, body-collision detection (422).
-- **Dry-run / Simulate** — `simulateTransaction` with `would_succeed`, `boundary`, `estimated_cu`, `would_emit_events`, `logs`.
+- **Dry-run / Simulate** — uses Solana simulateTransaction and returns a structured diagnostic with would-succeed flag, failure boundary, estimated compute units, emitted events, and full logs.
 - **Auto-batching of signatures** — pack up to 64 signature requests into K Solana transactions (greedy packing, 1180-byte cap, max 16 per tx).
 
 ### Compliance + KMS
 - **Signed exportable Audit Log** — per-tenant ed25519 hash chain signed by HashiCorp Vault Transit. Externally verifiable without trusting Andromeda.
-- **Vault Transit KMS** — 2 separate ed25519 keys (`andromeda-audit`, `andromeda-fhe`), each with a sign-only policy and its own periodic token. Andromeda never sees the private material.
+- **Vault Transit KMS** — two separate ed25519 keys (one for audit signing, one for FHE authority), each with a sign-only policy and its own periodic token. Andromeda never sees the private material.
 
 ---
 
@@ -116,14 +118,14 @@ Cases that Andromeda specifically unblocks — not generic Web3 use cases.
 ```
                  ┌──────────────────────────────────┐
                  │   External clients (any chain)   │
-                 │   REST · MCP · Webhooks          │
+                 │   REST + MCP + Webhooks          │
                  └────────────────┬─────────────────┘
                                   │ X-Api-Key
                                   ▼
                  ┌──────────────────────────────────┐
                  │           Gateway (Go)           │
-                 │  Auth · Quotas · MCP · Audit ·   │
-                 │  Idempotency · Webhooks · Batch  │
+                 │  Auth + Quotas + MCP + Audit +   │
+                 │  Idempotency + Webhooks + Batch  │
                  └─────┬────────────────────┬───────┘
                        │ private network    │ private network
                        ▼                    ▼
@@ -142,19 +144,19 @@ Cases that Andromeda specifically unblocks — not generic Web3 use cases.
      │  via runtime precompiles (zero attestor)           │
      └────────────────────────────────────────────────────┘
 
-     Postgres (shared with backend)   ·   HashiCorp Vault Transit
-     Stripe + SMTP (backend service)  ·   Cloudflare Pages (dashboard)
+     Postgres (shared with backend)   |   HashiCorp Vault Transit
+     Stripe + SMTP (backend service)  |   Cloudflare Pages (dashboard)
 ```
 
 The product surface is composed of **5 services** plus **8 on-chain Quasar programs**.
 
 | Service | Stack | Role |
 |---------|-------|------|
-| `gateway` | Go 1.25 · chi · pgx · Redis | Hot path. Auth, quota, rate limit, MCP server, reverse-proxy to engines, audit log. |
-| `ika-backend` | Node 24 · Express 5 · @grpc/grpc-js · @solana/kit | MPC engine. gRPC to Ika validator network, recovery layer, identity layer. |
-| `encrypt-backend` | Node 22 · Hono 4 · @encrypt.xyz/pre-alpha-solana-client | FHE engine. 22 Encrypt instructions + high-level wallet primitives. |
-| `backend` | Go 1.25 · chi · pgx · Stripe | Product surface. Auth, customer endpoints, billing, admin console. |
-| `dashboard` | Next.js 16 · React 19 · Tailwind 4 | Static export. Customer dashboard + admin console + landing. |
+| gateway | Go 1.25, chi, pgx, Redis | Hot path. Auth, quota, rate limit, MCP server, reverse-proxy to engines, audit log. |
+| ika-backend | Node 24, Express 5, @grpc/grpc-js, @solana/kit | MPC engine. gRPC to Ika validator network, recovery layer, identity layer. |
+| encrypt-backend | Node 22, Hono 4, @encrypt.xyz/pre-alpha-solana-client | FHE engine. 22 Encrypt instructions + high-level wallet primitives. |
+| backend | Go 1.25, chi, pgx, Stripe | Product surface. Auth, customer endpoints, billing, admin console. |
+| dashboard | Next.js 16, React 19, Tailwind 4 | Static export. Customer dashboard + admin console + landing. |
 
 ---
 
@@ -175,7 +177,7 @@ curl <GATEWAY_URL>/openapi.json
 curl <GATEWAY_URL>/v1/pricing
 ```
 
-For authenticated endpoints, request a devnet API key by signing up at `<DASHBOARD_URL>/signup`.
+For authenticated endpoints, request a devnet API key by signing up at DASHBOARD_URL/signup.
 
 ### Wallet-agnostic recovery (signature flow)
 
@@ -193,7 +195,7 @@ curl -X POST <GATEWAY_URL>/v1/recovery/primary/challenge \
 # → { "challengeBase64": "...", "expectedNonce": 7, "primaryScheme": "Ed25519" }
 
 # 2. User signs `challengeBase64` off-chain with their wallet
-#    (MetaMask, Phantom, Keplr, Sui Wallet, BTC cold wallet, passkey, …)
+#    (MetaMask, Phantom, Keplr, Sui Wallet, BTC cold wallet, passkey, etc.)
 
 # 3. Submit the signature — Andromeda pays gas and broadcasts
 curl -X POST <GATEWAY_URL>/v1/recovery/primary/submit \
@@ -227,11 +229,11 @@ Drop the gateway endpoint into any MCP client (Claude Desktop, Cursor, custom):
 }
 ```
 
-The agent can immediately call `ika.sign.submit`, `recovery.primary.submit`, `policies.allowlist-destinations.request-signature`, and 57 other auto-generated tools.
+The agent can immediately call any of the 60 auto-generated tools, covering signing, recovery, policy operations, webhooks, audit log queries, and the full Encrypt FHE surface.
 
 ### Run locally
 
-The monorepo runs on Postgres + Redis + 5 services. Each service has its own `.env.example`.
+The monorepo runs on Postgres + Redis + 5 services. Each service has its own .env.example.
 
 ```bash
 git clone <REPO_URL> andromeda
@@ -250,11 +252,11 @@ cd andromeda
 open http://localhost:3000
 ```
 
-Service ports: `backend` on 8080, `gateway` on 8081, `ika-backend` on 3020, `encrypt-backend` on 3010, `dashboard` on 3000.
+Service ports: backend on 8080, gateway on 8081, ika-backend on 3020, encrypt-backend on 3010, dashboard on 3000.
 
 ### Build
 
-Every service ships a `Dockerfile` and a Railway config. Static dashboard exports to `out/` for Cloudflare Pages.
+Every service ships a Dockerfile and a Railway config. The dashboard exports to a static "out" directory for Cloudflare Pages.
 
 ```bash
 ( cd backend         && go build -o bin/backend ./cmd/server )
@@ -281,25 +283,25 @@ All artefacts live on Solana **devnet** during pre-alpha.
 
 | Component | URL / Address |
 |-----------|---------------|
-| Landing page | `<LANDING_URL>` |
-| Dashboard | `<DASHBOARD_URL>` |
-| Gateway API | `<GATEWAY_URL>` |
-| OpenAPI spec | `<GATEWAY_URL>/openapi.json` |
-| MCP endpoint | `<GATEWAY_URL>/mcp` |
-| Capabilities endpoint | `<GATEWAY_URL>/capabilities` |
+| Landing page | LANDING_URL |
+| Dashboard | DASHBOARD_URL |
+| Gateway API | GATEWAY_URL |
+| OpenAPI spec | GATEWAY_URL/openapi.json |
+| MCP endpoint | GATEWAY_URL/mcp |
+| Capabilities endpoint | GATEWAY_URL/capabilities |
 
 ### On-chain programs (Solana devnet)
 
 | Program | Address | Purpose |
 |---------|---------|---------|
-| `rules-policy` | `<PROGRAM_ID>` | Recovery primary + M-of-N quorum + cooldown + daily limit |
-| `allowlist-destinations` | `<PROGRAM_ID>` | Restrict signing to whitelisted destination programs |
-| `velocity-guard` | `<PROGRAM_ID>` | Rate-limit signatures per slot window |
-| `time-lock` | `<PROGRAM_ID>` | Restrict signing to allowed slot ranges |
-| `oracle-conditional` | `<PROGRAM_ID>` | Pyth Pull V2 circuit breaker |
-| `passkey-step-up` | `<PROGRAM_ID>` | Require passkey proof above threshold |
-| `fhe-gated` | `<PROGRAM_ID>` | Gate signing on confidential FHE evaluation |
-| `session-keys` | `<PROGRAM_ID>` | Multi-session scoped delegation |
+| rules-policy | PROGRAM_ID | Recovery primary + M-of-N quorum + cooldown + daily limit |
+| allowlist-destinations | PROGRAM_ID | Restrict signing to whitelisted destination programs |
+| velocity-guard | PROGRAM_ID | Rate-limit signatures per slot window |
+| time-lock | PROGRAM_ID | Restrict signing to allowed slot ranges |
+| oracle-conditional | PROGRAM_ID | Pyth Pull V2 circuit breaker |
+| passkey-step-up | PROGRAM_ID | Require passkey proof above threshold |
+| fhe-gated | PROGRAM_ID | Gate signing on confidential FHE evaluation |
+| session-keys | PROGRAM_ID | Multi-session scoped delegation |
 
 ---
 
@@ -319,4 +321,4 @@ Dual-licensed under **Apache-2.0 OR MIT**.
 
 ## Team
 
-Built by **Shinka Labs** (`shinkalabs.com`).
+Built by **Shinka Labs** — shinkalabs.com
