@@ -1,0 +1,16 @@
+[package]
+name = "andromeda_policy_shared"
+version = "0.1.0"
+edition = "2021"
+description = "Shared helpers for Andromeda policy templates (Quasar)."
+license = "Apache-2.0 OR MIT"
+
+[lib]
+crate-type = ["lib"]
+
+[dependencies]
+quasar-lang = { git = "https://github.com/blueshift-gg/quasar" }
+ika-dwallet-quasar = { git = "https://github.com/dwallet-labs/ika-pre-alpha" }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }

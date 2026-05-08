@@ -1,0 +1,8 @@
+[program]
+name = "andromeda_passkey_step_up"
+
+[toolchain]
+type = "solana"
+
+[deploy]
+cluster = "devnet"

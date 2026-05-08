@@ -1,0 +1,15 @@
+[package]
+name = "andromeda_auth"
+version = "0.1.0"
+edition = "2021"
+description = "Shared on-chain auth primitives for Andromeda Quasar policies — challenge construction, member-slot canonical layout, and Solana precompile verification (Ed25519 / Secp256k1 / Secp256r1 / WebAuthn)."
+license = "Apache-2.0 OR MIT"
+
+[lib]
+crate-type = ["lib"]
+
+[dependencies]
+solana-address = { version = "2.2.0", features = ["curve25519", "decode"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }

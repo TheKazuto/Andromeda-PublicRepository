@@ -1,0 +1,8 @@
+[program]
+name = "andromeda_oracle_conditional"
+
+[toolchain]
+type = "solana"
+
+[deploy]
+cluster = "devnet"

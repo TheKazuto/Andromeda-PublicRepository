@@ -1,0 +1,8 @@
+[program]
+name = "andromeda_session_keys"
+
+[toolchain]
+type = "solana"
+
+[deploy]
+cluster = "devnet"

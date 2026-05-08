@@ -1,0 +1,23 @@
+[package]
+name = "andromeda_oracle_conditional"
+version = "0.1.0"
+edition = "2021"
+description = "Oracle-conditional policy template — gates signing on a Pyth/Switchboard price predicate."
+license = "Apache-2.0 OR MIT"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+quasar-lang = { git = "https://github.com/blueshift-gg/quasar" }
+ika-dwallet-quasar = { git = "https://github.com/dwallet-labs/ika-pre-alpha" }
+solana-address = { version = "2.2.0", features = ["curve25519", "decode"] }
+andromeda_auth = { path = "../auth" }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }
+
+[profile.release]
+overflow-checks = true
+lto = "fat"
+codegen-units = 1
