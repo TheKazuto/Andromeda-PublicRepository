@@ -168,16 +168,16 @@ A live deployment is available — judge the platform without cloning anything.
 
 ```bash
 # Public capability snapshot — no auth
-curl <GATEWAY_URL>/capabilities
+curl https://api.andromedainfra.pro/capabilities
 
 # OpenAPI 3.1 spec — auto-generated from routes
-curl <GATEWAY_URL>/openapi.json
+curl https://api.andromedainfra.pro/openapi.json
 
 # Public pricing catalogue
-curl <GATEWAY_URL>/v1/pricing
+curl https://api.andromedainfra.pro/v1/pricing
 ```
 
-For authenticated endpoints, request a devnet API key by signing up at DASHBOARD_URL/signup.
+For authenticated endpoints, request a devnet API key by signing up at https://app.andromedainfra.pro/signup.
 
 ### Wallet-agnostic recovery (signature flow)
 
@@ -185,7 +185,7 @@ Demonstrates the gas-sponsored, challenge-based UX. The user signs a 32-byte cha
 
 ```bash
 # 1. Request a recovery challenge
-curl -X POST <GATEWAY_URL>/v1/recovery/primary/challenge \
+curl -X POST https://api.andromedainfra.pro/v1/recovery/primary/challenge \
   -H "X-Api-Key: $ANDROMEDA_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -198,7 +198,7 @@ curl -X POST <GATEWAY_URL>/v1/recovery/primary/challenge \
 #    (MetaMask, Phantom, Keplr, Sui Wallet, BTC cold wallet, passkey, etc.)
 
 # 3. Submit the signature — Andromeda pays gas and broadcasts
-curl -X POST <GATEWAY_URL>/v1/recovery/primary/submit \
+curl -X POST https://api.andromedainfra.pro/v1/recovery/primary/submit \
   -H "X-Api-Key: $ANDROMEDA_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -220,7 +220,7 @@ Drop the gateway endpoint into any MCP client (Claude Desktop, Cursor, custom):
 {
   "mcpServers": {
     "andromeda": {
-      "url": "<GATEWAY_URL>/mcp",
+      "url": "https://api.andromedainfra.pro/mcp",
       "headers": {
         "X-Api-Key": "<ANDROMEDA_KEY>"
       }
@@ -283,25 +283,25 @@ All artefacts live on Solana **devnet** during pre-alpha.
 
 | Component | URL / Address |
 |-----------|---------------|
-| Landing page | LANDING_URL |
-| Dashboard | DASHBOARD_URL |
-| Gateway API | GATEWAY_URL |
-| OpenAPI spec | GATEWAY_URL/openapi.json |
-| MCP endpoint | GATEWAY_URL/mcp |
-| Capabilities endpoint | GATEWAY_URL/capabilities |
+| Landing page | https://andromedainfra.pro |
+| Dashboard | https://app.andromedainfra.pro |
+| Gateway API | https://api.andromedainfra.pro |
+| OpenAPI spec | https://api.andromedainfra.pro/openapi.json |
+| MCP endpoint | https://api.andromedainfra.pro/mcp |
+| Capabilities endpoint | https://api.andromedainfra.pro/capabilities |
 
 ### On-chain programs (Solana devnet)
 
 | Program | Address | Purpose |
 |---------|---------|---------|
-| rules-policy | PROGRAM_ID | Recovery primary + M-of-N quorum + cooldown + daily limit |
-| allowlist-destinations | PROGRAM_ID | Restrict signing to whitelisted destination programs |
-| velocity-guard | PROGRAM_ID | Rate-limit signatures per slot window |
-| time-lock | PROGRAM_ID | Restrict signing to allowed slot ranges |
-| oracle-conditional | PROGRAM_ID | Pyth Pull V2 circuit breaker |
-| passkey-step-up | PROGRAM_ID | Require passkey proof above threshold |
-| fhe-gated | PROGRAM_ID | Gate signing on confidential FHE evaluation |
-| session-keys | PROGRAM_ID | Multi-session scoped delegation |
+| rules-policy | 6TX7qG47Fsocuwmgsgo2q3NLCHrbomoQxQLifapU8Thr | Recovery primary + M-of-N quorum + cooldown + daily limit |
+| allowlist-destinations | 91hycWu3sTbRELUDBTkqbyaEse1fVFDX3RmW9uPNQqFx | Restrict signing to whitelisted destination programs |
+| velocity-guard | DVAkrYe4SWzihvbh94GC6aB7ESf1h4yxiSDyetq1jkdW | Rate-limit signatures per slot window |
+| time-lock | 2i4bE6s7oc8kkziQETy55SGWQXxwotkpERr9XMv7Q7qs | Restrict signing to allowed slot ranges |
+| oracle-conditional | Wi6x2Y4YTYcv4aMz7AQRF2UELE36fZNKhsAoCFq2ssM | Pyth Pull V2 circuit breaker |
+| passkey-step-up | 7xNwfNHtN11kf5JFNhsQTuciBskmWmZ8XcHSAeNdvorC | Require passkey proof above threshold |
+| fhe-gated | 6NhfKThEydSHH6R7gBm94reo3simopRJmb4nDzkKU7np | Gate signing on confidential FHE evaluation |
+| session-keys | 3Y2QaXiJH3aSiooDnGQsZQhYN72r47mYYbHp9YWyiASm | Multi-session scoped delegation |
 
 ---
 
