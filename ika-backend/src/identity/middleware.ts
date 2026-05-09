@@ -10,7 +10,7 @@ import { fail } from '../types.js'
 import { InvalidProductJwtError, verifyProductJwt } from './jwt.js'
 
 function readServiceApiKey(): string {
-  return process.env.IKA_SERVICE_API_KEY?.trim() ?? ''
+  return process.env.INTERNAL_API_KEY?.trim() ?? ''
 }
 
 function timingSafeEqualString(expected: string, provided: string): boolean {

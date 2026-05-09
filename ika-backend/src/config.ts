@@ -23,7 +23,7 @@ const baseSchema = z.object({
   ikaProgramId: z.string().min(32),
   solanaRpcUrl: z.string().url(),
   solanaCommitment: z.enum(['processed', 'confirmed', 'finalized']).default('confirmed'),
-  serviceApiKey: z.string().min(1, 'IKA_SERVICE_API_KEY is required'),
+  serviceApiKey: z.string().min(1, 'INTERNAL_API_KEY is required'),
   adminApiKey: z.string().optional(),
   allowedOrigins: z.array(z.string()).default([]),
 })
@@ -91,7 +91,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     ikaProgramId: env.IKA_PROGRAM_ID,
     solanaRpcUrl: env.SOLANA_RPC_URL,
     solanaCommitment: env.SOLANA_COMMITMENT ?? 'confirmed',
-    serviceApiKey: env.IKA_SERVICE_API_KEY,
+    serviceApiKey: env.INTERNAL_API_KEY,
     adminApiKey: env.IKA_ADMIN_API_KEY,
     allowedOrigins: csv(env.ALLOWED_ORIGINS),
   }

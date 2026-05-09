@@ -6,7 +6,7 @@ const baseEnv = {
   IKA_GRPC_URL: 'https://pre-alpha-dev-1.ika.ika-network.net:443',
   IKA_PROGRAM_ID: '87W54kGYFQ1rgWqMeu4XTPHWXWmXSQCcjm8vCTfiq1oY',
   SOLANA_RPC_URL: 'https://api.devnet.solana.com',
-  IKA_SERVICE_API_KEY: 'test-key',
+  INTERNAL_API_KEY: 'test-key',
 }
 
 describe('config', () => {
