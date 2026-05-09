@@ -63,7 +63,7 @@ ika-backend/
 
 ## Endpoints
 
-Every route under `/v1/*` requires `X-Api-Key` (`IKA_SERVICE_API_KEY`).
+Every route under `/v1/*` requires `X-Api-Key` (`INTERNAL_API_KEY`).
 
 ### MPC engine
 - `POST /v1/dwallet/dkg/prepare` — returns envelope hint
@@ -133,7 +133,7 @@ OAuth (Google/Apple/Twitter/GitHub), email magic link, passkey-as-identity (WebA
 ### Required
 | Var | Notes |
 |-----|-------|
-| `IKA_SERVICE_API_KEY` | Secret for the `X-Api-Key` header. |
+| `INTERNAL_API_KEY` | Secret for the `X-Api-Key` header. |
 | `DATABASE_URL` | Postgres DSN. |
 | `IKA_GRPC_URL` | Ika validator network gRPC (`pre-alpha-dev-1.ika.ika-network.net:443`). |
 | `IKA_PROGRAM_ID` | Ika Solana program ID. |
@@ -174,7 +174,7 @@ Enabled by `IKA_IDENTITY_ENABLED=true`. Each provider opt-in individually.
 
 ```bash
 cp .env.example .env
-# fill at minimum: IKA_SERVICE_API_KEY, DATABASE_URL, IKA_GRPC_URL,
+# fill at minimum: INTERNAL_API_KEY, DATABASE_URL, IKA_GRPC_URL,
 #                  SOLANA_RPC_URL, IKA_PROGRAM_ID
 
 # Proto files from upstream Ika
