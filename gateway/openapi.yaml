@@ -1,0 +1,594 @@
+openapi: 3.1.0
+info:
+  title: Andromeda Gateway API
+  description: |
+    Andromeda is the hosted infrastructure that exposes Ika (Solana 2PC-MPC dWallets)
+    and Encrypt (FHE on Solana) via a single REST API. The gateway authenticates
+    requests with API keys, applies rate-limiting, charges per-tenant quotas, and
+    proxies to the engine backends in a private network.
+
+    All requests under `/v1/*` require `X-Api-Key`. Idempotent endpoints accept
+    `Idempotency-Key` (24h TTL, body-hash collision detection).
+  version: "1.0.0"
+  contact:
+    name: Andromeda
+    url: https://andromeda.shinkalabs.com
+servers:
+  - url: https://andromeda-gateway-production.up.railway.app
+    description: Production
+  - url: http://localhost:8081
+    description: Local development
+
+security:
+  - apiKey: []
+
+components:
+  securitySchemes:
+    apiKey:
+      type: apiKey
+      in: header
+      name: X-Api-Key
+    adminToken:
+      type: apiKey
+      in: header
+      name: X-Admin-Token
+
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      schema:
+        type: string
+        minLength: 8
+        maxLength: 200
+      description: |
+        Optional idempotency key (8–200 chars). Successful (2xx) and client-error
+        (4xx) responses are cached for 24h. Replays return `Idempotent-Replay: true`.
+        Different body with the same key returns 422.
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string }
+            message: { type: string }
+
+    UnsignedTx:
+      type: object
+      properties:
+        unsignedTxBase64: { type: string, description: "Base64-encoded VersionedTransaction" }
+
+    DKGPrepareRequest:
+      type: object
+      required: [userPubkey, curve]
+      properties:
+        userPubkey: { type: string, description: "Base64 user public key" }
+        curve:
+          type: string
+          enum: [secp256k1, ed25519, secp256r1, ristretto]
+        sessionId: { type: string }
+
+    SignSubmitRequest:
+      type: object
+      required: [userSignatureBase64, signedRequestDataBase64]
+      properties:
+        userSignatureBase64: { type: string }
+        signedRequestDataBase64: { type: string }
+
+    WebhookEndpoint:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        url: { type: string, format: uri }
+        events:
+          type: array
+          items: { type: string }
+        active: { type: boolean }
+        createdAt: { type: string, format: date-time }
+        lastSuccessAt: { type: string, format: date-time, nullable: true }
+        lastFailureAt: { type: string, format: date-time, nullable: true }
+        failureCount: { type: integer }
+
+    WebhookCreateRequest:
+      type: object
+      required: [url, events]
+      properties:
+        url: { type: string, format: uri }
+        events:
+          type: array
+          items: { type: string }
+          example: ["signature.completed", "policy.violation"]
+        secret:
+          type: string
+          description: "If omitted, gateway generates one and returns it once."
+
+    AuditEntry:
+      type: object
+      properties:
+        seq: { type: integer, format: int64 }
+        apiKeyId: { type: string, format: uuid }
+        ts: { type: string, format: date-time }
+        eventType: { type: string }
+        resourceType: { type: string }
+        resourceId: { type: string }
+        actor: { type: string }
+        payload: { type: object }
+        cuConsumed: { type: integer, nullable: true }
+        prevHashB64: { type: string }
+        entryHashB64: { type: string }
+        signatureB64: { type: string }
+
+    PolicyTemplate:
+      type: object
+      properties:
+        name: { type: string, example: "rules-policy" }
+        programId: { type: string }
+        version: { type: string }
+        description: { type: string }
+
+paths:
+  /health:
+    get:
+      summary: Liveness probe
+      security: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+
+  # ---------- ika-backend (MPC engine) ----------
+  /v1/dwallet/dkg/prepare:
+    post:
+      summary: Prepare DKG (dWallet creation) — returns unsigned tx
+      tags: [dWallet]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DKGPrepareRequest" }
+      responses:
+        "200":
+          description: Unsigned tx ready for client signature
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UnsignedTx" }
+        "401": { description: Missing/invalid X-Api-Key, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "403": { description: No active subscription, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+
+  /v1/dwallet/dkg/submit:
+    post:
+      summary: Submit signed DKG transaction
+      tags: [dWallet]
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SignSubmitRequest" }
+      responses:
+        "200": { description: Submission result, content: { application/json: { schema: { type: object } } } }
+        "422": { description: Idempotency-Key collision, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+
+  /v1/dwallet/sign/submit:
+    post:
+      summary: Submit signed signing request
+      tags: [dWallet]
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SignSubmitRequest" }
+      responses:
+        "200":
+          description: Raw signature bytes
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  signatureHex: { type: string }
+
+  /v1/dwallet/presign/submit:
+    post:
+      summary: Submit presign material
+      tags: [dWallet]
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/SignSubmitRequest" } } } }
+      responses: { "200": { description: OK } }
+
+  /v1/dwallet/future-sign/submit:
+    post:
+      summary: Submit a partial-user-signature for a future-sign trigger
+      tags: [dWallet]
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/SignSubmitRequest" } } } }
+      responses: { "200": { description: OK } }
+
+  /v1/dwallet/future-sign/complete/submit:
+    post:
+      summary: Complete a future-sign once the trigger fires
+      tags: [dWallet]
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/SignSubmitRequest" } } } }
+      responses: { "200": { description: OK } }
+
+  /v1/dwallet/presigns/{userPubkey}:
+    get:
+      summary: List unused presigns for a user
+      tags: [dWallet]
+      parameters:
+        - { name: userPubkey, in: path, required: true, schema: { type: string } }
+      responses: { "200": { description: OK } }
+
+  # ---------- Recovery ----------
+  /v1/recovery/challenge:
+    post:
+      summary: Start a recovery flow — returns nonce + message to sign
+      tags: [Recovery]
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      responses: { "200": { description: OK } }
+
+  /v1/recovery/resolve:
+    post:
+      summary: Resolve a recovery flow — returns dWallets owned by the proven identity
+      tags: [Recovery]
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      responses: { "200": { description: OK } }
+
+  /v1/recovery/policy/preview:
+    post:
+      summary: Preview the on-chain RulesPolicy state
+      tags: [Recovery]
+      responses: { "200": { description: OK } }
+
+  /v1/recovery/policy/{dwalletAddress}:
+    get:
+      summary: Read on-chain RulesPolicy for a dWallet
+      tags: [Recovery]
+      parameters:
+        - { name: dwalletAddress, in: path, required: true, schema: { type: string } }
+      responses: { "200": { description: OK } }
+
+  # ---------- Identity ----------
+  /v1/identity/email/request:
+    post:
+      summary: Request a magic-link email for identity verification
+      tags: [Identity]
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      responses:
+        "200": { description: Always 200 (anti-enumeration), content: { application/json: { schema: { type: object } } } }
+
+  /v1/identity/email/verify:
+    post:
+      summary: Consume an email magic-link token
+      tags: [Identity]
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      responses: { "200": { description: OK } }
+
+  # ---------- encrypt-backend ----------
+  /v1/private-tx/submit:
+    post:
+      summary: Submit a signed private (FHE-protected) transaction
+      tags: [Encrypt]
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      responses: { "200": { description: OK } }
+
+  /v1/graph/execute/prepare:
+    post:
+      summary: Prepare an FHE graph execute transaction
+      tags: [Encrypt]
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      responses: { "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/UnsignedTx" } } } } }
+
+  /v1/decrypt/request/prepare:
+    post:
+      summary: Prepare a decrypt request transaction
+      tags: [Encrypt]
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      responses: { "200": { description: OK } }
+
+  /v1/decrypt/poll/{account}:
+    get:
+      summary: Poll a decrypt request for completion
+      tags: [Encrypt]
+      parameters:
+        - { name: account, in: path, required: true, schema: { type: string } }
+      responses: { "200": { description: OK } }
+
+  # ---------- Webhooks ----------
+  /v1/webhooks/endpoints:
+    get:
+      summary: List webhook endpoints for the calling tenant
+      tags: [Webhooks]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/WebhookEndpoint" }
+    post:
+      summary: Create a webhook endpoint
+      tags: [Webhooks]
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/WebhookCreateRequest" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/WebhookEndpoint"
+                  - type: object
+                    properties:
+                      secret: { type: string, description: "Returned only on creation; store securely." }
+
+  /v1/webhooks/endpoints/{id}:
+    patch:
+      summary: Update a webhook endpoint
+      tags: [Webhooks]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      responses: { "200": { description: OK } }
+    delete:
+      summary: Delete a webhook endpoint
+      tags: [Webhooks]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      responses: { "204": { description: Deleted } }
+
+  /v1/webhooks/endpoints/{id}/test:
+    post:
+      summary: Send a test event to a webhook endpoint
+      tags: [Webhooks]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses: { "202": { description: Test enqueued } }
+
+  /v1/webhooks/deliveries:
+    get:
+      summary: List webhook deliveries
+      tags: [Webhooks]
+      parameters:
+        - { name: endpoint_id, in: query, schema: { type: string, format: uuid } }
+        - { name: status, in: query, schema: { type: string, enum: [pending, in_flight, delivered, failed, dead_letter] } }
+        - { name: limit, in: query, schema: { type: integer, default: 50 } }
+      responses: { "200": { description: OK } }
+
+  # ---------- Audit ----------
+  /v1/audit/log:
+    get:
+      summary: Paginated audit log (per-tenant chain)
+      tags: [Audit]
+      parameters:
+        - { name: after_seq, in: query, schema: { type: integer, format: int64 } }
+        - { name: event_type, in: query, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, default: 50, maximum: 500 } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/AuditEntry" }
+                  nextSeq: { type: integer, format: int64, nullable: true }
+
+  /v1/audit/log/export:
+    get:
+      summary: Streaming JSONL export of the full audit chain
+      tags: [Audit]
+      responses:
+        "200":
+          description: JSONL stream
+          content:
+            application/jsonl: {}
+
+  /v1/audit/log/verify:
+    get:
+      summary: Returns the audit signer pubkey + chain head
+      tags: [Audit]
+      security: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  publicKeyB64: { type: string }
+                  algorithm: { type: string, example: "ed25519" }
+
+  /v1/audit/log/{seq}/proof:
+    get:
+      summary: Single-entry proof (prev_hash, entry_hash, signature)
+      tags: [Audit]
+      parameters:
+        - { name: seq, in: path, required: true, schema: { type: integer, format: int64 } }
+      responses: { "200": { description: OK } }
+
+  # ---------- Policies (Sprint 3) ----------
+  /v1/policies/templates:
+    get:
+      summary: List available policy templates
+      tags: [Policies]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/PolicyTemplate" }
+
+  /v1/policies/{template}/init/prepare:
+    post:
+      summary: Build the unsigned tx that creates a policy
+      tags: [Policies]
+      parameters:
+        - { name: template, in: path, required: true, schema: { type: string } }
+      responses: { "200": { description: OK } }
+
+  /v1/policies/{address}/request-signature:
+    post:
+      summary: Request a signature gated by the policy
+      tags: [Policies]
+      parameters:
+        - { name: address, in: path, required: true, schema: { type: string } }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      responses: { "200": { description: OK } }
+
+  /v1/signatures/simulate:
+    post:
+      summary: Dry-run a request_signature without burning gas / presigns
+      tags: [Policies]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [template, dwallet_address, dwallet_curve, dwallet_public_key_base64, payer_address, message_digest_base64, user_pubkey_base64, signature_scheme]
+              properties:
+                template: { type: string, enum: [time-lock, velocity-guard, allowlist-destinations] }
+                dwallet_address: { type: string }
+                dwallet_curve: { type: integer, enum: [0, 1, 2, 3] }
+                dwallet_public_key_base64: { type: string }
+                payer_address: { type: string }
+                message_digest_base64: { type: string }
+                metadata_digest_base64: { type: string }
+                user_pubkey_base64: { type: string }
+                signature_scheme: { type: integer }
+                cpi_authority_bump: { type: integer }
+                current_slot: { type: integer }
+                destination: { type: string, description: "allowlist-only" }
+      responses:
+        "200":
+          description: Simulation result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  would_succeed: { type: boolean }
+                  boundary: { type: string, enum: [policy, ika_cpi, succeeded] }
+                  policy_error: { type: string, nullable: true }
+                  estimated_cu: { type: integer, description: "CUs consumed by the policy program" }
+                  estimated_cu_total: { type: integer }
+                  logs: { type: array, items: { type: string } }
+                  would_emit_events: { type: array, items: { type: string } }
+
+  /v1/signatures/batch:
+    post:
+      summary: Bundle N request_signature calls into K transactions (auto-batched)
+      tags: [Policies]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [requests]
+              properties:
+                max_per_tx:
+                  type: integer
+                  description: "Cap of instructions per packed tx (default 8, max 16)"
+                requests:
+                  type: array
+                  maxItems: 64
+                  items:
+                    type: object
+                    description: "Same shape as POST /v1/policies/{template}/request-signature, plus a `template` field."
+      responses:
+        "200":
+          description: Packed batches
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  batches:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        unsigned_tx_base64: { type: string }
+                        request_indices: { type: array, items: { type: integer } }
+                        size_bytes: { type: integer }
+
+  /v1/policies/{address}/sdk:
+    get:
+      summary: Return SDK metadata + tarball URL for a deployed policy
+      tags: [Policies]
+      parameters:
+        - { name: address, in: path, required: true, schema: { type: string } }
+      responses: { "200": { description: OK } }
+
+  # ---------- Future-Sign Triggers (Sprint 4) ----------
+  /v1/future-sign/triggers:
+    post:
+      summary: Arm a future-sign trigger
+      tags: [FutureSign]
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [partialSigCapId, dwalletAddress, triggerType, condition, webhookUrl, expiresInSeconds]
+              properties:
+                partialSigCapId: { type: string }
+                dwalletAddress: { type: string }
+                triggerType: { type: string, enum: [oracle_pyth, oracle_switchboard, solana_event, slot_time, external_webhook] }
+                condition: { type: object }
+                webhookUrl: { type: string, format: uri }
+                expiresInSeconds: { type: integer }
+      responses: { "201": { description: Trigger armed } }
+    get:
+      summary: List triggers for the calling tenant
+      tags: [FutureSign]
+      responses: { "200": { description: OK } }
+
+  /v1/future-sign/triggers/{id}:
+    get:
+      summary: Get trigger status
+      tags: [FutureSign]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses: { "200": { description: OK } }
+    delete:
+      summary: Cancel an armed trigger
+      tags: [FutureSign]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses: { "204": { description: Cancelled } }
