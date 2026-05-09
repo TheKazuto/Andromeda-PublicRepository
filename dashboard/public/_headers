@@ -1,0 +1,18 @@
+# Cloudflare Pages — security headers for the Andromeda dashboard.
+#
+# Next.js static export does not emit response headers itself, so this file
+# is the single source of truth for the dashboard's HTTP security posture.
+# Cloudflare Pages reads `_headers` straight from the build output (the
+# `public/` directory is copied to `out/` by Next.js during `next build`).
+#
+# When the API URLs change, update `connect-src` below.
+
+/*
+  X-Frame-Options: DENY
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+  Strict-Transport-Security: max-age=31536000; includeSubDomains; preload
+  Permissions-Policy: geolocation=(), microphone=(), camera=(), payment=()
+  Cross-Origin-Opener-Policy: same-origin
+  Cross-Origin-Resource-Policy: same-site
+  Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: blob:; font-src 'self' data: https://fonts.gstatic.com; connect-src 'self' https://api.andromedainfra.pro https://auth.andromedainfra.pro https://cloudflareinsights.com; frame-ancestors 'none'; form-action 'self'; base-uri 'self'; object-src 'none'; upgrade-insecure-requests

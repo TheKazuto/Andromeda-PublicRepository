@@ -1,0 +1,173 @@
+/* Tailwind v4 — CSS-first config via @theme. No tailwind.config.ts needed. */
+/* Google Fonts are loaded via <link> in app/layout.tsx — Tailwind v4 expands
+   the "tailwindcss" import inline, so any subsequent @import would violate the
+   CSS spec (must precede non-@layer rules). */
+@import "tailwindcss";
+
+/* Tell v4 where to scan for utility class usage. */
+@source "../app/**/*.{ts,tsx}";
+@source "../components/**/*.{ts,tsx}";
+@source "../lib/**/*.{ts,tsx}";
+
+@theme {
+  /* ----- Colors (obsidian + ember palette) ----- */
+  --color-void: #040506;
+  --color-charcoal: #07080a;
+
+  --color-graphite-900: #0b0c0e;
+  --color-graphite-800: #0f1012;
+  --color-graphite-700: #111214;
+  --color-graphite-600: #1b1c1e;
+  --color-graphite-500: #26272a;
+  --color-graphite-400: #363739;
+  --color-graphite-300: #454647;
+
+  --color-slate-400: #6a6b6c;
+  --color-slate-300: #9c9c9d;
+  --color-slate-200: #bdbdbe;
+
+  --color-ash: #e6e6e6;
+  --color-snow: #ffffff;
+
+  --color-ember: #ff4d4d;
+  --color-ember-soft: #ff8a8a;
+  --color-ember-deep: #c11b1b;
+  --color-ember-dark: #5a0a14;
+
+  --color-signal-mint: #59d499;
+  --color-signal-amber: #ffb347;
+
+  /* ----- Fonts ----- */
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+
+  /* ----- Border Radius ----- */
+  --radius-card: 11px;
+  --radius-cardlg: 16px;
+  --radius-pill: 99px;
+
+  /* ----- Shadows ----- */
+  --shadow-card: rgba(0, 0, 0, 0.4) 0px 30px 50px 0px,
+                 rgba(193, 27, 27, 0.10) 0px 4px 24px 0px,
+                 rgba(255, 255, 255, 0.06) 0px 0px 0px 1px inset;
+  --shadow-ring: rgb(27, 28, 30) 0px 0px 0px 1px,
+                 rgb(7, 8, 10) 0px 0px 0px 1px inset;
+  --shadow-ember: rgba(255, 77, 77, 0.22) 0px 0px 60px 0px,
+                  rgba(193, 27, 27, 0.10) 0px 0px 30px 0px;
+  --shadow-inset: rgba(255, 255, 255, 0.06) 0px 0px 0px 1px inset;
+
+  /* ----- Letter spacing ----- */
+  --tracking-tighter: -0.025em;
+  --tracking-display: -0.04em;
+
+  /* ----- Animations ----- */
+  --animate-fade-up: fade-up 360ms cubic-bezier(0.23, 1, 0.32, 1) both;
+}
+
+@keyframes fade-up {
+  0% {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body {
+  background: #040506;
+  color: #ffffff;
+  font-family: var(--font-sans);
+  font-feature-settings: "calt", "kern", "liga", "ss03";
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+::selection {
+  background: rgba(255, 77, 77, 0.4);
+  color: #fff;
+}
+
+/* Subtle scrollbar */
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 99px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.12);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+@layer components {
+  .card {
+    @apply bg-charcoal border border-white/[0.06] rounded-cardlg shadow-card;
+  }
+  .input-base {
+    @apply w-full bg-graphite-700/60 border border-white/[0.08] rounded-lg px-3 py-2.5
+           text-sm text-snow placeholder:text-slate-400
+           focus:outline-none focus:border-ember/40 focus:ring-2 focus:ring-ember/15
+           transition-colors;
+  }
+  .label-base {
+    @apply text-xs uppercase text-slate-400 font-medium;
+    letter-spacing: 0.12em;
+  }
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg
+           bg-ash text-graphite-700 text-sm font-medium
+           hover:bg-snow transition-colors disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+  .btn-secondary {
+    @apply inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg
+           bg-graphite-700 text-snow text-sm font-medium border border-white/[0.08]
+           hover:bg-graphite-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+  .btn-ghost {
+    @apply inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg
+           bg-transparent text-slate-300 text-sm font-medium
+           hover:bg-white/[0.04] hover:text-snow transition-colors;
+  }
+  .btn-danger {
+    @apply inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg
+           bg-ember/10 text-ember-soft text-sm font-medium border border-ember/20
+           hover:bg-ember/20 transition-colors;
+  }
+  .badge {
+    @apply inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md
+           bg-graphite-600 text-xs font-medium text-snow;
+    letter-spacing: 0.04em;
+  }
+  .badge-ember {
+    @apply inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md
+           bg-ember/[0.12] text-ember-soft text-xs font-medium
+           border border-ember/20;
+    letter-spacing: 0.04em;
+  }
+  .badge-mint {
+    @apply inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md
+           bg-signal-mint/10 text-signal-mint text-xs font-medium
+           border border-signal-mint/20;
+    letter-spacing: 0.04em;
+  }
+}
+
+/* Per-page atmosphere — subtle ember radial behind hero areas */
+.atmosphere-ember {
+  background: radial-gradient(60% 40% at 50% 0%, rgba(255, 77, 77, 0.12), rgba(4, 5, 6, 0) 70%);
+}
