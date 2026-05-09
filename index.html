@@ -1,0 +1,2789 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#040506" />
+  <title>Andromeda · Multichain Signing Infrastructure</title>
+  <meta name="description" content="Multichain signing infrastructure for apps and agents. One API or MCP server, custody-free flows, private execution, and resilient recovery." />
+  <meta property="og:title" content="Andromeda · Multichain Signing Infrastructure" />
+  <meta property="og:description" content="One endpoint for secure signing, private execution, and resilient wallet recovery across chains." />
+  <meta property="og:type" content="website" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet" />
+  <link rel="icon" type="image/png" href="Logo.png" />
+  <link rel="apple-touch-icon" href="Logo.png" />
+  <style>
+    /* ============================================================
+       Andromeda — Obsidian void, Andromeda red, galaxy as voice
+       ============================================================ */
+    :root {
+      --color-void:           #040506;
+      --color-deep:           #07080a;
+      --color-graphite-700:   #111214;
+      --color-graphite-600:   #1b1c1e;
+      --color-graphite-500:   #363739;
+      --color-graphite-400:   #454647;
+      --color-slate-300:      #6a6b6c;
+      --color-slate-200:      #9c9c9d;
+      --color-ash-50:         #e6e6e6;
+      --color-snow:           #ffffff;
+
+      --color-andromeda:      #ff4d4d;
+      --color-andromeda-deep: #c11b1b;
+      --color-andromeda-glow: rgba(255, 77, 77, 0.40);
+      --color-andromeda-soft: rgba(255, 77, 77, 0.10);
+
+      --gradient-galactic-glow:
+        radial-gradient(60% 50% at 50% 30%, rgba(60,10,20,0.30), transparent 70%),
+        radial-gradient(50% 40% at 80% 80%, rgba(80,15,15,0.18), transparent 70%);
+
+      --font-display: 'Inter', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      --font-serif: 'Instrument Serif', ui-serif, Georgia, 'Times New Roman', serif;
+      --font-mono:    'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+
+      --page-max: 1240px;
+      --gutter:   clamp(20px, 4vw, 40px);
+
+      --shadow-key:
+        rgba(0,0,0,0.4) 0 1.5px 0.5px 2.5px,
+        rgb(0,0,0)      0 0 0.5px 1px,
+        rgba(0,0,0,0.25) 0 2px 1px 1px inset,
+        rgba(255,255,255,0.18) 0 1px 1px 1px inset;
+      --shadow-card:
+        rgba(0,0,0,0.45) 0 30px 60px 0,
+        rgba(193,27,27,0.10) 0 4px 24px 0,
+        rgba(255,255,255,0.06) 0 0 0 1px inset;
+      --shadow-glow:
+        rgba(255,77,77,0.18) 0 0 60px 0,
+        rgba(193,27,27,0.10) 0 0 28px 0;
+      --shadow-cta:
+        rgba(255,255,255,0.20) 0 1px 0 0 inset,
+        rgba(0,0,0,0.50) 0 24px 40px -12px;
+
+      --ease-out-quart: cubic-bezier(0.22, 1, 0.36, 1);
+      --ease-out-quint: cubic-bezier(0.23, 1, 0.32, 1);
+    }
+
+    *, *::before, *::after { box-sizing: border-box; }
+    html {
+      scroll-behavior: smooth;
+      -webkit-text-size-adjust: 100%;
+      scroll-padding-top: 96px;
+    }
+    body {
+      margin: 0;
+      background: var(--color-void);
+      color: var(--color-snow);
+      font-family: var(--font-display);
+      font-size: 16px;
+      line-height: 1.55;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+      font-feature-settings: 'calt', 'kern', 'liga', 'ss03';
+      overflow-x: hidden;
+    }
+    a {
+      color: inherit;
+      text-decoration: none;
+      transition: color 240ms var(--ease-out-quart);
+    }
+    button {
+      font-family: inherit;
+      cursor: pointer;
+      background: transparent;
+      border: 0;
+    }
+    img, svg { display: block; max-width: 100%; }
+    ::selection { background: rgba(255,77,77,0.42); color: #fff; }
+
+    /* Focus-visible (global, AA-grade ring) */
+    :focus { outline: none; }
+    a:focus-visible,
+    button:focus-visible,
+    summary:focus-visible {
+      outline: 2px solid var(--color-ash-50);
+      outline-offset: 3px;
+      border-radius: 4px;
+    }
+
+    /* ============================================================
+       BACKGROUND STARFIELD (page-wide ambient field)
+       ============================================================ */
+    .starfield {
+      position: fixed;
+      inset: 0;
+      z-index: 0;
+      pointer-events: none;
+      background:
+        radial-gradient(1px 1px at 12% 18%,  rgba(255,255,255,0.7), transparent 60%),
+        radial-gradient(1px 1px at 27% 71%,  rgba(255,255,255,0.5), transparent 60%),
+        radial-gradient(1.5px 1.5px at 44% 33%, rgba(255,255,255,0.85), transparent 60%),
+        radial-gradient(1px 1px at 63% 22%,  rgba(255,255,255,0.4), transparent 60%),
+        radial-gradient(1px 1px at 79% 84%,  rgba(255,255,255,0.6), transparent 60%),
+        radial-gradient(1px 1px at 88% 47%,  rgba(255,255,255,0.4), transparent 60%),
+        radial-gradient(1px 1px at 6% 56%,   rgba(255,255,255,0.5), transparent 60%),
+        radial-gradient(1px 1px at 92% 12%,  rgba(255,255,255,0.7), transparent 60%),
+        radial-gradient(1px 1px at 32% 92%,  rgba(255,255,255,0.45), transparent 60%),
+        radial-gradient(1.5px 1.5px at 55% 64%, rgba(255,255,255,0.75), transparent 60%),
+        radial-gradient(1px 1px at 71% 58%,  rgba(255,255,255,0.5), transparent 60%),
+        radial-gradient(1px 1px at 18% 38%,  rgba(255,255,255,0.5), transparent 60%);
+      opacity: 0.24;
+    }
+
+    /* ============================================================
+       LAYOUT PRIMITIVES
+       ============================================================ */
+    .wrap {
+      max-width: var(--page-max);
+      margin-inline: auto;
+      padding-inline: var(--gutter);
+      position: relative;
+      z-index: 2;
+    }
+    .stack > * + * { margin-top: var(--stack-gap, 16px); }
+    .mono {
+      font-family: var(--font-mono);
+      font-feature-settings: 'calt', 'kern', 'liga', 'ss03';
+    }
+    .uppercase-label {
+      font-family: var(--font-mono);
+      text-transform: uppercase;
+      font-size: 11px;
+      letter-spacing: 0.16em;
+      color: var(--color-andromeda);
+      font-weight: 500;
+    }
+
+    /* Section rhythm: varied gaps, not monotone padding */
+    .act {
+      position: relative;
+      padding-block: clamp(96px, 14vw, 192px);
+    }
+    .act--tight   { padding-block: clamp(72px,  9vw, 128px); }
+    .act--breathe { padding-block: clamp(120px, 18vw, 240px); }
+    #position { padding-bottom: clamp(48px, 7vw, 88px); }
+    #capabilities { padding-top: clamp(48px, 7vw, 88px); }
+    #capabilities { padding-bottom: clamp(52px, 7vw, 96px); }
+    #engine { padding-top: clamp(56px, 8vw, 104px); }
+    #engine { padding-bottom: clamp(56px, 8vw, 104px); }
+    #trust { padding-top: clamp(52px, 7vw, 92px); }
+
+    /* ============================================================
+       NAV
+       ============================================================ */
+    .nav-shell {
+      position: sticky;
+      top: 16px;
+      z-index: 50;
+      display: flex;
+      justify-content: center;
+      padding-inline: 16px;
+      pointer-events: none;
+    }
+    .nav {
+      pointer-events: auto;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 8px 8px 8px 18px;
+      background: rgba(7,8,10,0.66);
+      border: 1px solid rgba(255,255,255,0.06);
+      border-radius: 999px;
+      backdrop-filter: blur(18px) saturate(150%);
+      -webkit-backdrop-filter: blur(18px) saturate(150%);
+      box-shadow: rgba(0,0,0,0.45) 0 8px 28px 0;
+      width: 100%;
+      max-width: 940px;
+      transition: background 280ms var(--ease-out-quart), border-color 280ms var(--ease-out-quart);
+    }
+    .nav.is-scrolled {
+      background: rgba(7,8,10,0.86);
+      border-color: rgba(255,255,255,0.10);
+    }
+    .nav-brand {
+      display: flex;
+      align-items: center;
+      font-family: var(--font-serif);
+      font-style: italic;
+      font-weight: 400;
+      font-size: 24px;
+      line-height: 1;
+      letter-spacing: -0.03em;
+      color: var(--color-andromeda);
+    }
+    .nav-links {
+      display: flex;
+      gap: 4px;
+      margin-inline: auto;
+    }
+    .nav-links a {
+      padding: 8px 14px;
+      font-size: 13px;
+      color: var(--color-slate-200);
+      border-radius: 999px;
+    }
+    .nav-links a:hover { color: var(--color-snow); background: rgba(255,255,255,0.04); }
+    .nav-cta {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 9px 16px;
+      background: var(--color-ash-50);
+      color: #2f3031;
+      border-radius: 999px;
+      font-size: 13px;
+      font-weight: 500;
+      box-shadow: var(--shadow-cta);
+      transition: transform 240ms var(--ease-out-quart), background 240ms var(--ease-out-quart);
+    }
+    .nav-cta:hover { transform: translateY(-1px); background: #fff; }
+
+    @media (max-width: 820px) {
+      .nav-links { display: none; }
+    }
+
+    /* ============================================================
+       BUTTONS
+       ============================================================ */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      padding: 14px 22px;
+      border-radius: 12px;
+      font-size: 14px;
+      font-weight: 500;
+      letter-spacing: 0.005em;
+      border: 1px solid transparent;
+      transition:
+        transform 240ms var(--ease-out-quart),
+        background 240ms var(--ease-out-quart),
+        border-color 240ms var(--ease-out-quart),
+        box-shadow 280ms var(--ease-out-quart);
+      white-space: nowrap;
+    }
+    .btn--primary {
+      background: var(--color-ash-50);
+      color: #1a1a1b;
+      box-shadow: var(--shadow-cta);
+    }
+    .btn--primary:hover {
+      transform: translateY(-1px);
+      background: #fff;
+      box-shadow:
+        rgba(255,77,77,0.22) 0 0 0 1px,
+        var(--shadow-cta),
+        var(--shadow-glow);
+    }
+    .btn--ghost {
+      background: rgba(7,8,10,0.5);
+      color: var(--color-snow);
+      border-color: var(--color-graphite-400);
+      backdrop-filter: blur(8px);
+    }
+    .btn--ghost:hover { background: rgba(27,28,30,0.8); border-color: var(--color-graphite-500); }
+    .btn-arrow svg { transition: transform 280ms var(--ease-out-quart); }
+    .btn-arrow:hover svg { transform: translateX(3px); }
+
+    /* ============================================================
+       HERO (galaxy + thesis)
+       ============================================================ */
+    .hero {
+      position: relative;
+      min-height: 100vh;
+      min-height: 100svh;
+      display: block;
+      isolation: isolate;
+      overflow: hidden;
+    }
+    .hero-stage {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      isolation: isolate;
+      z-index: -1;
+      opacity: 1;
+      transition: opacity 0.25s linear;
+      will-change: opacity;
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .hero-stage {
+        position: absolute;
+        transition: none;
+      }
+    }
+    .hero-stage::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: var(--gradient-galactic-glow);
+      z-index: -2;
+      pointer-events: none;
+    }
+    .hero-stage::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background:
+        radial-gradient(38% 28% at 50% 50%, rgba(4,5,6,0.42), rgba(4,5,6,0) 80%),
+        linear-gradient(180deg, rgba(4,5,6,0.45) 0%, rgba(4,5,6,0) 25%, rgba(4,5,6,0) 70%, rgba(4,5,6,0.85) 100%);
+      z-index: -1;
+      pointer-events: none;
+    }
+
+    .hero-copy-frame {
+      position: relative;
+      height: 100vh;
+      height: 100svh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding-block: 140px 72px;
+      z-index: 1;
+    }
+
+    .hero-galaxy {
+      position: absolute;
+      inset: 0;
+      z-index: -2;
+      pointer-events: none;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      opacity: 0.88;
+      transform: translateZ(0);
+      will-change: transform;
+      backface-visibility: hidden;
+      -webkit-font-smoothing: antialiased;
+    }
+    .galaxy {
+      width: min(2200px, 210vw);
+      aspect-ratio: 1 / 1;
+      position: relative;
+      transform-origin: center;
+      will-change: transform;
+    }
+    .galaxy-stage {
+      width: 100%;
+      height: 100%;
+      display: block;
+      shape-rendering: geometricPrecision;
+      text-rendering: geometricPrecision;
+    }
+
+    /* Satellite galaxies — cosmic neighborhood revealed on scroll */
+    .satellite-galaxy {
+      position: absolute;
+      aspect-ratio: 1 / 1;
+      pointer-events: none;
+      opacity: 0;
+      transform: scale(0.4);
+      transform-origin: center;
+      will-change: opacity, transform;
+      filter: drop-shadow(0 0 18px rgba(255, 90, 90, 0.08));
+    }
+    .satellite-stage {
+      width: 100%;
+      height: 100%;
+      display: block;
+      shape-rendering: geometricPrecision;
+    }
+    .satellite-galaxy[data-pos="tl"] {
+      top: 4%;
+      left: 2%;
+      width: 27vw;
+      max-width: 440px;
+      min-width: 230px;
+    }
+    .satellite-galaxy[data-pos="tr"] {
+      top: 11%;
+      right: 5%;
+      width: 15vw;
+      max-width: 240px;
+      min-width: 150px;
+    }
+    .satellite-galaxy[data-pos="bl"] {
+      bottom: 8%;
+      left: 9%;
+      width: 21vw;
+      max-width: 350px;
+      min-width: 190px;
+    }
+    .satellite-galaxy[data-pos="br"] {
+      bottom: 3%;
+      right: 3%;
+      width: 11vw;
+      max-width: 190px;
+      min-width: 130px;
+    }
+    @media (max-width: 768px) {
+      .satellite-galaxy[data-pos="tl"] { top: 3%;  left: 1%;  width: 40vw; }
+      .satellite-galaxy[data-pos="tr"] { top: 8%;  right: 2%; width: 24vw; }
+      .satellite-galaxy[data-pos="bl"] { bottom: 14%; left: 3%;  width: 32vw; }
+      .satellite-galaxy[data-pos="br"] { bottom: 7%;  right: 2%; width: 20vw; }
+    }
+
+    .nebula-cloud {
+      position: absolute;
+      width: 55vw;
+      height: 55vw;
+      filter: blur(80px);
+      mix-blend-mode: screen;
+      opacity: 0.18;
+      animation: nebula-drift 32s ease-in-out infinite alternate;
+    }
+    .nebula-cloud--a {
+      top: -15%;
+      left: -15%;
+      background: radial-gradient(circle, rgba(180,40,40,0.55), transparent 65%);
+    }
+    .nebula-cloud--b {
+      bottom: -20%;
+      right: -15%;
+      background: radial-gradient(circle, rgba(120,15,30,0.55), transparent 65%);
+      animation-duration: 40s;
+      animation-delay: -12s;
+    }
+    @keyframes nebula-drift {
+      0%   { transform: translate(0, 0) scale(1); }
+      100% { transform: translate(40px, -30px) scale(1.08); }
+    }
+
+    .twinkle-layer {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+    }
+    .twinkle-layer span {
+      position: absolute;
+      border-radius: 999px;
+      background: #fff;
+      box-shadow: 0 0 3px rgba(255,255,255,0.55);
+      animation: twinkle 4s ease-in-out infinite;
+    }
+    .twinkle-layer span.is-bright { box-shadow: 0 0 5px rgba(255,255,255,0.85), 0 0 10px rgba(255,200,180,0.4); }
+    .twinkle-layer span.is-warm   { background: #ffe4c2; box-shadow: 0 0 5px rgba(255,228,194,0.7); }
+    .twinkle-layer span.is-cool   { background: #c2dcff; box-shadow: 0 0 5px rgba(194,220,255,0.6); }
+    .twinkle-layer span.is-pink   { background: #ffb3b3; box-shadow: 0 0 5px rgba(255,179,179,0.7); }
+    @keyframes twinkle {
+      0%, 100% { opacity: 0.15; transform: scale(0.7); }
+      50%      { opacity: 0.85; transform: scale(1.1); }
+    }
+
+    /* Hero copy block */
+    .hero-copy {
+      position: relative;
+      z-index: 2;
+      width: 100%;
+      max-width: 1100px;
+      text-align: center;
+      margin-inline: auto;
+    }
+    .hero h1 {
+      font-size: clamp(30px, 6.5vw, 76px);
+      line-height: 1.04;
+      letter-spacing: -0.035em;
+      font-weight: 600;
+      margin: 0 0 28px;
+      animation: fade-up 880ms 80ms var(--ease-out-quint) both;
+      text-shadow: 0 2px 28px rgba(4,5,6,0.85), 0 0 60px rgba(4,5,6,0.55);
+    }
+    .hero h1 .hero-line {
+      display: block;
+      white-space: nowrap;
+    }
+    .hero h1 .accent { color: var(--color-andromeda); }
+    .hero h1 .hero-line--serif {
+      font-family: var(--font-serif);
+      font-style: italic;
+      font-weight: 400;
+      font-size: clamp(1.12em, 1.22em, 1.26em);
+      line-height: 0.98;
+      letter-spacing: -0.02em;
+    }
+    @media (max-width: 520px) {
+      .hero h1 .hero-line { white-space: normal; }
+    }
+
+    .hero-lede {
+      max-width: 620px;
+      margin: 0 auto 40px;
+      font-size: clamp(16px, 1.55vw, 19px);
+      line-height: 1.55;
+      color: var(--color-snow);
+      animation: fade-up 880ms 180ms var(--ease-out-quint) both;
+      text-shadow: 0 1px 14px rgba(4,5,6,0.85);
+    }
+    .hero-lede em {
+      font-style: normal;
+      color: var(--color-slate-200);
+    }
+
+    .hero-ctas {
+      display: inline-flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      justify-content: center;
+      animation: fade-up 880ms 280ms var(--ease-out-quint) both;
+    }
+
+
+    /* ============================================================
+       ACT 2 — POSITION (prose-led, no cards)
+       ============================================================ */
+    .position {
+      display: grid;
+      grid-template-columns: minmax(0, 7fr) minmax(0, 5fr);
+      column-gap: clamp(40px, 7vw, 96px);
+      row-gap: 48px;
+      align-items: start;
+    }
+    .position-eyebrow {
+      grid-column: 1 / -1;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      margin-bottom: 8px;
+    }
+    .position-eyebrow .rule {
+      flex: 1;
+      height: 1px;
+      background: linear-gradient(to right, rgba(255,77,77,0.45), rgba(255,255,255,0.05));
+    }
+    .position h2 {
+      font-size: clamp(34px, 5.8vw, 76px);
+      line-height: 1.02;
+      letter-spacing: -0.034em;
+      font-weight: 600;
+      margin: 0;
+      text-wrap: balance;
+    }
+    .position h2 .accent { color: var(--color-andromeda); }
+    .position-body {
+      display: flex;
+      flex-direction: column;
+      gap: 22px;
+      max-width: 560px;
+      font-size: 16.5px;
+      line-height: 1.7;
+      color: var(--color-slate-200);
+    }
+    .position-body p { margin: 0; }
+    .position-body strong { color: var(--color-snow); font-weight: 500; }
+
+    @media (max-width: 920px) {
+      .position { grid-template-columns: 1fr; }
+    }
+
+    /* ============================================================
+       ACT 3 — CAPABILITIES (1 hero + 5 ledger)
+       ============================================================ */
+    .capabilities-head {
+      max-width: 760px;
+      margin-bottom: clamp(48px, 6vw, 80px);
+    }
+    .capabilities-head h2 {
+      font-size: clamp(34px, 5.8vw, 76px);
+      line-height: 1.02;
+      letter-spacing: -0.034em;
+      font-weight: 600;
+      margin: 12px 0 20px;
+      text-wrap: balance;
+    }
+    .capabilities-head p {
+      margin: 0;
+      max-width: 580px;
+      color: var(--color-slate-200);
+      font-size: 17px;
+      line-height: 1.6;
+    }
+    .capabilities-hero {
+      position: relative;
+      display: grid;
+      grid-template-columns: minmax(0, 8fr) minmax(0, 4fr);
+      gap: clamp(32px, 5vw, 64px);
+      align-items: center;
+      padding: clamp(40px, 6vw, 72px);
+      background:
+        radial-gradient(60% 80% at 100% 0%, rgba(255,77,77,0.10), transparent 70%),
+        linear-gradient(180deg, rgba(17,18,20,0.55), rgba(7,8,10,0.55));
+      border: 1px solid rgba(255,255,255,0.06);
+      border-radius: 24px;
+      box-shadow: var(--shadow-card), var(--shadow-glow);
+      overflow: hidden;
+      isolation: isolate;
+      margin-bottom: clamp(56px, 7vw, 96px);
+    }
+    .capabilities-hero::before {
+      content: '';
+      position: absolute;
+      inset: -1px;
+      background:
+        radial-gradient(80% 100% at 100% 0%, rgba(255,77,77,0.18), transparent 65%);
+      mix-blend-mode: screen;
+      pointer-events: none;
+      z-index: -1;
+    }
+    .capabilities-hero-text {
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+    }
+    .capabilities-hero-num {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: var(--color-andromeda);
+    }
+    .capabilities-hero h3 {
+      font-size: clamp(28px, 3.8vw, 48px);
+      line-height: 1.05;
+      letter-spacing: -0.025em;
+      font-weight: 600;
+      margin: 0;
+      text-wrap: balance;
+    }
+    .capabilities-hero p {
+      margin: 0;
+      max-width: 560px;
+      font-size: 15.5px;
+      line-height: 1.65;
+      color: var(--color-slate-200);
+    }
+    .capabilities-hero-visual {
+      position: relative;
+      aspect-ratio: 1 / 1;
+      max-width: 360px;
+      margin-inline: auto;
+      width: 100%;
+    }
+    .capabilities-hero-visual svg {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+
+    .ledger {
+      list-style: none;
+      padding: 0;
+      margin: 0;
+      display: flex;
+      flex-direction: column;
+    }
+    .ledger li {
+      display: grid;
+      grid-template-columns: 60px minmax(0, 1fr) minmax(220px, 2fr);
+      gap: clamp(16px, 4vw, 56px);
+      align-items: baseline;
+      padding-block: clamp(28px, 3.5vw, 44px);
+      border-top: 1px solid rgba(255,255,255,0.06);
+    }
+    .ledger li:last-child { border-bottom: 1px solid rgba(255,255,255,0.06); }
+    .ledger .num {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      letter-spacing: 0.16em;
+      color: var(--color-andromeda);
+      padding-top: 4px;
+    }
+    .ledger h4 {
+      margin: 0;
+      font-size: clamp(20px, 2.4vw, 28px);
+      line-height: 1.15;
+      letter-spacing: -0.018em;
+      font-weight: 600;
+    }
+    .ledger p {
+      margin: 0;
+      font-size: 15px;
+      line-height: 1.65;
+      color: var(--color-slate-200);
+    }
+    .ledger p code {
+      font-family: var(--font-mono);
+      font-size: 12.5px;
+      padding: 2px 6px;
+      background: rgba(255,77,77,0.10);
+      border: 1px solid rgba(255,77,77,0.20);
+      border-radius: 4px;
+      color: #ffb0b0;
+      letter-spacing: 0.02em;
+    }
+    @media (max-width: 820px) {
+      .capabilities-hero { grid-template-columns: 1fr; }
+      .ledger li {
+        grid-template-columns: 40px 1fr;
+        grid-template-areas:
+          'num title'
+          '.   body';
+        gap: 12px 16px;
+      }
+      .ledger .num { grid-area: num; }
+      .ledger h4 { grid-area: title; }
+      .ledger p { grid-area: body; }
+    }
+
+    /* ============================================================
+       ACT 4 — ENGINE (diagrams + code, alternating layouts)
+       ============================================================ */
+    .engine-intro {
+      max-width: 760px;
+      margin-bottom: clamp(64px, 8vw, 112px);
+    }
+    .engine-intro h2 {
+      font-size: clamp(34px, 5.8vw, 76px);
+      line-height: 1.02;
+      letter-spacing: -0.034em;
+      font-weight: 600;
+      margin: 12px 0 20px;
+      text-wrap: balance;
+    }
+    .engine-intro h2 .accent { color: var(--color-andromeda); }
+    .engine-intro p {
+      margin: 0;
+      max-width: 580px;
+      color: var(--color-slate-200);
+      font-size: 17px;
+      line-height: 1.6;
+    }
+
+    .protocol {
+      display: grid;
+      grid-template-columns: minmax(0, 6fr) minmax(0, 5fr);
+      gap: clamp(32px, 6vw, 96px);
+      align-items: center;
+      padding-block: clamp(64px, 9vw, 128px);
+      border-top: 1px solid rgba(255,255,255,0.05);
+    }
+    .protocol--flip {
+      grid-template-columns: minmax(0, 5fr) minmax(0, 6fr);
+    }
+    .protocol--flip .protocol-text { order: 2; }
+    .protocol--flip .protocol-visual { order: 1; }
+
+    .protocol-text {
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+      max-width: 520px;
+    }
+    .protocol-num {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      letter-spacing: 0.20em;
+      color: var(--color-andromeda);
+    }
+    .protocol h3 {
+      font-size: clamp(26px, 3.4vw, 42px);
+      line-height: 1.08;
+      letter-spacing: -0.024em;
+      font-weight: 600;
+      margin: 0;
+      text-wrap: balance;
+    }
+    .protocol p {
+      margin: 0;
+      font-size: 15.5px;
+      line-height: 1.65;
+      color: var(--color-slate-200);
+    }
+    .protocol p strong { color: var(--color-snow); font-weight: 500; }
+    .protocol-bullets {
+      list-style: none;
+      padding: 0;
+      margin: 4px 0 0;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      letter-spacing: 0.04em;
+      color: var(--color-slate-300);
+    }
+    .protocol-bullets li {
+      display: grid;
+      grid-template-columns: 12px 1fr;
+      gap: 10px;
+      align-items: baseline;
+    }
+    .protocol-bullets li::before {
+      content: '';
+      width: 6px;
+      height: 6px;
+      border-radius: 999px;
+      background: var(--color-andromeda);
+      transform: translateY(2px);
+    }
+    .protocol-visual {
+      position: relative;
+      aspect-ratio: 5 / 4;
+      width: 100%;
+      max-width: 540px;
+      margin-inline: auto;
+    }
+    .protocol-visual svg {
+      width: 100%;
+      height: 100%;
+      display: block;
+      overflow: visible;
+    }
+    @media (max-width: 880px) {
+      .protocol, .protocol--flip { grid-template-columns: 1fr; }
+      .protocol--flip .protocol-text { order: 0; }
+      .protocol--flip .protocol-visual { order: 0; }
+    }
+
+    /* SVG label styles (shared across diagrams) */
+    .diag-stroke    { stroke: rgba(255,255,255,0.20); fill: none; }
+    .diag-stroke-em { stroke: var(--color-andromeda); fill: none; }
+    .diag-fill-bg   { fill: rgba(7,8,10,0.95); }
+    .diag-text {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      fill: var(--color-snow);
+      letter-spacing: 0.02em;
+    }
+    .diag-text--muted { fill: var(--color-slate-300); }
+    .diag-text--accent { fill: var(--color-andromeda); }
+    .diag-pulse {
+      animation: diag-pulse 2.4s var(--ease-out-quart) infinite alternate;
+    }
+    @keyframes diag-pulse {
+      from { opacity: 0.55; }
+      to   { opacity: 1; }
+    }
+
+    /* ----- OVERDRIVE · Diagram 1 (2PC-MPC) — looped ----- */
+    /* Single shared cycle so lines, sigma and burst stay synchronised across
+       iterations. Cycle length below covers the full draw + hold + reset. */
+    .diag1-line {
+      stroke-dasharray: 220;
+      stroke-dashoffset: 220;
+    }
+    .is-anim .diag1-line {
+      animation: diag1-line-loop 4500ms var(--ease-out-quart) 0ms infinite;
+    }
+    .is-anim .diag1-line--b { animation-delay: 200ms; }
+    @keyframes diag1-line-loop {
+      0%       { stroke-dashoffset: 220; }
+      25%      { stroke-dashoffset: 0; }
+      85%      { stroke-dashoffset: 0; }
+      93%      { stroke-dashoffset: 220; }
+      100%     { stroke-dashoffset: 220; }
+    }
+
+    .diag1-sigma {
+      transform-origin: 0 0;
+      opacity: 0;
+      transform: scale(0.4);
+    }
+    .is-anim .diag1-sigma {
+      animation: diag1-sigma-loop 4500ms var(--ease-out-quart) 0ms infinite;
+    }
+    @keyframes diag1-sigma-loop {
+      0%, 20%  { opacity: 0; transform: scale(0.4); }
+      42%      { opacity: 1; transform: scale(1); }
+      85%      { opacity: 1; transform: scale(1); }
+      93%      { opacity: 0; transform: scale(0.4); }
+      100%     { opacity: 0; transform: scale(0.4); }
+    }
+
+    .diag1-sigma-burst {
+      transform-origin: 270px 320px;
+      transform-box: view-box;
+      opacity: 0;
+    }
+    .is-anim .diag1-sigma-burst {
+      animation: diag1-burst-loop 4500ms var(--ease-out-quart) 0ms infinite;
+    }
+    @keyframes diag1-burst-loop {
+      0%, 24%  { opacity: 0;    transform: scale(0.5); }
+      35%      { opacity: 0.85; transform: scale(1.6); }
+      55%      { opacity: 0;    transform: scale(2.6); }
+      100%     { opacity: 0;    transform: scale(0.5); }
+    }
+
+    /* ----- OVERDRIVE · Diagram 2 (prepare → submit packets) ----- */
+    .diag2-packet {
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    /* ----- OVERDRIVE · Diagram 3 (recovery wipe + rebuild) — looped ----- */
+    /* Shared 4500ms cycle: wipe punches in, cache content fades out,
+       rebuild arrow draws, cache content fades back in, brief idle, reset. */
+    .diag3-content {
+      opacity: 1;
+    }
+    .is-anim .diag3-content {
+      animation: diag3-content-loop 4500ms var(--ease-out-quart) 0ms infinite;
+    }
+    @keyframes diag3-content-loop {
+      0%   { opacity: 1; }
+      10%  { opacity: 0; }
+      55%  { opacity: 0; }
+      75%  { opacity: 1; }
+      100% { opacity: 1; }
+    }
+
+    .diag3-rebuild {
+      stroke-dasharray: 140;
+      stroke-dashoffset: 140;
+    }
+    .is-anim .diag3-rebuild {
+      animation: diag3-rebuild-loop 4500ms var(--ease-out-quart) 0ms infinite;
+    }
+    @keyframes diag3-rebuild-loop {
+      0%, 22%  { stroke-dashoffset: 140; }
+      55%      { stroke-dashoffset: 0; }
+      85%      { stroke-dashoffset: 0; }
+      95%      { stroke-dashoffset: 140; }
+      100%     { stroke-dashoffset: 140; }
+    }
+
+    .diag3-wipe {
+      transform-origin: 0 0;
+      transform: scale(0.6);
+      opacity: 0.4;
+    }
+    .is-anim .diag3-wipe {
+      animation: diag3-wipe-loop 4500ms var(--ease-out-quart) 0ms infinite;
+    }
+    @keyframes diag3-wipe-loop {
+      0%, 8%   { transform: scale(0.6); opacity: 0.4; }
+      18%      { transform: scale(1.2); opacity: 1;   }
+      30%      { transform: scale(1);   opacity: 0.85; }
+      70%      { transform: scale(1);   opacity: 0.85; }
+      80%      { transform: scale(0.9); opacity: 0;   }
+      100%     { transform: scale(0.6); opacity: 0.4; }
+    }
+
+    /* ----- OVERDRIVE · Code shell tab swap ----- */
+    .code-body {
+      transition: opacity 320ms var(--ease-out-quart), transform 320ms var(--ease-out-quart);
+    }
+    .code-body.is-fading {
+      opacity: 0;
+      transform: translateY(8px);
+    }
+
+    /* All overdrive diagram animations off in reduced-motion */
+    @media (prefers-reduced-motion: reduce) {
+      .diag1-line { stroke-dashoffset: 0 !important; transition: none !important; animation: none !important; }
+      .diag1-sigma { opacity: 1 !important; transform: scale(1) !important; transition: none !important; animation: none !important; }
+      .diag1-sigma-burst { display: none !important; animation: none !important; }
+      .diag2-packet { opacity: 0 !important; }
+      .diag3-content { animation: none !important; opacity: 1 !important; }
+      .diag3-rebuild { stroke-dashoffset: 0 !important; transition: none !important; animation: none !important; }
+      .diag3-wipe { transform: scale(1) !important; opacity: 0.85 !important; transition: none !important; animation: none !important; }
+    }
+
+    /* ============================================================
+       CODE SHELL (engine code sample)
+       ============================================================ */
+    .engine-code-block {
+      margin-top: clamp(56px, 7vw, 96px);
+      display: grid;
+      grid-template-columns: minmax(0, 4fr) minmax(0, 7fr);
+      gap: clamp(28px, 5vw, 64px);
+      align-items: start;
+    }
+    .engine-code-text {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      max-width: 380px;
+    }
+    .engine-code-text h3 {
+      font-size: clamp(24px, 3vw, 36px);
+      line-height: 1.1;
+      letter-spacing: -0.022em;
+      font-weight: 600;
+      margin: 0;
+      text-wrap: balance;
+    }
+    .engine-code-text p {
+      margin: 0;
+      font-size: 15px;
+      color: var(--color-slate-200);
+      line-height: 1.65;
+    }
+
+    .code-shell {
+      position: relative;
+      border-radius: 18px;
+      background: linear-gradient(180deg, #0a0c10, #07080a);
+      border: 1px solid rgba(255,255,255,0.06);
+      box-shadow: var(--shadow-card), var(--shadow-glow);
+      overflow: hidden;
+    }
+    .code-tabs {
+      display: flex;
+      align-items: center;
+      padding: 10px 12px;
+      border-bottom: 1px solid rgba(255,255,255,0.05);
+      background: rgba(255,255,255,0.02);
+      gap: 4px;
+    }
+    .traffic {
+      display: flex;
+      gap: 6px;
+      padding-right: 12px;
+      margin-right: 4px;
+      border-right: 1px solid rgba(255,255,255,0.05);
+    }
+    .traffic span {
+      width: 10px;
+      height: 10px;
+      border-radius: 999px;
+      background: #2a2c2f;
+    }
+    .tab-btn {
+      padding: 6px 12px;
+      border: 1px solid transparent;
+      border-radius: 8px;
+      color: var(--color-slate-200);
+      font-size: 12px;
+      font-family: var(--font-mono);
+      letter-spacing: 0.02em;
+      transition: color 200ms var(--ease-out-quart), background 200ms var(--ease-out-quart);
+    }
+    .tab-btn:hover { color: var(--color-snow); background: rgba(255,255,255,0.04); }
+    .tab-btn.is-active {
+      color: var(--color-snow);
+      background: rgba(255,77,77,0.12);
+      border-color: rgba(255,77,77,0.28);
+    }
+    .copy-btn {
+      margin-left: auto;
+      padding: 6px 10px;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.06);
+      border-radius: 8px;
+      color: var(--color-slate-200);
+      font-size: 11px;
+      font-family: var(--font-mono);
+      letter-spacing: 0.06em;
+      transition: color 200ms var(--ease-out-quart), background 200ms var(--ease-out-quart);
+    }
+    .copy-btn:hover { color: var(--color-snow); background: rgba(255,255,255,0.08); }
+    pre.code-body {
+      margin: 0;
+      padding: 26px 28px;
+      font-family: var(--font-mono);
+      font-size: 13px;
+      line-height: 1.7;
+      color: #d6d6d8;
+      overflow-x: auto;
+      background: transparent;
+      tab-size: 2;
+    }
+    pre.code-body[hidden] { display: none; }
+    .tok-key { color: #9cdcfe; }
+    .tok-str { color: #ce9178; }
+    .tok-num { color: #b5cea8; }
+    .tok-com { color: #6a9955; font-style: italic; }
+    .tok-fn  { color: #dcdcaa; }
+    .tok-kw  { color: #c586c0; }
+    .tok-meta { color: #ffb0b0; }
+
+    @media (max-width: 880px) {
+      .engine-code-block { grid-template-columns: 1fr; }
+    }
+
+    /* ============================================================
+       ACT 5 — TRUST
+       ============================================================ */
+    .trust {
+      display: grid;
+      grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
+      gap: clamp(40px, 6vw, 96px);
+      align-items: start;
+    }
+    .trust h2 {
+      font-size: clamp(34px, 5.8vw, 76px);
+      line-height: 1.02;
+      letter-spacing: -0.034em;
+      font-weight: 600;
+      margin: 12px 0 0;
+      text-wrap: balance;
+      max-width: 480px;
+    }
+    .trust h2 .accent { color: var(--color-andromeda); }
+    .trust-body {
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+      font-size: 16px;
+      line-height: 1.7;
+      color: var(--color-slate-200);
+    }
+    .trust-body > p { margin: 0; max-width: 600px; }
+    .trust-body strong { color: var(--color-snow); font-weight: 500; }
+
+    .trust-claims {
+      list-style: none;
+      padding: 0;
+      margin: 8px 0 0;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1px;
+      background: rgba(255,255,255,0.06);
+      border-radius: 14px;
+      overflow: hidden;
+      border: 1px solid rgba(255,255,255,0.06);
+    }
+    .trust-claims li {
+      padding: 22px 24px;
+      background: var(--color-deep);
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .trust-claims .key {
+      font-family: var(--font-mono);
+      font-size: 10.5px;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      color: var(--color-andromeda);
+    }
+    .trust-claims .val {
+      font-size: 14.5px;
+      color: var(--color-snow);
+      line-height: 1.55;
+      letter-spacing: -0.005em;
+    }
+    @media (max-width: 880px) {
+      .trust { grid-template-columns: 1fr; }
+      .trust-claims { grid-template-columns: 1fr; }
+    }
+
+    /* ============================================================
+       ACT 6 — CLOSE (final CTA + footer)
+       ============================================================ */
+    .close-banner {
+      position: relative;
+      padding: clamp(56px, 8vw, 112px) clamp(28px, 5vw, 72px);
+      border-radius: 28px;
+      text-align: center;
+      background:
+        radial-gradient(80% 100% at 50% 0%, rgba(255,77,77,0.30), transparent 70%),
+        radial-gradient(60% 80% at 50% 100%, rgba(193,27,27,0.18), transparent 70%),
+        #07080a;
+      border: 1px solid rgba(255,255,255,0.06);
+      box-shadow: var(--shadow-card);
+      overflow: hidden;
+      isolation: isolate;
+    }
+    .close-banner::before {
+      content: '';
+      position: absolute;
+      inset: -1px;
+      background: radial-gradient(40% 70% at 50% 0%, rgba(255,180,180,0.10), transparent 65%);
+      pointer-events: none;
+      z-index: -1;
+    }
+    .close-banner h2 {
+      font-size: clamp(34px, 6.2vw, 84px);
+      line-height: 1;
+      letter-spacing: -0.036em;
+      font-weight: 600;
+      margin: 0 0 22px;
+      text-wrap: balance;
+    }
+    .close-banner h2 .accent { color: var(--color-andromeda); }
+    .close-banner p {
+      max-width: 520px;
+      margin: 0 auto 36px;
+      color: var(--color-slate-200);
+      font-size: 16px;
+      line-height: 1.6;
+    }
+    .close-banner .ctas {
+      display: inline-flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+
+    footer.site-foot {
+      padding-block: 64px 32px;
+      margin-top: 48px;
+      border-top: 1px solid rgba(255,255,255,0.05);
+      position: relative;
+      z-index: 2;
+    }
+    .foot-row {
+      display: grid;
+      grid-template-columns: 1.6fr 1fr 1fr 1fr;
+      gap: clamp(24px, 4vw, 56px);
+      margin-bottom: 56px;
+    }
+    .foot-brand {
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      max-width: 320px;
+    }
+    .foot-brand .mark {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+    }
+    .foot-brand .mark img {
+      width: 26px;
+      height: 26px;
+      border-radius: 6px;
+    }
+    .foot-brand p {
+      margin: 0;
+      color: var(--color-slate-300);
+      font-size: 13px;
+      line-height: 1.6;
+    }
+    .foot-col h5 {
+      margin: 0 0 14px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--color-slate-300);
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      font-weight: 500;
+    }
+    .foot-col ul {
+      list-style: none;
+      padding: 0;
+      margin: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .foot-col a {
+      color: var(--color-slate-200);
+      font-size: 13.5px;
+    }
+    .foot-col a:hover { color: var(--color-snow); }
+    .foot-base {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding-top: 24px;
+      border-top: 1px solid rgba(255,255,255,0.05);
+      font-family: var(--font-mono);
+      font-size: 11px;
+      letter-spacing: 0.06em;
+      color: var(--color-slate-300);
+      flex-wrap: wrap;
+    }
+    @media (max-width: 880px) {
+      .foot-row { grid-template-columns: 1fr 1fr; }
+      .foot-brand { grid-column: 1 / -1; }
+    }
+
+    /* ============================================================
+       SCROLL REVEAL + MOTION
+       ============================================================ */
+    @keyframes fade-up {
+      from { opacity: 0; transform: translateY(20px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    .reveal {
+      opacity: 0;
+      transform: translateY(24px);
+      transition:
+        opacity 720ms var(--ease-out-quart),
+        transform 720ms var(--ease-out-quart);
+    }
+    .reveal.is-in {
+      opacity: 1;
+      transform: translateY(0);
+    }
+    .reveal[data-stagger] > * { transition-delay: var(--stagger, 0ms); }
+
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+      .reveal,
+      .reveal[data-stagger] > * { transition: none; opacity: 1; transform: none; }
+      .nebula-cloud,
+      .twinkle-layer span,
+      .galaxy g,
+      .diag-pulse {
+        animation-duration: 0.001ms !important;
+        animation-iteration-count: 1 !important;
+      }
+      *, *::before, *::after {
+        animation-duration: 0.001ms !important;
+        transition-duration: 0.001ms !important;
+      }
+    }
+
+    /* Skip link for keyboard users */
+    .skip-link {
+      position: absolute;
+      top: -40px;
+      left: 12px;
+      padding: 8px 14px;
+      background: var(--color-ash-50);
+      color: #1a1a1b;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 500;
+      z-index: 100;
+      transition: top 200ms var(--ease-out-quart);
+    }
+    .skip-link:focus {
+      top: 12px;
+    }
+  </style>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <div class="starfield" aria-hidden="true"></div>
+
+  <!-- ============================================================
+       NAV
+       ============================================================ -->
+  <div class="nav-shell">
+    <nav class="nav" id="js-nav" aria-label="Primary">
+      <a href="#" class="nav-brand">
+        <span>Andromeda</span>
+      </a>
+      <div class="nav-links">
+        <a href="#position">Why</a>
+        <a href="#capabilities">Capabilities</a>
+        <a href="#engine">Engine</a>
+        <a href="#trust">Trust</a>
+      </div>
+      <a href="https://app.andromedainfra.pro" class="nav-cta">
+        Get API Key
+        <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+          <path d="M3 6h6m0 0L6 3m3 3L6 9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </a>
+    </nav>
+  </div>
+
+  <main id="main">
+
+  <!-- ============================================================
+       HERO
+       ============================================================ -->
+  <header class="hero" id="js-hero">
+    <div class="hero-stage">
+    <div class="hero-galaxy" aria-hidden="true">
+      <div class="nebula-cloud nebula-cloud--a"></div>
+      <div class="nebula-cloud nebula-cloud--b"></div>
+
+      <div class="satellite-galaxy" data-pos="tl" aria-hidden="true"></div>
+      <div class="satellite-galaxy" data-pos="tr" aria-hidden="true"></div>
+      <div class="satellite-galaxy" data-pos="bl" aria-hidden="true"></div>
+      <div class="satellite-galaxy" data-pos="br" aria-hidden="true"></div>
+
+      <div class="galaxy">
+        <svg class="galaxy-stage" viewBox="-300 -300 600 600" preserveAspectRatio="xMidYMid meet">
+          <defs>
+            <radialGradient id="g-halo" cx="0" cy="0" r="290" gradientUnits="userSpaceOnUse">
+              <stop offset="0%"   stop-color="#ff8a8a" stop-opacity="0.16"/>
+              <stop offset="40%"  stop-color="#7a1020" stop-opacity="0.10"/>
+              <stop offset="100%" stop-color="#040506" stop-opacity="0"/>
+            </radialGradient>
+            <radialGradient id="g-disk" cx="0" cy="0" r="240" gradientUnits="userSpaceOnUse">
+              <stop offset="0%"   stop-color="#ffd0a0" stop-opacity="0.32"/>
+              <stop offset="30%"  stop-color="#ff6e6e" stop-opacity="0.20"/>
+              <stop offset="70%"  stop-color="#5a0a30" stop-opacity="0.08"/>
+              <stop offset="100%" stop-color="#040506" stop-opacity="0"/>
+            </radialGradient>
+            <radialGradient id="g-arm" cx="0" cy="0" r="260" gradientUnits="userSpaceOnUse">
+              <stop offset="0%"   stop-color="#ffe6c2" stop-opacity="0"/>
+              <stop offset="12%"  stop-color="#ffd0a0" stop-opacity="0.45"/>
+              <stop offset="35%"  stop-color="#ff6e6e" stop-opacity="0.55"/>
+              <stop offset="65%"  stop-color="#c01530" stop-opacity="0.40"/>
+              <stop offset="92%"  stop-color="#3a0820" stop-opacity="0.10"/>
+              <stop offset="100%" stop-color="#040506" stop-opacity="0"/>
+            </radialGradient>
+            <radialGradient id="g-bulge" cx="0" cy="0" r="80" gradientUnits="userSpaceOnUse">
+              <stop offset="0%"   stop-color="#fff2d6" stop-opacity="0.85"/>
+              <stop offset="25%"  stop-color="#ffc890" stop-opacity="0.60"/>
+              <stop offset="55%"  stop-color="#ff6e4a" stop-opacity="0.30"/>
+              <stop offset="100%" stop-color="#3a0820" stop-opacity="0"/>
+            </radialGradient>
+            <radialGradient id="g-core" cx="0" cy="0" r="22" gradientUnits="userSpaceOnUse">
+              <stop offset="0%"   stop-color="#ffffff" stop-opacity="1"/>
+              <stop offset="55%"  stop-color="#fff5d6" stop-opacity="0.55"/>
+              <stop offset="100%" stop-color="#ffeac0" stop-opacity="0"/>
+            </radialGradient>
+            <radialGradient id="g-hii-pink">
+              <stop offset="0%"  stop-color="#ffffff" stop-opacity="0.95"/>
+              <stop offset="35%" stop-color="#ff6e9c" stop-opacity="0.85"/>
+              <stop offset="100%" stop-color="#3a0820" stop-opacity="0"/>
+            </radialGradient>
+            <radialGradient id="g-hii-warm">
+              <stop offset="0%"  stop-color="#fff5d6" stop-opacity="0.95"/>
+              <stop offset="40%" stop-color="#ff9a52" stop-opacity="0.80"/>
+              <stop offset="100%" stop-color="#1a0608" stop-opacity="0"/>
+            </radialGradient>
+            <radialGradient id="g-dust" cx="0" cy="0" r="240" gradientUnits="userSpaceOnUse">
+              <stop offset="0%"  stop-color="#000000" stop-opacity="0"/>
+              <stop offset="35%" stop-color="#000000" stop-opacity="0.55"/>
+              <stop offset="80%" stop-color="#000000" stop-opacity="0.35"/>
+              <stop offset="100%" stop-color="#000000" stop-opacity="0"/>
+            </radialGradient>
+
+            <filter id="f-glow" x="-50%" y="-50%" width="200%" height="200%">
+              <feGaussianBlur stdDeviation="0.35" result="b"/>
+              <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+            </filter>
+            <filter id="f-soft" x="-30%" y="-30%" width="160%" height="160%">
+              <feGaussianBlur stdDeviation="2.2"/>
+            </filter>
+            <filter id="f-dust" x="-30%" y="-30%" width="160%" height="160%">
+              <feGaussianBlur stdDeviation="1.4"/>
+            </filter>
+            <filter id="f-haze" x="-30%" y="-30%" width="160%" height="160%">
+              <feGaussianBlur stdDeviation="5.5"/>
+            </filter>
+
+            <!-- Gradients for satellite galaxies (smaller viewBox, scaled radii) -->
+            <radialGradient id="g-sat-halo" cx="0" cy="0" r="92" gradientUnits="userSpaceOnUse">
+              <stop offset="0%"   stop-color="#ff8a8a" stop-opacity="0.18"/>
+              <stop offset="45%"  stop-color="#7a1020" stop-opacity="0.10"/>
+              <stop offset="100%" stop-color="#040506" stop-opacity="0"/>
+            </radialGradient>
+            <radialGradient id="g-sat-disk" cx="0" cy="0" r="78" gradientUnits="userSpaceOnUse">
+              <stop offset="0%"   stop-color="#ffd0a0" stop-opacity="0.32"/>
+              <stop offset="30%"  stop-color="#ff6e6e" stop-opacity="0.20"/>
+              <stop offset="70%"  stop-color="#5a0a30" stop-opacity="0.08"/>
+              <stop offset="100%" stop-color="#040506" stop-opacity="0"/>
+            </radialGradient>
+            <radialGradient id="g-sat-bulge" cx="0" cy="0" r="24" gradientUnits="userSpaceOnUse">
+              <stop offset="0%"   stop-color="#fff2d6" stop-opacity="0.85"/>
+              <stop offset="25%"  stop-color="#ffc890" stop-opacity="0.60"/>
+              <stop offset="55%"  stop-color="#ff6e4a" stop-opacity="0.30"/>
+              <stop offset="100%" stop-color="#3a0820" stop-opacity="0"/>
+            </radialGradient>
+            <radialGradient id="g-sat-core" cx="0" cy="0" r="8" gradientUnits="userSpaceOnUse">
+              <stop offset="0%"   stop-color="#ffffff" stop-opacity="1"/>
+              <stop offset="55%"  stop-color="#fff5d6" stop-opacity="0.55"/>
+              <stop offset="100%" stop-color="#ffeac0" stop-opacity="0"/>
+            </radialGradient>
+            <radialGradient id="g-sat-arm" cx="0" cy="0" r="88" gradientUnits="userSpaceOnUse">
+              <stop offset="0%"   stop-color="#ffe6c2" stop-opacity="0"/>
+              <stop offset="12%"  stop-color="#ffd0a0" stop-opacity="0.45"/>
+              <stop offset="35%"  stop-color="#ff6e6e" stop-opacity="0.55"/>
+              <stop offset="65%"  stop-color="#c01530" stop-opacity="0.40"/>
+              <stop offset="92%"  stop-color="#3a0820" stop-opacity="0.10"/>
+              <stop offset="100%" stop-color="#040506" stop-opacity="0"/>
+            </radialGradient>
+            <radialGradient id="g-sat-dust" cx="0" cy="0" r="80" gradientUnits="userSpaceOnUse">
+              <stop offset="0%"  stop-color="#000000" stop-opacity="0"/>
+              <stop offset="35%" stop-color="#000000" stop-opacity="0.50"/>
+              <stop offset="80%" stop-color="#000000" stop-opacity="0.32"/>
+              <stop offset="100%" stop-color="#000000" stop-opacity="0"/>
+            </radialGradient>
+          </defs>
+
+          <g>
+            <animate attributeName="opacity" values="0.82;1;0.82" dur="9s" repeatCount="indefinite"/>
+            <circle cx="0" cy="0" r="290" fill="url(#g-halo)" filter="url(#f-haze)"/>
+          </g>
+
+          <g transform="rotate(-22)">
+            <g transform="scale(1, 0.42)">
+              <g>
+                <animateTransform attributeName="transform" type="rotate" from="0 0 0" to="360 0 0" dur="200s" repeatCount="indefinite"/>
+                <circle cx="0" cy="0" r="240" fill="url(#g-disk)" filter="url(#f-soft)"/>
+              </g>
+              <g>
+                <animateTransform attributeName="transform" type="rotate" from="0 0 0" to="360 0 0" dur="95s" repeatCount="indefinite"/>
+                <g filter="url(#f-soft)">
+                  <path id="arm-band-1" stroke="url(#g-arm)" stroke-width="42" fill="none" opacity="0.55" stroke-linecap="round"/>
+                  <path id="arm-band-2" stroke="url(#g-arm)" stroke-width="42" fill="none" opacity="0.55" stroke-linecap="round"/>
+                </g>
+                <g filter="url(#f-dust)">
+                  <path id="dust-lane-1" stroke="url(#g-dust)" stroke-width="14" fill="none" opacity="0.85" stroke-linecap="round"/>
+                  <path id="dust-lane-2" stroke="url(#g-dust)" stroke-width="14" fill="none" opacity="0.85" stroke-linecap="round"/>
+                </g>
+                <g id="js-arm-stars"></g>
+                <g id="js-hii"></g>
+              </g>
+              <g>
+                <animateTransform attributeName="transform" type="rotate" from="0 0 0" to="360 0 0" dur="260s" repeatCount="indefinite"/>
+                <g id="js-halo-stars"></g>
+              </g>
+            </g>
+          </g>
+
+          <g>
+            <animate attributeName="opacity" values="0.92;1;0.92" dur="7s" repeatCount="indefinite"/>
+            <circle cx="0" cy="0" r="68" fill="url(#g-bulge)"/>
+          </g>
+          <g>
+            <animateTransform attributeName="transform" type="rotate" from="0 0 0" to="360 0 0" dur="280s" repeatCount="indefinite"/>
+            <g id="js-bulge" filter="url(#f-glow)"></g>
+          </g>
+          <g>
+            <animate attributeName="opacity" values="0.85;1;0.85" dur="5s" repeatCount="indefinite"/>
+            <circle cx="0" cy="0" r="22" fill="url(#g-core)"/>
+          </g>
+        </svg>
+      </div>
+
+      <div class="twinkle-layer" id="js-twinkle-layer" aria-hidden="true"></div>
+    </div>
+    </div>
+
+    <div class="hero-copy-frame">
+      <div class="wrap hero-copy">
+        <h1>
+          <span class="hero-line">The crypto universe,</span>
+          <span class="hero-line hero-line--serif accent">delivered as one endpoint.</span>
+        </h1>
+        <p class="hero-lede">
+          Access secure signing, private execution, and resilient recovery through one API or MCP server.
+        </p>
+        <div class="hero-ctas">
+          <a href="https://app.andromedainfra.pro" class="btn btn--primary btn-arrow">
+            Start Building Free
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+              <path d="M3 7h8m0 0L7.5 3.5M11 7l-3.5 3.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </a>
+          <a href="#engine" class="btn btn--ghost">Read the Engine</a>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <!-- ============================================================
+       ACT 2 — POSITION
+       ============================================================ -->
+  <section class="act act--tight" id="position">
+    <div class="wrap">
+      <div class="position reveal">
+        <div class="position-eyebrow">
+          <span class="uppercase-label">// 01 · why andromeda</span>
+          <span class="rule" aria-hidden="true"></span>
+        </div>
+
+        <h2>
+          Build multi-chain apps
+          <span class="accent">without becoming a wallet team.</span>
+        </h2>
+
+        <div class="position-body">
+          <p>
+            Connect every blockchain — Ethereum, Solana, Bitcoin, Cosmos, Sui, NEAR, Aptos, Polkadot — through a single REST API or MCP server. One key, one signing surface, every chain.
+          </p>
+          <p>
+            You never custody your users&rsquo; keys. Each signing key is split by 2PC-MPC: one share lives on your client, one in the MPC network. The full key never exists in any single place — including ours.
+          </p>
+          <p>
+            We handle the cryptography, recovery, identity, on-chain policies, and confidential computing. <strong>You write product code.</strong>
+          </p>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================================
+       ACT 3 — CAPABILITIES (1 hero + 5 ledger)
+       ============================================================ -->
+  <section class="act" id="capabilities">
+    <div class="wrap">
+      <div class="capabilities-head reveal">
+        <span class="uppercase-label">// 02 · what you get</span>
+        <h2>Everything you need to sign safely. Nothing you don&rsquo;t want to write yourself.</h2>
+        <p>Skip months of cryptography work. The product surface is one REST API and one MCP server, with audited primitives behind them.</p>
+      </div>
+
+      <article class="capabilities-hero reveal" aria-labelledby="cap-hero-title">
+        <div class="capabilities-hero-text">
+          <span class="capabilities-hero-num">001 · primary</span>
+          <h3 id="cap-hero-title">One wallet. Every chain.</h3>
+          <p>
+            The same wallet handle signs on EVM, Solana, Bitcoin, Cosmos, Sui, NEAR, Aptos, and Polkadot. Switch curves with a single argument. No per-chain SDKs, no bridges, no custody.
+          </p>
+          <p style="font-family:var(--font-mono);font-size:12.5px;color:var(--color-slate-300);letter-spacing:0.04em;margin:8px 0 0;">
+            POST <span style="color:var(--color-andromeda);">/v1/dwallet</span> · POST <span style="color:var(--color-andromeda);">/v1/sign</span>
+          </p>
+        </div>
+        <div class="capabilities-hero-visual" aria-hidden="true">
+          <svg viewBox="0 0 360 360" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+              <radialGradient id="cap-orb" cx="50%" cy="50%" r="50%">
+                <stop offset="0%"  stop-color="#ff4d4d" stop-opacity="0.7"/>
+                <stop offset="55%" stop-color="#ff4d4d" stop-opacity="0.16"/>
+                <stop offset="100%" stop-color="#ff4d4d" stop-opacity="0"/>
+              </radialGradient>
+              <radialGradient id="cap-orb-core" cx="50%" cy="50%" r="50%">
+                <stop offset="0%"  stop-color="#ffffff" stop-opacity="1"/>
+                <stop offset="60%" stop-color="#ffd0d0" stop-opacity="0.6"/>
+                <stop offset="100%" stop-color="#ff4d4d" stop-opacity="0"/>
+              </radialGradient>
+            </defs>
+
+            <!-- Orbit rings -->
+            <ellipse cx="180" cy="180" rx="160" ry="60" stroke="rgba(255,255,255,0.08)" stroke-width="1" fill="none" transform="rotate(-22 180 180)"/>
+            <ellipse cx="180" cy="180" rx="140" ry="48" stroke="rgba(255,77,77,0.18)" stroke-width="1" fill="none" transform="rotate(-22 180 180)"/>
+            <ellipse cx="180" cy="180" rx="120" ry="38" stroke="rgba(255,255,255,0.05)" stroke-width="1" fill="none" transform="rotate(-22 180 180)"/>
+
+            <!-- Bloom -->
+            <circle cx="180" cy="180" r="160" fill="url(#cap-orb)"/>
+            <circle cx="180" cy="180" r="34" fill="url(#cap-orb-core)"/>
+            <circle cx="180" cy="180" r="6" fill="#ffffff"/>
+
+            <!-- Chain ticks on orbit -->
+            <g transform="rotate(-22 180 180)">
+              <g class="diag-pulse">
+                <circle cx="340" cy="180" r="3.5" fill="#9945FF"/>
+                <circle cx="20"  cy="180" r="3.5" fill="#f7931a"/>
+                <circle cx="280" cy="120" r="3"   fill="#56c2ff"/>
+                <circle cx="80"  cy="240" r="3"   fill="#59d499"/>
+                <circle cx="240" cy="222" r="2.5" fill="#b58cff"/>
+                <circle cx="120" cy="138" r="2.5" fill="#ffb0b0"/>
+              </g>
+            </g>
+          </svg>
+        </div>
+      </article>
+
+      <ol class="ledger reveal" data-stagger>
+        <li>
+          <span class="num" aria-hidden="true">002</span>
+          <h4>AI agents that sign by themselves</h4>
+          <p>60 MCP tools auto-generated from the API. Drop the endpoint into Claude Desktop or Cursor and your agent calls signing, recovery, and policy operations natively. No SDK glue, no custom runtime.</p>
+        </li>
+        <li>
+          <span class="num" aria-hidden="true">003</span>
+          <h4>Custody-free recovery across any chain</h4>
+          <p>Lost a device? Recover with whatever wallet your user already owns — MetaMask, Phantom, Keplr, a Bitcoin cold wallet, even a passkey. We abstract gas fees end-to-end. Users never need to hold native tokens.</p>
+        </li>
+        <li>
+          <span class="num" aria-hidden="true">004</span>
+          <h4>Confidential signing on encrypted data</h4>
+          <p>Sign decisions based on values that stay encrypted end-to-end. FHE evaluates the condition, a Vault-held key signs the result, and an on-chain program enforces it before the signature releases.</p>
+        </li>
+        <li>
+          <span class="num" aria-hidden="true">005</span>
+          <h4>Audited policy contracts ready to deploy</h4>
+          <p>8 audited on-chain contracts ready to deploy: allowlists, velocity guards, time-locks, oracle circuit breakers, passkey step-up, session keys, FHE-gated approvals, M-of-N quorum recovery. Skip the months of writing and auditing your own.</p>
+        </li>
+        <li>
+          <span class="num" aria-hidden="true">006</span>
+          <h4>Identity that travels with the user</h4>
+          <p>OAuth (Google/Apple/Twitter/GitHub), email magic link, or passkey. The same login derives the same wallet across every app you build. Users keep their wallet when they move between your products.</p>
+        </li>
+      </ol>
+    </div>
+  </section>
+
+  <!-- ============================================================
+       ACT 4 — ENGINE (3 diagrams + code)
+       ============================================================ -->
+  <section class="act act--breathe" id="engine">
+    <div class="wrap">
+      <div class="engine-intro reveal">
+        <span class="uppercase-label">// 03 · how it works</span>
+        <h2>Three rules that keep your users safe — <span class="accent">and you out of trouble.</span></h2>
+        <p>If you remember three things about Andromeda, remember these. They make custody-free real, not marketing.</p>
+      </div>
+
+      <!-- Protocol 1: 2PC-MPC -->
+      <div class="protocol reveal">
+        <div class="protocol-text">
+          <span class="protocol-num">protocol · i</span>
+          <h3>Two shares. One signature. Neither side wins alone.</h3>
+          <p>
+            A wallet&rsquo;s signing key is split — one share on your client, one in the MPC network. Producing a signature requires both at the same time.
+          </p>
+          <p>
+            <strong>Compromise one side completely, and no signature ever comes out.</strong> Every dWallet you create uses this same split, across every chain.
+          </p>
+          <ul class="protocol-bullets">
+            <li>2PC-MPC threshold signing under the hood</li>
+            <li>Presigns for sub-second approvals</li>
+            <li>Sharded network state</li>
+          </ul>
+        </div>
+        <div class="protocol-visual">
+          <svg class="diag-anim diag-anim--1" viewBox="0 0 540 432" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Diagram of distributed signing: client and MPC network each hold one share, both required to produce a signature">
+            <!-- Client party (left) -->
+            <g>
+              <rect x="20" y="100" width="170" height="140" rx="14" class="diag-fill-bg" stroke="rgba(255,255,255,0.10)"/>
+              <text x="40" y="128" class="diag-text diag-text--muted">PARTY A</text>
+              <text x="40" y="156" class="diag-text" style="font-size:14px;font-weight:500;">Your client</text>
+              <text x="40" y="186" class="diag-text diag-text--muted">key share α</text>
+              <!-- key share visual -->
+              <g transform="translate(40, 200)">
+                <rect width="130" height="22" rx="4" fill="rgba(255,77,77,0.10)" stroke="rgba(255,77,77,0.30)"/>
+                <text x="10" y="15" class="diag-text diag-text--accent">α · 0x4f8c…d2</text>
+              </g>
+            </g>
+
+            <!-- Network party (right) -->
+            <g>
+              <rect x="350" y="100" width="170" height="140" rx="14" class="diag-fill-bg" stroke="rgba(255,255,255,0.10)"/>
+              <text x="370" y="128" class="diag-text diag-text--muted">PARTY B</text>
+              <text x="370" y="156" class="diag-text" style="font-size:14px;font-weight:500;">MPC network</text>
+              <text x="370" y="186" class="diag-text diag-text--muted">key share β</text>
+              <g transform="translate(370, 200)">
+                <rect width="130" height="22" rx="4" fill="rgba(255,77,77,0.10)" stroke="rgba(255,77,77,0.30)"/>
+                <text x="10" y="15" class="diag-text diag-text--accent">β · 0x9a12…e7</text>
+              </g>
+            </g>
+
+            <!-- Connection lines (drawn-on by overdrive) -->
+            <path class="diag1-line diag1-line--a" d="M 105 240 C 105 320, 230 320, 270 320" stroke="rgba(255,77,77,0.55)" stroke-width="1.5" fill="none" stroke-linecap="round"/>
+            <path class="diag1-line diag1-line--b" d="M 435 240 C 435 320, 310 320, 270 320" stroke="rgba(255,77,77,0.55)" stroke-width="1.5" fill="none" stroke-linecap="round"/>
+
+            <!-- Center signing event -->
+            <g transform="translate(270, 320)">
+              <g class="diag1-sigma">
+                <circle r="36" fill="rgba(255,77,77,0.14)" stroke="rgba(255,77,77,0.50)"/>
+                <circle r="24" fill="rgba(255,77,77,0.20)" class="diag-pulse"/>
+                <text y="-46" text-anchor="middle" class="diag-text diag-text--accent">signature</text>
+                <text y="6" text-anchor="middle" class="diag-text" style="font-size:18px;">σ</text>
+              </g>
+            </g>
+            <circle class="diag1-sigma-burst" cx="270" cy="320" r="36" fill="none" stroke="rgba(255,77,77,0.45)" stroke-width="1.5"/>
+
+            <!-- Equation top -->
+            <text x="270" y="50" text-anchor="middle" class="diag-text" style="font-size:13px;">σ = sign(share a, share b, message)</text>
+            <text x="270" y="72" text-anchor="middle" class="diag-text diag-text--muted">requires both shares · produces neither</text>
+
+            <!-- Footer note -->
+            <text x="20" y="408" class="diag-text diag-text--muted">α + β never reconstructed</text>
+            <text x="520" y="408" text-anchor="end" class="diag-text diag-text--muted">m = transaction message</text>
+          </svg>
+        </div>
+      </div>
+
+      <!-- Protocol 2: prepare → submit -->
+      <div class="protocol protocol--flip reveal">
+        <div class="protocol-visual">
+          <svg class="diag-anim diag-anim--2" viewBox="0 0 540 432" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Diagram of prepare-then-submit flow: server returns unsigned transaction, client signs locally, client submits signed transaction to chain">
+            <!-- Lane labels -->
+            <text x="80"  y="40" text-anchor="middle" class="diag-text diag-text--muted">CLIENT</text>
+            <text x="270" y="40" text-anchor="middle" class="diag-text diag-text--muted">ANDROMEDA</text>
+            <text x="460" y="40" text-anchor="middle" class="diag-text diag-text--muted">CHAIN</text>
+
+            <!-- Vertical lanes -->
+            <line x1="80"  y1="56" x2="80"  y2="392" stroke="rgba(255,255,255,0.06)" stroke-dasharray="2 4"/>
+            <line x1="270" y1="56" x2="270" y2="392" stroke="rgba(255,255,255,0.06)" stroke-dasharray="2 4"/>
+            <line x1="460" y1="56" x2="460" y2="392" stroke="rgba(255,255,255,0.06)" stroke-dasharray="2 4"/>
+
+            <!-- Step 1: client → andromeda (prepare request) -->
+            <g>
+              <path d="M 88 88 L 262 88" stroke="rgba(255,255,255,0.30)" stroke-width="1.5" marker-end="url(#arrow-w)"/>
+              <text x="175" y="80" text-anchor="middle" class="diag-text">prepare()</text>
+            </g>
+
+            <!-- Step 2: andromeda → client (unsigned tx) -->
+            <g>
+              <path d="M 262 132 L 88 132" stroke="rgba(255,77,77,0.60)" stroke-width="1.5" marker-end="url(#arrow-r)"/>
+              <text x="175" y="124" text-anchor="middle" class="diag-text diag-text--accent">unsigned tx</text>
+            </g>
+
+            <!-- Step 3: client signs locally (loop on client lane) -->
+            <g>
+              <rect x="-10" y="170" width="180" height="44" rx="8" fill="rgba(255,77,77,0.10)" stroke="rgba(255,77,77,0.40)"/>
+              <text x="80" y="190" text-anchor="middle" class="diag-text diag-text--accent">sign locally</text>
+              <text x="80" y="206" text-anchor="middle" class="diag-text diag-text--muted">user&rsquo;s key never leaves</text>
+            </g>
+
+            <!-- Step 4: client → andromeda (signed tx submit) -->
+            <g>
+              <path d="M 88 248 L 262 248" stroke="rgba(255,255,255,0.30)" stroke-width="1.5" marker-end="url(#arrow-w)"/>
+              <text x="175" y="240" text-anchor="middle" class="diag-text">submit()</text>
+            </g>
+
+            <!-- Step 5: andromeda → chain -->
+            <g>
+              <path d="M 278 292 L 452 292" stroke="rgba(255,77,77,0.60)" stroke-width="1.5" marker-end="url(#arrow-r)"/>
+              <text x="365" y="284" text-anchor="middle" class="diag-text diag-text--accent">relay</text>
+            </g>
+
+            <!-- Step 6: chain ack -->
+            <g>
+              <path d="M 452 336 L 278 336" stroke="rgba(255,255,255,0.30)" stroke-width="1.5" marker-end="url(#arrow-w)"/>
+              <text x="365" y="328" text-anchor="middle" class="diag-text">tx hash</text>
+            </g>
+
+            <!-- Outcome chip -->
+            <g transform="translate(80, 380)">
+              <text text-anchor="middle" class="diag-text diag-text--muted">key never custodied</text>
+            </g>
+
+            <!-- Animated packets (overdrive) -->
+            <circle class="diag2-packet" data-packet="1" cx="88"  cy="88"  r="4.5" fill="#ffffff"/>
+            <circle class="diag2-packet" data-packet="2" cx="262" cy="132" r="4.5" fill="#ff4d4d"/>
+            <circle class="diag2-packet" data-packet="4" cx="88"  cy="248" r="4.5" fill="#ffffff"/>
+            <circle class="diag2-packet" data-packet="5" cx="278" cy="292" r="4.5" fill="#ff4d4d"/>
+            <circle class="diag2-packet" data-packet="6" cx="452" cy="336" r="4.5" fill="#ffffff"/>
+
+            <defs>
+              <marker id="arrow-w" viewBox="0 0 8 8" refX="6" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+                <path d="M 0 1 L 6 4 L 0 7 z" fill="rgba(255,255,255,0.45)"/>
+              </marker>
+              <marker id="arrow-r" viewBox="0 0 8 8" refX="6" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+                <path d="M 0 1 L 6 4 L 0 7 z" fill="#ff4d4d"/>
+              </marker>
+            </defs>
+          </svg>
+        </div>
+        <div class="protocol-text">
+          <span class="protocol-num">protocol · ii</span>
+          <h3>We never see the user&rsquo;s key.</h3>
+          <p>
+            Every signing endpoint uses <strong>prepare → submit</strong>. We return an unsigned payload, your client signs locally with whatever key the user already has, you submit. The service has no path to extract the user&rsquo;s key.
+          </p>
+          <p>
+            The pattern is enforced at the API itself — not as a configuration you can flip.
+          </p>
+          <ul class="protocol-bullets">
+            <li>POST /v1/sign/prepare → unsigned payload</li>
+            <li>Client signs locally</li>
+            <li>POST /v1/sign/submit → tx hash</li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- Protocol 3: on-chain-first recovery -->
+      <div class="protocol reveal">
+        <div class="protocol-text">
+          <span class="protocol-num">protocol · iii</span>
+          <h3>If we disappear, your users keep their wallets.</h3>
+          <p>
+            Wallet state lives on-chain — that&rsquo;s the source of truth. Our database is just a cache. Wipe it and signing rebuilds from chain. Replace our backend tomorrow and the same user signs in with the same wallet.
+          </p>
+          <p>
+            <strong>Your users own their continuity.</strong> A regenerated dWallet would be a different wallet with a different address — we never do that.
+          </p>
+          <ul class="protocol-bullets">
+            <li>Canonical on-chain state</li>
+            <li>Cache is rebuildable, never authoritative</li>
+            <li>Cross-client recovery via deterministic addresses</li>
+          </ul>
+        </div>
+        <div class="protocol-visual">
+          <svg class="diag-anim diag-anim--3" viewBox="0 0 540 432" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Diagram of recovery: canonical on-chain state holds the wallet record, and the Andromeda cache is rebuilt from it on demand">
+            <!-- Canonical chain state (rock at bottom) -->
+            <g>
+              <rect x="80" y="280" width="380" height="100" rx="14" fill="rgba(7,8,10,0.95)" stroke="rgba(255,77,77,0.40)"/>
+              <text x="270" y="312" text-anchor="middle" class="diag-text diag-text--accent" style="font-size:13px;font-weight:500;letter-spacing:0.10em;">CANONICAL CHAIN STATE · SOURCE OF TRUTH</text>
+              <g transform="translate(110, 332)">
+                <text class="diag-text diag-text--muted">account</text>
+                <text x="100" class="diag-text diag-text--muted">network state</text>
+                <text x="210" class="diag-text diag-text--muted">signing artifacts</text>
+              </g>
+              <g transform="translate(110, 354)">
+                <text class="diag-text">0x4f8c…d2a1</text>
+                <text x="100" class="diag-text">state_v4</text>
+                <text x="210" class="diag-text">17 active</text>
+              </g>
+            </g>
+
+            <!-- Cache layer (above) -->
+            <g>
+              <rect x="140" y="80" width="260" height="80" rx="12" fill="rgba(17,18,20,0.95)" stroke="rgba(255,255,255,0.10)" stroke-dasharray="3 4"/>
+              <g class="diag3-content">
+                <text x="270" y="108" text-anchor="middle" class="diag-text diag-text--muted" style="letter-spacing:0.10em;">CACHE · REBUILDABLE</text>
+                <text x="270" y="134" text-anchor="middle" class="diag-text">Andromeda cache</text>
+              </g>
+            </g>
+
+            <!-- Rebuild arrow (chain → cache) — drawn-on by overdrive -->
+            <g>
+              <path class="diag3-rebuild" d="M 270 280 L 270 162" stroke="rgba(255,77,77,0.65)" stroke-width="1.5" fill="none" stroke-linecap="round"/>
+              <text x="282" y="220" class="diag-text diag-text--accent">rebuild()</text>
+              <text x="282" y="238" class="diag-text diag-text--muted">on signing</text>
+            </g>
+
+            <!-- Wipe X (cache crossed) -->
+            <g transform="translate(420, 100)">
+              <g class="diag3-wipe">
+                <circle r="14" fill="rgba(255,77,77,0.12)" stroke="rgba(255,77,77,0.50)"/>
+                <line x1="-6" y1="-6" x2="6" y2="6" stroke="#ff4d4d" stroke-width="1.5"/>
+                <line x1="-6" y1="6" x2="6" y2="-6" stroke="#ff4d4d" stroke-width="1.5"/>
+                <text y="38" text-anchor="middle" class="diag-text diag-text--muted">wipe-safe</text>
+              </g>
+            </g>
+
+            <!-- Top equation -->
+            <text x="270" y="44" text-anchor="middle" class="diag-text" style="font-size:13px;">truth(wallet) = chain</text>
+
+            <defs>
+              <marker id="arrow-r2" viewBox="0 0 8 8" refX="6" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+                <path d="M 0 1 L 6 4 L 0 7 z" fill="#ff4d4d"/>
+              </marker>
+            </defs>
+          </svg>
+        </div>
+      </div>
+
+      <!-- Code block -->
+      <div class="engine-code-block reveal">
+        <div class="engine-code-text">
+          <span class="protocol-num">code · the whole thing</span>
+          <h3>From zero to signed in eight lines.</h3>
+          <p>One challenge, one submit — and a signature is produced on-chain. No SDK, no funding required from your user.</p>
+        </div>
+
+        <div class="code-shell" id="js-code-shell">
+          <div class="code-tabs">
+            <div class="traffic" aria-hidden="true">
+              <span></span><span></span><span></span>
+            </div>
+            <button class="tab-btn is-active" data-tab="curl" type="button" aria-selected="true">curl</button>
+            <button class="tab-btn" data-tab="js" type="button" aria-selected="false">javascript</button>
+            <button class="tab-btn" data-tab="mcp" type="button" aria-selected="false">mcp</button>
+            <button class="copy-btn" type="button" aria-label="Copy code">COPY</button>
+          </div>
+
+          <pre class="code-body" data-tab-panel="curl"><code><span class="tok-com"># 1. Get a recovery challenge — server returns a canonical message</span>
+curl -X POST https://api.andromedainfra.pro/v1/recovery/challenge \
+  -H <span class="tok-str">"X-Api-Key: $ANDROMEDA_KEY"</span> -H <span class="tok-str">"Content-Type: application/json"</span> \
+  -d <span class="tok-str">'{"appId":"demo","scheme":"secp256k1-eip191","walletAddress":"0xAbC..."}'</span>
+
+<span class="tok-com"># 2. User signs the message with their wallet → submit</span>
+curl -X POST https://api.andromedainfra.pro/v1/recovery/primary/submit \
+  -H <span class="tok-str">"X-Api-Key: $ANDROMEDA_KEY"</span> -H <span class="tok-str">"Content-Type: application/json"</span> \
+  -d <span class="tok-str">'{"dwalletAddress":"...","messageHashHex":"...","signatureBase64":"...","expectedNonce":7}'</span></code></pre>
+
+          <pre class="code-body" data-tab-panel="js" hidden><code><span class="tok-com">// Plain fetch — no SDK required.</span>
+<span class="tok-kw">const</span> headers = {
+  <span class="tok-str">"X-Api-Key"</span>: process.env.<span class="tok-meta">ANDROMEDA_KEY</span>,
+  <span class="tok-str">"Content-Type"</span>: <span class="tok-str">"application/json"</span>,
+};
+<span class="tok-kw">const</span> base = <span class="tok-str">"https://api.andromedainfra.pro"</span>;
+
+<span class="tok-kw">const</span> challenge = <span class="tok-kw">await</span> <span class="tok-fn">fetch</span>(<span class="tok-str">`${base}/v1/recovery/challenge`</span>, {
+  method: <span class="tok-str">"POST"</span>, headers,
+  body: JSON.<span class="tok-fn">stringify</span>({ appId: <span class="tok-str">"demo"</span>, scheme: <span class="tok-str">"secp256k1-eip191"</span>, walletAddress: <span class="tok-str">"0xAbC..."</span> }),
+}).<span class="tok-fn">then</span>(r =&gt; r.<span class="tok-fn">json</span>());
+
+<span class="tok-com">// User signs `challenge.data.message` with their wallet, then submit</span></code></pre>
+
+          <pre class="code-body" data-tab-panel="mcp" hidden><code><span class="tok-com">// Drop the endpoint into Claude Desktop, Cursor, or any MCP client:</span>
+
+{
+  <span class="tok-str">"mcpServers"</span>: {
+    <span class="tok-str">"andromeda"</span>: {
+      <span class="tok-str">"url"</span>: <span class="tok-str">"https://api.andromedainfra.pro/mcp"</span>,
+      <span class="tok-str">"headers"</span>: { <span class="tok-str">"X-Api-Key"</span>: <span class="tok-str">"&lt;your_key&gt;"</span> }
+    }
+  }
+}
+
+<span class="tok-com">// 60 tools (signing, recovery, policies, FHE) become available.</span></code></pre>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================================
+       ACT 5 — TRUST
+       ============================================================ -->
+  <section class="act act--tight" id="trust">
+    <div class="wrap">
+      <div class="trust reveal">
+        <div>
+          <span class="uppercase-label">// 04 · what we promise</span>
+          <h2>Security isn&rsquo;t a setting. <span class="accent">It&rsquo;s how the platform is built.</span></h2>
+        </div>
+
+        <div class="trust-body">
+          <p>
+            We don&rsquo;t ask you to trust us. We architect things so you don&rsquo;t have to. Custody-free signing, on-chain policy enforcement, isolated engines, and redacted logs come with the system — not as features you opt into.
+          </p>
+          <p>
+            Our gateway absorbs every public request and applies auth and quotas. Behind it, the signing and FHE engines have no path to the public internet. User signing keys are split via 2PC-MPC and never reconstructed. PII and key material are redacted at source.
+          </p>
+
+          <ul class="trust-claims">
+            <li>
+              <span class="key">key custody</span>
+              <span class="val">None. We can&rsquo;t sign on your users&rsquo; behalf — the math doesn&rsquo;t allow it.</span>
+            </li>
+            <li>
+              <span class="key">recovery</span>
+              <span class="val">On-chain. Wipe our database, your users still own their wallets.</span>
+            </li>
+            <li>
+              <span class="key">private state</span>
+              <span class="val">FHE-evaluated. Sensitive inputs stay encrypted end-to-end.</span>
+            </li>
+            <li>
+              <span class="key">gas fees</span>
+              <span class="val">Abstracted. Users sign with any wallet, never hold native tokens.</span>
+            </li>
+            <li>
+              <span class="key">network exposure</span>
+              <span class="val">Zero. Engines never face the public internet.</span>
+            </li>
+            <li>
+              <span class="key">log discipline</span>
+              <span class="val">Key material never logged. PII redacted at source.</span>
+            </li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================================
+       ACT 6 — CLOSE
+       ============================================================ -->
+  <section class="act act--tight" id="close">
+    <div class="wrap">
+      <div class="close-banner reveal">
+        <h2>Stop reinventing wallets. <span class="accent">Ship product.</span></h2>
+        <p>Free to start. Production-ready when you are. One key, every chain, every endpoint.</p>
+        <div class="ctas">
+          <a href="https://app.andromedainfra.pro" class="btn btn--primary btn-arrow">
+            Get an API Key
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+              <path d="M3 7h8m0 0L7.5 3.5M11 7l-3.5 3.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </a>
+          <a href="#engine" class="btn btn--ghost">Re-read the Engine</a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  </main>
+
+  <!-- ============================================================
+       FOOTER
+       ============================================================ -->
+  <footer class="site-foot">
+    <div class="wrap">
+      <div class="foot-row">
+        <div class="foot-brand">
+          <div class="mark">
+            <img src="Logo.png" alt="" aria-hidden="true" />
+            <span>Andromeda</span>
+          </div>
+          <p>Hosted multichain signing infrastructure for apps and agents. Custody-free by design, built for production teams by Shinka Labs.</p>
+        </div>
+        <div class="foot-col">
+          <h5>Product</h5>
+          <ul>
+            <li><a href="#position">What it is</a></li>
+            <li><a href="#capabilities">Capabilities</a></li>
+            <li><a href="#engine">Engine</a></li>
+            <li><a href="#trust">Trust</a></li>
+          </ul>
+        </div>
+        <div class="foot-col">
+          <h5>Developers</h5>
+          <ul>
+            <li><a href="#">REST API</a></li>
+            <li><a href="#">MCP server</a></li>
+            <li><a href="#">Status</a></li>
+            <li><a href="#">Changelog</a></li>
+          </ul>
+        </div>
+        <div class="foot-col">
+          <h5>Company</h5>
+          <ul>
+            <li><a href="#">Architecture</a></li>
+            <li><a href="#">Shinka Labs</a></li>
+            <li><a href="#">Security</a></li>
+            <li><a href="#">Contact</a></li>
+          </ul>
+        </div>
+      </div>
+      <div class="foot-base">
+        <span>© 2026 Shinka Labs. Built for secure multichain signing.</span>
+        <span>v0.4 · sdk-aligned</span>
+      </div>
+    </div>
+  </footer>
+
+
+  <script>
+    /* ============================================================
+       Procedural galaxy generation (preserved from v1)
+       ============================================================ */
+    (function generateGalaxy() {
+      const NS = 'http://www.w3.org/2000/svg';
+      const armStars   = document.getElementById('js-arm-stars');
+      const haloStars  = document.getElementById('js-halo-stars');
+      const bulgeStars = document.getElementById('js-bulge');
+      const hii        = document.getElementById('js-hii');
+      const armBand1   = document.getElementById('arm-band-1');
+      const armBand2   = document.getElementById('arm-band-2');
+      const dustLane1  = document.getElementById('dust-lane-1');
+      const dustLane2  = document.getElementById('dust-lane-2');
+      if (!armStars || !bulgeStars) return;
+
+      const A = 3.2;
+      const B = 0.30;
+      const T_MIN = 0.1;
+      const T_MAX = 4.4 * Math.PI;
+      const ARM_OFFSET = Math.PI;
+      const R_MAX = 270;
+
+      const rand  = (a, b) => Math.random() * (b - a) + a;
+      const gauss = () => {
+        let u = 0, v = 0;
+        while (!u) u = Math.random();
+        while (!v) v = Math.random();
+        return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+      };
+      const spiral = (t) => A * Math.exp(B * t);
+
+      function star(parent, x, y, r, color, op, halo) {
+        if (halo) {
+          const h = document.createElementNS(NS, 'circle');
+          h.setAttribute('cx', x.toFixed(2));
+          h.setAttribute('cy', y.toFixed(2));
+          h.setAttribute('r',  (r * 2.6).toFixed(2));
+          h.setAttribute('fill', color);
+          h.setAttribute('opacity', (op * 0.22).toFixed(2));
+          parent.appendChild(h);
+        }
+        const c = document.createElementNS(NS, 'circle');
+        c.setAttribute('cx', x.toFixed(2));
+        c.setAttribute('cy', y.toFixed(2));
+        c.setAttribute('r',  r.toFixed(2));
+        c.setAttribute('fill', color);
+        c.setAttribute('opacity', op.toFixed(2));
+        parent.appendChild(c);
+      }
+
+      function buildArmPath(armIdx, radialOffset = 0) {
+        const offset = armIdx * ARM_OFFSET;
+        const pts = [];
+        for (let t = T_MIN; t <= T_MAX; t += 0.12) {
+          const r = spiral(t) + radialOffset;
+          if (r > R_MAX) break;
+          pts.push([r * Math.cos(t + offset), r * Math.sin(t + offset)]);
+        }
+        if (!pts.length) return '';
+        let d = `M ${pts[0][0].toFixed(2)} ${pts[0][1].toFixed(2)}`;
+        for (let i = 1; i < pts.length; i++) {
+          d += ` L ${pts[i][0].toFixed(2)} ${pts[i][1].toFixed(2)}`;
+        }
+        return d;
+      }
+
+      if (armBand1)  armBand1.setAttribute('d', buildArmPath(0));
+      if (armBand2)  armBand2.setAttribute('d', buildArmPath(1));
+      if (dustLane1) dustLane1.setAttribute('d', buildArmPath(0, -8));
+      if (dustLane2) dustLane2.setAttribute('d', buildArmPath(1, -8));
+
+      // ARM STARS
+      for (let arm = 0; arm < 2; arm++) {
+        const offset = arm * ARM_OFFSET;
+        for (let i = 0; i < 380; i++) {
+          const u = Math.random();
+          const t = T_MIN + Math.pow(u, 0.65) * (T_MAX - T_MIN);
+          const baseR = spiral(t);
+          const scatterScale = 4 + baseR * 0.09;
+          const dr = gauss() * scatterScale;
+          const dt = gauss() * 0.06;
+          const r = baseR + dr;
+          const angle = t + offset + dt;
+          const x = r * Math.cos(angle);
+          const y = r * Math.sin(angle);
+          if (Math.hypot(x, y) > R_MAX) continue;
+          const armDist = Math.abs(dr);
+          const baseOp = Math.max(0.18, 0.95 - armDist * 0.045);
+          const op = baseOp * rand(0.7, 1.0);
+          let size;
+          const sr = Math.random();
+          let bright = false;
+          if (sr > 0.97)      { size = rand(1.5, 2.2); bright = true; }
+          else if (sr > 0.85) size = rand(0.95, 1.35);
+          else                size = rand(0.42, 0.85);
+          let color = '#ffffff';
+          const tint = Math.random();
+          if      (tint < 0.10) color = '#ffe4c2';
+          else if (tint < 0.18) color = '#ffb088';
+          else if (tint < 0.22) color = '#ff8a8a';
+          else if (tint < 0.24) color = '#a8c0ff';
+          star(armStars, x, y, size, color, op, bright);
+        }
+      }
+
+      // BULGE
+      for (let i = 0; i < 320; i++) {
+        const r = -Math.log(Math.max(1e-6, 1 - Math.random() * 0.97)) * 13;
+        if (r > 75) continue;
+        const angle = Math.random() * 2 * Math.PI;
+        const x = r * Math.cos(angle);
+        const y = r * Math.sin(angle);
+        let size;
+        const sr = Math.random();
+        if (sr > 0.97) size = rand(1.0, 1.5);
+        else           size = rand(0.3, 0.7);
+        const op = rand(0.45, 1.0);
+        let color;
+        const tint = Math.random();
+        if      (tint < 0.45) color = '#fff5d6';
+        else if (tint < 0.85) color = '#ffe6c2';
+        else                  color = '#ffd9a8';
+        star(bulgeStars, x, y, size, color, op);
+      }
+
+      // HALO
+      for (let i = 0; i < 110; i++) {
+        const r = rand(110, 290);
+        const angle = Math.random() * 2 * Math.PI;
+        const x = r * Math.cos(angle);
+        const y = r * Math.sin(angle);
+        const bright = Math.random() > 0.92;
+        const size = bright ? rand(0.9, 1.3) : rand(0.4, 0.9);
+        star(haloStars, x, y, size, '#ffffff', rand(0.22, 0.62), bright);
+      }
+
+      // HII REGIONS
+      for (let arm = 0; arm < 2; arm++) {
+        const offset = arm * ARM_OFFSET;
+        for (let i = 0; i < 9; i++) {
+          const t = T_MIN + (T_MAX - T_MIN) * rand(0.45, 0.95);
+          const baseR = spiral(t);
+          const r = baseR + gauss() * 5;
+          const angle = t + offset + gauss() * 0.04;
+          const x = r * Math.cos(angle);
+          const y = r * Math.sin(angle);
+          if (Math.hypot(x, y) > R_MAX - 10) continue;
+          const c = document.createElementNS(NS, 'circle');
+          c.setAttribute('cx', x.toFixed(2));
+          c.setAttribute('cy', y.toFixed(2));
+          c.setAttribute('r',  rand(2.2, 4.5).toFixed(2));
+          c.setAttribute('fill', Math.random() < 0.55 ? 'url(#g-hii-pink)' : 'url(#g-hii-warm)');
+          c.setAttribute('opacity', rand(0.55, 0.85).toFixed(2));
+          hii.appendChild(c);
+        }
+      }
+    })();
+
+    /* ============================================================
+       Background twinkling stars
+       ============================================================ */
+    (function generateTwinkle() {
+      const container = document.getElementById('js-twinkle-layer');
+      if (!container) return;
+      const COUNT = 110;
+      const rand = (a, b) => Math.random() * (b - a) + a;
+
+      for (let i = 0; i < COUNT; i++) {
+        let top, left;
+        let attempts = 0;
+        do {
+          top  = Math.random();
+          left = Math.random();
+          attempts++;
+        } while (attempts < 6 && Math.hypot(top - 0.5, left - 0.5) < 0.18);
+
+        const s = document.createElement('span');
+        const sr = Math.random();
+        let size;
+        if (sr > 0.97)      size = rand(2.4, 3.0);
+        else if (sr > 0.85) size = rand(1.6, 2.2);
+        else if (sr > 0.55) size = rand(1.2, 1.6);
+        else                size = rand(0.7, 1.1);
+
+        const tint = Math.random();
+        if      (tint < 0.05) s.className = 'is-pink';
+        else if (tint < 0.12) s.className = 'is-warm';
+        else if (tint < 0.16) s.className = 'is-cool';
+        else if (sr > 0.92)   s.className = 'is-bright';
+
+        const dur   = rand(2.6, 5.4);
+        const delay = -rand(0, dur);
+
+        s.style.cssText = `
+          top: ${(top * 100).toFixed(2)}%;
+          left: ${(left * 100).toFixed(2)}%;
+          width: ${size.toFixed(2)}px;
+          height: ${size.toFixed(2)}px;
+          animation-duration: ${dur.toFixed(2)}s;
+          animation-delay: ${delay.toFixed(2)}s;
+        `;
+        container.appendChild(s);
+      }
+    })();
+
+    /* ============================================================
+       Code tabs + copy
+       ============================================================ */
+    (function codeShell() {
+      const shell = document.getElementById('js-code-shell');
+      if (!shell) return;
+      const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      const tabs = shell.querySelectorAll('.tab-btn[data-tab]');
+      const panels = shell.querySelectorAll('[data-tab-panel]');
+
+      function showPanel(target) {
+        panels.forEach(p => {
+          if (p.dataset.tabPanel === target) p.removeAttribute('hidden');
+          else p.setAttribute('hidden', '');
+        });
+      }
+
+      function swapPanel(target) {
+        const next = shell.querySelector(`[data-tab-panel="${target}"]`);
+        if (!next || !next.hidden) { showPanel(target); return; }
+        if (reduced) { showPanel(target); return; }
+
+        // Fade out current, swap, fade in next.
+        const current = shell.querySelector('[data-tab-panel]:not([hidden])');
+        if (current) {
+          current.classList.add('is-fading');
+        }
+        const swapAfter = current ? 280 : 0;
+        setTimeout(() => {
+          showPanel(target);
+          if (current) current.classList.remove('is-fading');
+          // Force restart of next panel transition
+          next.classList.add('is-fading');
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => next.classList.remove('is-fading'));
+          });
+        }, swapAfter);
+      }
+
+      tabs.forEach(tab => {
+        tab.addEventListener('click', () => {
+          if (tab.classList.contains('is-active')) return;
+          tabs.forEach(t => { t.classList.remove('is-active'); t.setAttribute('aria-selected', 'false'); });
+          tab.classList.add('is-active');
+          tab.setAttribute('aria-selected', 'true');
+          swapPanel(tab.dataset.tab);
+        });
+      });
+
+      const copyBtn = shell.querySelector('.copy-btn');
+      if (copyBtn) {
+        copyBtn.addEventListener('click', async () => {
+          const visible = shell.querySelector('[data-tab-panel]:not([hidden])');
+          if (!visible) return;
+          try {
+            await navigator.clipboard.writeText(visible.innerText);
+            const original = copyBtn.textContent;
+            copyBtn.textContent = 'COPIED';
+            setTimeout(() => { copyBtn.textContent = original; }, 1400);
+          } catch (_) { /* no-op */ }
+        });
+      }
+    })();
+
+    /* ============================================================
+       Scroll reveal (with stagger support)
+       ============================================================ */
+    (function reveals() {
+      const items = document.querySelectorAll('.reveal');
+      if (!('IntersectionObserver' in window) || !items.length) {
+        items.forEach(el => el.classList.add('is-in'));
+        return;
+      }
+      const io = new IntersectionObserver((entries) => {
+        entries.forEach(e => {
+          if (!e.isIntersecting) return;
+          const el = e.target;
+          if (el.dataset.stagger !== undefined) {
+            const children = el.children;
+            for (let i = 0; i < children.length; i++) {
+              children[i].style.setProperty('--stagger', (i * 80) + 'ms');
+            }
+          }
+          el.classList.add('is-in');
+          io.unobserve(el);
+        });
+      }, { threshold: 0.12, rootMargin: '0px 0px -40px 0px' });
+      items.forEach(el => io.observe(el));
+    })();
+
+    /* ============================================================
+       OVERDRIVE · Engine diagram animations on viewport entry
+       ============================================================ */
+    (function diagramAnimations() {
+      const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      const diags = document.querySelectorAll('.diag-anim');
+      if (!diags.length) return;
+
+      // If reduced motion: skip orchestration entirely; CSS already pins to end states.
+      if (reduced) {
+        diags.forEach(d => d.classList.add('is-anim'));
+        return;
+      }
+
+      // Diagram 2 packet trajectories. Each entry: [packetId, startX, startY, endX, endY, delay, duration]
+      const PACKETS_2 = [
+        ['1',  88,  88, 262,  88,    0, 900],   // prepare()
+        ['2', 262, 132,  88, 132,  900, 900],   // unsigned tx
+        ['4',  88, 248, 262, 248, 2400, 900],   // submit()
+        ['5', 278, 292, 452, 292, 3300, 900],   // relay
+        ['6', 452, 336, 278, 336, 4200, 900],   // tx hash
+      ];
+
+      // Total cycle (ms): last packet ends at delay+dur = 5100; add a small pause so
+      // the loop has visual breathing room before restarting from the top.
+      const DIAG2_CYCLE_MS = 5500;
+
+      function runDiag2(svg) {
+        PACKETS_2.forEach(([id, sx, sy, ex, ey, delay, dur]) => {
+          const pkt = svg.querySelector(`.diag2-packet[data-packet="${id}"]`);
+          if (!pkt) return;
+          if (pkt.getAnimations && pkt.getAnimations().length) return; // already running
+          // Map this packet's slot inside the global cycle so all packets share the
+          // same iteration period and stay synchronised across loops.
+          const oStart   = delay / DIAG2_CYCLE_MS;
+          const oFadeIn  = (delay + dur * 0.12) / DIAG2_CYCLE_MS;
+          const oFadeOut = (delay + dur * 0.92) / DIAG2_CYCLE_MS;
+          const oEnd     = (delay + dur) / DIAG2_CYCLE_MS;
+          pkt.animate(
+            [
+              { cx: sx, cy: sy, opacity: 0, offset: 0 },
+              { cx: sx, cy: sy, opacity: 0, offset: oStart },
+              { cx: sx, cy: sy, opacity: 1, offset: oFadeIn },
+              { cx: ex, cy: ey, opacity: 1, offset: oFadeOut },
+              { cx: ex, cy: ey, opacity: 0, offset: oEnd },
+              { cx: ex, cy: ey, opacity: 0, offset: 1 },
+            ],
+            {
+              duration: DIAG2_CYCLE_MS,
+              easing: 'cubic-bezier(0.22, 1, 0.36, 1)',
+              iterations: Infinity,
+            }
+          );
+        });
+      }
+
+      const io = new IntersectionObserver((entries) => {
+        entries.forEach(e => {
+          if (!e.isIntersecting) return;
+          const svg = e.target;
+          svg.classList.add('is-anim');
+          if (svg.classList.contains('diag-anim--2')) runDiag2(svg);
+          io.unobserve(svg);
+        });
+      }, { threshold: 0.35 });
+      diags.forEach(d => io.observe(d));
+
+      // Diag 3 now loops on its own via CSS animation; no hover replay needed.
+    })();
+
+    /* ============================================================
+       Nav background fade-in after hero
+       ============================================================ */
+    (function navScroll() {
+      const nav = document.getElementById('js-nav');
+      if (!nav) return;
+      const onScroll = () => {
+        if (window.scrollY > 80) nav.classList.add('is-scrolled');
+        else nav.classList.remove('is-scrolled');
+      };
+      window.addEventListener('scroll', onScroll, { passive: true });
+      onScroll();
+    })();
+
+    /* ============================================================
+       Hero cosmic zoom — main galaxy recedes while satellites bloom
+       ============================================================ */
+    (function heroCosmicScroll() {
+      const NS = 'http://www.w3.org/2000/svg';
+      const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      const hero = document.getElementById('js-hero');
+      const mainGalaxy = document.querySelector('.galaxy');
+      const satellites = Array.from(document.querySelectorAll('.satellite-galaxy'));
+      if (!hero || !mainGalaxy) return;
+
+      const rand  = (a, b) => Math.random() * (b - a) + a;
+      const gauss = () => {
+        let u = 0, v = 0;
+        while (!u) u = Math.random();
+        while (!v) v = Math.random();
+        return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+      };
+
+      function buildSatellite(host, opts) {
+        const {
+          tilt = -22,
+          rotate = 0,
+          stars: starCount = 70,
+          coreScale = 1,
+          armSpeed = 90,
+          bulgePulse = 6,
+          corePulse = 4.5,
+        } = opts;
+        const A = 3.2, B = 0.30;
+        const T_MIN = 0.1, T_MAX = 4.4 * Math.PI;
+        const R_MAX = 86;
+        const ARM_OFFSET = Math.PI;
+        const spiral = (t) => A * Math.exp(B * t);
+
+        function buildArmPath(armIdx, radialOffset = 0) {
+          const offset = armIdx * ARM_OFFSET;
+          const pts = [];
+          for (let t = T_MIN; t <= T_MAX; t += 0.16) {
+            const r = spiral(t) + radialOffset;
+            if (r > R_MAX) break;
+            pts.push([r * Math.cos(t + offset), r * Math.sin(t + offset)]);
+          }
+          if (!pts.length) return '';
+          let d = `M ${pts[0][0].toFixed(2)} ${pts[0][1].toFixed(2)}`;
+          for (let i = 1; i < pts.length; i++) {
+            d += ` L ${pts[i][0].toFixed(2)} ${pts[i][1].toFixed(2)}`;
+          }
+          return d;
+        }
+
+        function animateTransform(el, attrName, type, from, to, dur) {
+          const a = document.createElementNS(NS, 'animateTransform');
+          a.setAttribute('attributeName', attrName);
+          a.setAttribute('type', type);
+          a.setAttribute('from', from);
+          a.setAttribute('to', to);
+          a.setAttribute('dur', dur);
+          a.setAttribute('repeatCount', 'indefinite');
+          el.appendChild(a);
+        }
+
+        function animateOpacity(el, values, dur) {
+          const a = document.createElementNS(NS, 'animate');
+          a.setAttribute('attributeName', 'opacity');
+          a.setAttribute('values', values);
+          a.setAttribute('dur', dur);
+          a.setAttribute('repeatCount', 'indefinite');
+          el.appendChild(a);
+        }
+
+        const svg = document.createElementNS(NS, 'svg');
+        svg.setAttribute('viewBox', '-100 -100 200 200');
+        svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+        svg.setAttribute('class', 'satellite-stage');
+
+        const root = document.createElementNS(NS, 'g');
+        root.setAttribute('transform', `rotate(${rotate})`);
+        svg.appendChild(root);
+
+        // Halo (outer glow) — slow opacity pulse for a living feel.
+        const haloG = document.createElementNS(NS, 'g');
+        animateOpacity(haloG, '0.85;1;0.85', `${bulgePulse + 3}s`);
+        const halo = document.createElementNS(NS, 'circle');
+        halo.setAttribute('cx', '0'); halo.setAttribute('cy', '0');
+        halo.setAttribute('r', '94');
+        halo.setAttribute('fill', 'url(#g-sat-halo)');
+        haloG.appendChild(halo);
+        root.appendChild(haloG);
+
+        // Tilted disk plane (vertical squash for inclination).
+        const tilted = document.createElementNS(NS, 'g');
+        tilted.setAttribute('transform', `rotate(${tilt}) scale(1, 0.42)`);
+
+        // Slow base disk rotation underneath the arms.
+        const diskRot = document.createElementNS(NS, 'g');
+        animateTransform(diskRot, 'transform', 'rotate', '0 0 0', '360 0 0', `${armSpeed * 2.2}s`);
+        const disk = document.createElementNS(NS, 'circle');
+        disk.setAttribute('cx', '0'); disk.setAttribute('cy', '0');
+        disk.setAttribute('r', '76');
+        disk.setAttribute('fill', 'url(#g-sat-disk)');
+        disk.setAttribute('opacity', '0.65');
+        diskRot.appendChild(disk);
+        tilted.appendChild(diskRot);
+
+        // Arms group — rotates faster, carries arm bands + dust + stars + HII.
+        const armsRot = document.createElementNS(NS, 'g');
+        animateTransform(armsRot, 'transform', 'rotate', '0 0 0', '360 0 0', `${armSpeed}s`);
+
+        // Spiral arm bands.
+        for (let arm = 0; arm < 2; arm++) {
+          const path = document.createElementNS(NS, 'path');
+          path.setAttribute('d', buildArmPath(arm));
+          path.setAttribute('stroke', 'url(#g-sat-arm)');
+          path.setAttribute('stroke-width', '14');
+          path.setAttribute('fill', 'none');
+          path.setAttribute('opacity', '0.55');
+          path.setAttribute('stroke-linecap', 'round');
+          armsRot.appendChild(path);
+        }
+
+        // Dust lanes — darker, slightly inside each arm.
+        for (let arm = 0; arm < 2; arm++) {
+          const dust = document.createElementNS(NS, 'path');
+          dust.setAttribute('d', buildArmPath(arm, -3));
+          dust.setAttribute('stroke', 'url(#g-sat-dust)');
+          dust.setAttribute('stroke-width', '5');
+          dust.setAttribute('fill', 'none');
+          dust.setAttribute('opacity', '0.75');
+          dust.setAttribute('stroke-linecap', 'round');
+          armsRot.appendChild(dust);
+        }
+
+        // Arm stars — denser, carrying the spiral structure.
+        const starsG = document.createElementNS(NS, 'g');
+        for (let arm = 0; arm < 2; arm++) {
+          const offset = arm * ARM_OFFSET;
+          for (let i = 0; i < starCount; i++) {
+            const u = Math.random();
+            const t = T_MIN + Math.pow(u, 0.65) * (T_MAX - T_MIN);
+            const baseR = spiral(t);
+            const scatter = 1.6 + baseR * 0.06;
+            const dr = gauss() * scatter;
+            const dt = gauss() * 0.07;
+            const r = baseR + dr;
+            if (r > R_MAX || r < 0) continue;
+            const angle = t + offset + dt;
+            const x = r * Math.cos(angle);
+            const y = r * Math.sin(angle);
+            const sr = Math.random();
+            const size = sr > 0.94 ? rand(0.7, 1.05) : sr > 0.78 ? rand(0.45, 0.7) : rand(0.25, 0.45);
+            const op = rand(0.45, 0.92);
+            const c = document.createElementNS(NS, 'circle');
+            c.setAttribute('cx', x.toFixed(2));
+            c.setAttribute('cy', y.toFixed(2));
+            c.setAttribute('r', size.toFixed(2));
+            const tint = Math.random();
+            let color = '#ffffff';
+            if (tint < 0.12) color = '#ffe4c2';
+            else if (tint < 0.18) color = '#ffb088';
+            c.setAttribute('fill', color);
+            c.setAttribute('opacity', op.toFixed(2));
+            starsG.appendChild(c);
+          }
+        }
+        armsRot.appendChild(starsG);
+
+        // HII regions — bright pink/warm star-forming spots inside the arms.
+        for (let arm = 0; arm < 2; arm++) {
+          const offset = arm * ARM_OFFSET;
+          for (let i = 0; i < 2; i++) {
+            const t = T_MIN + (T_MAX - T_MIN) * (0.45 + Math.random() * 0.45);
+            const baseR = spiral(t);
+            const r = baseR + gauss() * 3;
+            const angle = t + offset + gauss() * 0.05;
+            const x = r * Math.cos(angle);
+            const y = r * Math.sin(angle);
+            if (Math.hypot(x, y) > R_MAX - 5) continue;
+            const c = document.createElementNS(NS, 'circle');
+            c.setAttribute('cx', x.toFixed(2));
+            c.setAttribute('cy', y.toFixed(2));
+            c.setAttribute('r', rand(1.4, 2.4).toFixed(2));
+            c.setAttribute('fill', Math.random() < 0.55 ? 'url(#g-hii-pink)' : 'url(#g-hii-warm)');
+            c.setAttribute('opacity', rand(0.55, 0.85).toFixed(2));
+            armsRot.appendChild(c);
+          }
+        }
+
+        tilted.appendChild(armsRot);
+        root.appendChild(tilted);
+
+        // Bulge — slow opacity pulse, like the main galaxy.
+        const bulgeG = document.createElementNS(NS, 'g');
+        animateOpacity(bulgeG, '0.92;1;0.92', `${bulgePulse}s`);
+        const bulge = document.createElementNS(NS, 'circle');
+        bulge.setAttribute('cx', '0'); bulge.setAttribute('cy', '0');
+        bulge.setAttribute('r', (24 * coreScale).toFixed(1));
+        bulge.setAttribute('fill', 'url(#g-sat-bulge)');
+        bulgeG.appendChild(bulge);
+        root.appendChild(bulgeG);
+
+        // Core — faster pulse for the bright nucleus.
+        const coreG = document.createElementNS(NS, 'g');
+        animateOpacity(coreG, '0.85;1;0.85', `${corePulse}s`);
+        const core = document.createElementNS(NS, 'circle');
+        core.setAttribute('cx', '0'); core.setAttribute('cy', '0');
+        core.setAttribute('r', (8 * coreScale).toFixed(1));
+        core.setAttribute('fill', 'url(#g-sat-core)');
+        coreG.appendChild(core);
+        root.appendChild(coreG);
+
+        host.appendChild(svg);
+      }
+
+      // Per-position config: tilt + rotation + density + animation timing.
+      // Each satellite has a distinct rotational rhythm for variety.
+      const SATELLITE_CONFIGS = {
+        tl: { tilt: -38, rotate: 0,    stars: 95, coreScale: 1.05, armSpeed: 75,  bulgePulse: 7,   corePulse: 5 },
+        tr: { tilt: 22,  rotate: 70,   stars: 55, coreScale: 0.80, armSpeed: 105, bulgePulse: 6,   corePulse: 4 },
+        bl: { tilt: 58,  rotate: -50,  stars: 75, coreScale: 0.95, armSpeed: 130, bulgePulse: 8,   corePulse: 5.5 },
+        br: { tilt: -8,  rotate: 140,  stars: 40, coreScale: 0.70, armSpeed: 60,  bulgePulse: 5,   corePulse: 3.5 },
+      };
+
+      satellites.forEach(sat => {
+        const pos = sat.dataset.pos;
+        const cfg = SATELLITE_CONFIGS[pos] || SATELLITE_CONFIGS.tl;
+        buildSatellite(sat, cfg);
+      });
+
+      // Reduced motion: leave satellites invisible, no scroll-driven scaling.
+      if (reduced) return;
+
+      const stage = document.querySelector('.hero-stage');
+
+      let raf = 0;
+      const update = () => {
+        const rect = hero.getBoundingClientRect();
+        const heroH = hero.offsetHeight;
+        const vh = window.innerHeight;
+        const scrolled = -rect.top;
+
+        // Faster, lighter zoom — peaks within ~a third of the hero scroll
+        // and the main galaxy only recedes a modest amount.
+        const start = vh * 0.05;
+        const end = vh * 0.35;
+        let progress = 0;
+        if (heroH > 0) {
+          progress = Math.max(0, Math.min(1, (scrolled - start) / (end - start)));
+        }
+
+        // Subtle recede: scale 1.0 → 0.7 (was 1.0 → 0.42).
+        const mainScale = 1 - progress * 0.3;
+        mainGalaxy.style.transform = `scale(${mainScale.toFixed(3)})`;
+
+        const baseDelay = 0;
+        const span = 0.55;
+        satellites.forEach((sat, i) => {
+          const delay = baseDelay + i * 0.04;
+          const local = Math.max(0, Math.min(1, (progress - delay) / span));
+          const eased = 1 - Math.pow(1 - local, 3);
+          const op = (eased * 0.88).toFixed(3);
+          // Subtle approach: 0.65 → 0.85 (only a small zoom-in toward viewer).
+          const scale = (0.65 + eased * 0.2).toFixed(3);
+          sat.style.opacity = op;
+          sat.style.transform = `scale(${scale})`;
+        });
+
+        // Fade the fixed cosmic stage starting at the midpoint of the cosmic
+        // ramp — the scene gradually darkens as the camera pulls back.
+        if (stage) {
+          const fadeStart = start + (end - start) * 0.5;
+          const fadeEnd = heroH;
+          let stageOp = 1;
+          if (scrolled >= fadeEnd) {
+            stageOp = 0;
+          } else if (scrolled > fadeStart) {
+            stageOp = Math.max(0, (fadeEnd - scrolled) / (fadeEnd - fadeStart));
+          }
+          stage.style.opacity = stageOp.toFixed(3);
+        }
+      };
+
+      const onScroll = () => {
+        if (raf) return;
+        raf = requestAnimationFrame(() => {
+          update();
+          raf = 0;
+        });
+      };
+
+      window.addEventListener('scroll', onScroll, { passive: true });
+      window.addEventListener('resize', onScroll, { passive: true });
+      update();
+    })();
+  </script>
+</body>
+</html>
