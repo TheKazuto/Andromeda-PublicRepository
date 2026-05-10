@@ -64,6 +64,7 @@ use andromeda_auth::{
     WEBAUTHN_CLIENT_DATA_JSON_MAX,
 };
 use ika_dwallet_quasar::DWalletContext;
+use andromeda_policy_shared::validate_ika_cpi_accounts;
 use quasar_lang::prelude::*;
 use solana_address::Address;
 
@@ -74,6 +75,7 @@ const MAX_DESTINATIONS: usize = 16;
 const MEMBERS_BYTES: usize = MAX_MEMBERS * MEMBER_SLOT_LEN; // 544
 const DESTINATIONS_BYTES: usize = MAX_DESTINATIONS * 32; // 512
 const MIN_COOLDOWN_SECONDS: u64 = 3600;
+const MAX_COOLDOWN_SECONDS: u64 = 365 * 24 * 3600;
 const MAX_SESSION_TTL_SECONDS: i64 = 7 * 24 * 3600;
 
 const PENDING_KIND_NONE: u8 = 0;
@@ -123,11 +125,11 @@ mod rules_policy_program {
             allowed_destinations_some,
             current_ts,
         )?;
-        emit!(PolicyDeployed {
+        ctx.accounts.program.emit_event(&PolicyDeployed {
             policy: policy_addr,
             dwallet: dwallet_addr,
             ts: current_ts,
-        });
+        }, &ctx.accounts.event_authority, EventAuthority::BUMP)?;
         Ok(())
     }
 
@@ -151,11 +153,11 @@ mod rules_policy_program {
         let current_ts: i64 = ctx.accounts.clock.unix_timestamp.into();
         let policy_addr = *ctx.accounts.policy.address();
         let request_hash = Address::from(message_digest);
-        emit!(SignatureRequested {
+        ctx.accounts.program.emit_event(&SignatureRequested {
             policy: policy_addr,
             request_hash,
             ts: current_ts,
-        });
+        }, &ctx.accounts.event_authority, EventAuthority::BUMP)?;
         ctx.accounts.recover(
             message_digest,
             metadata_digest,
@@ -165,11 +167,11 @@ mod rules_policy_program {
             cpi_authority_bump,
             expected_nonce,
         )?;
-        emit!(SignatureApproved {
+        ctx.accounts.program.emit_event(&SignatureApproved {
             policy: policy_addr,
             request_hash,
             ts: current_ts,
-        });
+        }, &ctx.accounts.event_authority, EventAuthority::BUMP)?;
         Ok(())
     }
 
@@ -264,17 +266,17 @@ mod rules_policy_program {
         let current_ts: i64 = ctx.accounts.clock.unix_timestamp.into();
         let policy_addr = *ctx.accounts.policy.address();
         let request_hash = Address::from(ctx.accounts.session.message_digest);
-        emit!(SignatureRequested {
+        ctx.accounts.program.emit_event(&SignatureRequested {
             policy: policy_addr,
             request_hash,
             ts: current_ts,
-        });
+        }, &ctx.accounts.event_authority, EventAuthority::BUMP)?;
         ctx.accounts.finalize(cpi_authority_bump, current_ts)?;
-        emit!(SignatureApproved {
+        ctx.accounts.program.emit_event(&SignatureApproved {
             policy: policy_addr,
             request_hash,
             ts: current_ts,
-        });
+        }, &ctx.accounts.event_authority, EventAuthority::BUMP)?;
         Ok(())
     }
 
@@ -468,6 +470,8 @@ pub enum RulesPolicyError {
     SessionFinalizable,
     InvalidSessionTtl,
     AlreadyContributed,
+    InvalidFlag,
+    CooldownTooLong,
 }
 
 // ── Accounts: RulesPolicy ───────────────────────────────────────
@@ -549,6 +553,25 @@ fn init_authority_hash_from_slot(slot: &[u8; MEMBER_SLOT_LEN]) -> Address {
     Address::from(hashv(&[slot]))
 }
 
+#[inline]
+fn validate_optional_flag(flag: u8) -> Result<(), ProgramError> {
+    require!(flag == 0 || flag == 1, RulesPolicyError::InvalidFlag);
+    Ok(())
+}
+
+#[inline]
+fn validate_cooldown(cooldown_seconds: u64) -> Result<(), ProgramError> {
+    require!(
+        cooldown_seconds >= MIN_COOLDOWN_SECONDS,
+        RulesPolicyError::CooldownTooShort
+    );
+    require!(
+        cooldown_seconds <= MAX_COOLDOWN_SECONDS,
+        RulesPolicyError::CooldownTooLong
+    );
+    Ok(())
+}
+
 /// Verify primary signed `challenge` over `sysvar_data`. Primary slot must be
 /// schemes 0/1/2 (Ed25519 / Secp256k1 / Secp256r1).
 fn verify_primary_challenge(
@@ -592,6 +615,8 @@ pub struct InitPolicy {
     pub clock: Sysvar<Clock>,
     pub rent: Sysvar<Rent>,
     pub system_program: Program<SystemProgram>,
+    pub event_authority: EventAuthority,
+    pub program: Program<RulesPolicyProgram>,
 }
 
 impl InitPolicy {
@@ -629,9 +654,12 @@ impl InitPolicy {
 
         require!(quorum_threshold >= 1, RulesPolicyError::InvalidThreshold);
         require!(
-            cooldown_seconds >= MIN_COOLDOWN_SECONDS,
-            RulesPolicyError::CooldownTooShort
+            (quorum_threshold as usize) <= MAX_MEMBERS,
+            RulesPolicyError::InvalidThreshold
         );
+        validate_optional_flag(daily_limit_some)?;
+        validate_optional_flag(allowed_destinations_some)?;
+        validate_cooldown(cooldown_seconds)?;
         validate_slot(&primary_slot).map_err(|_| RulesPolicyError::InvalidMemberSlot)?;
         require!(
             primary_slot[0] != SCHEME_WEBAUTHN,
@@ -723,6 +751,8 @@ pub struct RecoverAsPrimary {
     pub instructions_sysvar: UncheckedAccount,
     pub clock: Sysvar<Clock>,
     pub system_program: Program<SystemProgram>,
+    pub event_authority: EventAuthority,
+    pub program: Program<RulesPolicyProgram>,
 }
 
 impl RecoverAsPrimary {
@@ -760,6 +790,13 @@ impl RecoverAsPrimary {
         drop(sysvar_data_ref);
 
         self.policy.next_primary_recover_nonce = (policy_nonce + 1).into();
+        require!(
+            validate_ika_cpi_accounts(
+                &self.dwallet_program.to_account_view(),
+                &self.dwallet_account.to_account_view(),
+            ),
+            RulesPolicyError::AuthFailed
+        );
 
         let dwallet_ctx = DWalletContext {
             dwallet_program: self.dwallet_program.to_account_view(),
@@ -861,6 +898,7 @@ impl QuorumSessionOpen {
         let payer_addr = *self.payer.address();
         let threshold = self.policy.quorum_threshold;
         let member_count = self.policy.member_count;
+        require!(member_count >= threshold, RulesPolicyError::InvalidThreshold);
         let mut members_snapshot = [0u8; MEMBERS_BYTES];
         members_snapshot.copy_from_slice(&self.policy.members_flat);
 
@@ -998,6 +1036,8 @@ pub struct QuorumSessionFinalize {
     pub dwallet_program: UncheckedAccount,
     pub clock: Sysvar<Clock>,
     pub system_program: Program<SystemProgram>,
+    pub event_authority: EventAuthority,
+    pub program: Program<RulesPolicyProgram>,
 }
 
 impl QuorumSessionFinalize {
@@ -1049,6 +1089,13 @@ impl QuorumSessionFinalize {
         }
 
         self.session.finalized_at = current_ts.into();
+        require!(
+            validate_ika_cpi_accounts(
+                &self.dwallet_program.to_account_view(),
+                &self.dwallet_account.to_account_view(),
+            ),
+            RulesPolicyError::AuthFailed
+        );
 
         let dwallet_ctx = DWalletContext {
             dwallet_program: self.dwallet_program.to_account_view(),
@@ -1306,6 +1353,10 @@ impl AdminAction {
         expected_nonce: u64,
     ) -> Result<(), ProgramError> {
         require!(new_threshold >= 1, RulesPolicyError::InvalidThreshold);
+        require!(
+            new_threshold <= core::cmp::max(1, self.policy.member_count),
+            RulesPolicyError::InvalidThreshold
+        );
         self.run(expected_nonce, |dw, primary, n| {
             admin_set_quorum_threshold_immediate_challenge(dw, new_threshold, n, primary)
         })?;
@@ -1321,6 +1372,7 @@ impl AdminAction {
         new_limit: u64,
         expected_nonce: u64,
     ) -> Result<(), ProgramError> {
+        validate_optional_flag(new_some)?;
         self.run(expected_nonce, |dw, primary, n| {
             admin_set_daily_limit_immediate_challenge(dw, new_some, new_limit, n, primary)
         })?;
@@ -1336,10 +1388,7 @@ impl AdminAction {
         new_cooldown_seconds: u64,
         expected_nonce: u64,
     ) -> Result<(), ProgramError> {
-        require!(
-            new_cooldown_seconds >= MIN_COOLDOWN_SECONDS,
-            RulesPolicyError::CooldownTooShort
-        );
+        validate_cooldown(new_cooldown_seconds)?;
         self.run(expected_nonce, |dw, primary, n| {
             admin_set_cooldown_immediate_challenge(dw, new_cooldown_seconds, n, primary)
         })?;
@@ -1356,12 +1405,19 @@ impl AdminAction {
         current_ts: i64,
     ) -> Result<(), ProgramError> {
         require!(new_threshold >= 1, RulesPolicyError::InvalidThreshold);
+        require!(
+            new_threshold <= core::cmp::max(1, self.policy.member_count),
+            RulesPolicyError::InvalidThreshold
+        );
         self.run(expected_nonce, |dw, primary, n| {
             admin_propose_quorum_threshold_challenge(dw, new_threshold, n, primary)
         })?;
         let cooldown: u64 = self.policy.policy_change_cooldown_seconds.into();
         self.policy.pending_change_some = PENDING_KIND_QUORUM;
-        self.policy.pending_activates_at = (current_ts + cooldown as i64).into();
+        let activates_at = current_ts
+            .checked_add(cooldown as i64)
+            .ok_or(RulesPolicyError::CooldownTooLong)?;
+        self.policy.pending_activates_at = activates_at.into();
         self.policy.pending_quorum_threshold = new_threshold;
         Ok(())
     }
@@ -1374,12 +1430,16 @@ impl AdminAction {
         expected_nonce: u64,
         current_ts: i64,
     ) -> Result<(), ProgramError> {
+        validate_optional_flag(new_some)?;
         self.run(expected_nonce, |dw, primary, n| {
             admin_propose_daily_limit_challenge(dw, new_some, new_limit, n, primary)
         })?;
         let cooldown: u64 = self.policy.policy_change_cooldown_seconds.into();
         self.policy.pending_change_some = PENDING_KIND_DAILY_LIMIT;
-        self.policy.pending_activates_at = (current_ts + cooldown as i64).into();
+        let activates_at = current_ts
+            .checked_add(cooldown as i64)
+            .ok_or(RulesPolicyError::CooldownTooLong)?;
+        self.policy.pending_activates_at = activates_at.into();
         self.policy.pending_daily_limit_some = new_some;
         self.policy.pending_daily_limit = new_limit.into();
         Ok(())
@@ -1392,16 +1452,16 @@ impl AdminAction {
         expected_nonce: u64,
         current_ts: i64,
     ) -> Result<(), ProgramError> {
-        require!(
-            new_cooldown_seconds >= MIN_COOLDOWN_SECONDS,
-            RulesPolicyError::CooldownTooShort
-        );
+        validate_cooldown(new_cooldown_seconds)?;
         self.run(expected_nonce, |dw, primary, n| {
             admin_propose_cooldown_challenge(dw, new_cooldown_seconds, n, primary)
         })?;
         let cooldown: u64 = self.policy.policy_change_cooldown_seconds.into();
         self.policy.pending_change_some = PENDING_KIND_COOLDOWN;
-        self.policy.pending_activates_at = (current_ts + cooldown as i64).into();
+        let activates_at = current_ts
+            .checked_add(cooldown as i64)
+            .ok_or(RulesPolicyError::CooldownTooLong)?;
+        self.policy.pending_activates_at = activates_at.into();
         self.policy.pending_cooldown_seconds = new_cooldown_seconds.into();
         Ok(())
     }
