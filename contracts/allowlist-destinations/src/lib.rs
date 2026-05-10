@@ -21,6 +21,7 @@ use andromeda_auth::{
     validate_slot, verify_signature, AuthError, VerifyInput, MEMBER_SLOT_LEN, SCHEME_WEBAUTHN,
 };
 use ika_dwallet_quasar::DWalletContext;
+use andromeda_policy_shared::validate_ika_cpi_accounts;
 use quasar_lang::prelude::*;
 use solana_address::Address;
 
@@ -51,11 +52,11 @@ mod allowlist_destinations {
         let policy_addr = *ctx.accounts.policy.address();
         let dwallet_addr = *ctx.accounts.dwallet_account.address();
         ctx.accounts.create(init_authority_slot, init_authority_hash, owner_slot)?;
-        emit!(PolicyDeployed {
+        ctx.accounts.program.emit_event(&PolicyDeployed {
             policy: policy_addr,
             dwallet: dwallet_addr,
             ts: current_ts,
-        });
+        }, &ctx.accounts.event_authority, EventAuthority::BUMP)?;
         Ok(())
     }
 
@@ -75,11 +76,11 @@ mod allowlist_destinations {
         let current_ts: i64 = ctx.accounts.clock.unix_timestamp.into();
         let policy_addr = *ctx.accounts.policy.address();
         let request_hash = Address::from(message_digest);
-        emit!(SignatureRequested {
+        ctx.accounts.program.emit_event(&SignatureRequested {
             policy: policy_addr,
             request_hash,
             ts: current_ts,
-        });
+        }, &ctx.accounts.event_authority, EventAuthority::BUMP)?;
         ctx.accounts.request(
             message_digest,
             metadata_digest,
@@ -89,11 +90,11 @@ mod allowlist_destinations {
             cpi_authority_bump,
             destination,
         )?;
-        emit!(SignatureApproved {
+        ctx.accounts.program.emit_event(&SignatureApproved {
             policy: policy_addr,
             request_hash,
             ts: current_ts,
-        });
+        }, &ctx.accounts.event_authority, EventAuthority::BUMP)?;
         Ok(())
     }
 
@@ -119,10 +120,10 @@ mod allowlist_destinations {
         let current_ts: i64 = ctx.accounts.clock.unix_timestamp.into();
         let policy_addr = *ctx.accounts.policy.address();
         ctx.accounts.pause(expected_nonce)?;
-        emit!(PolicyPaused {
+        ctx.accounts.program.emit_event(&PolicyPaused {
             policy: policy_addr,
             ts: current_ts,
-        });
+        }, &ctx.accounts.event_authority, EventAuthority::BUMP)?;
         Ok(())
     }
 
@@ -136,10 +137,10 @@ mod allowlist_destinations {
         let current_ts: i64 = ctx.accounts.clock.unix_timestamp.into();
         let policy_addr = *ctx.accounts.policy.address();
         ctx.accounts.resume(expected_nonce)?;
-        emit!(PolicyResumed {
+        ctx.accounts.program.emit_event(&PolicyResumed {
             policy: policy_addr,
             ts: current_ts,
-        });
+        }, &ctx.accounts.event_authority, EventAuthority::BUMP)?;
         Ok(())
     }
 
@@ -251,6 +252,8 @@ pub struct InitPolicy {
     pub clock: Sysvar<Clock>,
     pub rent: Sysvar<Rent>,
     pub system_program: Program<SystemProgram>,
+    pub event_authority: EventAuthority,
+    pub program: Program<AllowlistDestinations>,
 }
 
 impl InitPolicy {
@@ -340,6 +343,8 @@ pub struct RequestSignature {
     pub dwallet_program: UncheckedAccount,
     pub clock: Sysvar<Clock>,
     pub system_program: Program<SystemProgram>,
+    pub event_authority: EventAuthority,
+    pub program: Program<AllowlistDestinations>,
 }
 
 impl RequestSignature {
@@ -368,6 +373,13 @@ impl RequestSignature {
             }
         }
         require!(allowed, AllowlistError::DestinationNotAllowed);
+        require!(
+            validate_ika_cpi_accounts(
+                &self.dwallet_program.to_account_view(),
+                &self.dwallet_account.to_account_view(),
+            ),
+            AllowlistError::AuthFailed
+        );
 
         let dwallet_ctx = DWalletContext {
             dwallet_program: self.dwallet_program.to_account_view(),
@@ -408,6 +420,8 @@ pub struct AdminAction {
 
     #[account(mut)]
     pub payer: Signer,
+    pub event_authority: EventAuthority,
+    pub program: Program<AllowlistDestinations>,
 }
 
 impl AdminAction {
