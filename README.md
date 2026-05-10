@@ -3,11 +3,9 @@
 
   <h1>Andromeda</h1>
 
-  <p><strong>Multi-chain MPC + FHE infrastructure as REST and MCP.</strong></p>
+  <p><strong>Multi-chain MPC + FHE infrastructure as API and MCP Server.</strong></p>
 
-  <p>Connect any blockchain to threshold signing and confidential computing<br/>without writing Rust, Move, or running a single node.</p>
-
-  <p><em>One API for cross-chain wallets, on-chain policy enforcement, and social recovery —<br/>no SDK, no seed phrase, no Solana wallet for your users.</em></p>
+  <p>One API for cross-chain signing, confidential compute, and social recovery.<br/>No SDK, no node, no seed phrase, no chain-specific wallet for your users.</p>
 
   <p>
     <img src="https://img.shields.io/badge/license-Apache--2.0%20OR%20MIT-blue.svg" alt="License" />
@@ -24,22 +22,22 @@
 
 ## What is Andromeda?
 
-Andromeda is hosted infrastructure that turns two of Solana's most powerful primitives — Ika's 2PC-MPC threshold signing and Encrypt's homomorphic computation — into plain REST endpoints and MCP tools.
+Andromeda is hosted infrastructure that turns two of Solana's most powerful primitives, Ika's 2PC-MPC threshold signing and Encrypt's homomorphic computation, into plain REST endpoints and MCP tools.
 
-Threshold signing lets a single identity control wallets on every chain (EVM, Bitcoin, Cosmos, NEAR, Aptos, Solana, Substrate) with no seed phrase and no single point of compromise. Confidential computing lets authorization logic run directly on encrypted data. Both are extraordinary — and both, today, require running validator clients, writing Rust or Move programs that hold wallet authority, and shipping a Node runtime to your users.
+Threshold signing lets a single identity control wallets on every chain (EVM, Bitcoin, Cosmos, NEAR, Aptos, Solana, Substrate) with no seed phrase and no single point of compromise. Confidential computing lets authorization logic run directly on encrypted data. Both are extraordinary, and both today require running validator clients, writing Rust or Move programs that hold wallet authority, and shipping a Node runtime to your users.
 
-Andromeda removes all of that. You call an HTTPS endpoint. We run the engines, the on-chain policy programs, the gas, the wallet-agnostic auth layer, and the product surface around it. Your users never touch a Solana wallet, never hold SOL, never know there's an MPC network underneath.
+Andromeda removes all of that. You call an HTTPS endpoint. We run the engines, the on-chain policy programs, the gas, the wallet-agnostic auth layer, and the product surface around it. Your users never see the chain underneath: no wallet to install, no SOL to hold, no MPC network to learn.
 
 ## Why it matters
 
 - **Multi-chain is still mostly glue code.** Every team rebuilds key management, recovery, and per-chain signing from scratch. Andromeda is one API for all of it.
-- **"Smart wallet" usually means "trust our backend."** Andromeda's policies — allowlists, velocity guards, time-locks, oracle circuit breakers, session keys — are enforced by Solana programs that hold the dWallet authority. The gateway literally cannot bypass them.
-- **Recovery is crypto's unsolved UX problem.** Andromeda does social recovery where the user proves ownership of *any* wallet they already have — MetaMask, Phantom, Keplr, a BTC cold wallet, a passkey — by signing a 32-byte challenge. Andromeda pays the gas and submits the Solana transaction. Zero attestor: every signature is checked by a Solana runtime precompile, so a compromised Andromeda backend still cannot forge anyone's approval.
-- **AI agents need to sign things.** Every REST route is auto-mirrored as an MCP tool — an agent in Claude Desktop or Cursor can do signing, recovery and policy operations natively, with no SDK and no glue code.
+- **"Smart wallet" usually means "trust our backend."** Andromeda's policies (allowlists, velocity guards, time-locks, oracle circuit breakers, session keys) are enforced by Solana programs that hold the dWallet authority. The gateway literally cannot bypass them.
+- **Recovery is crypto's unsolved UX problem.** Andromeda does social recovery where the user proves ownership of *any* wallet they already have (MetaMask, Phantom, Keplr, a BTC cold wallet, a passkey) by signing a 32-byte challenge. Andromeda pays the gas and submits the Solana transaction. Zero attestor: every signature is checked by a Solana runtime precompile, so a compromised Andromeda backend still cannot forge anyone's approval.
+- **AI agents need to sign things.** Every REST route is auto-mirrored as an MCP tool, so an agent in Claude Desktop or Cursor can do signing, recovery and policy operations natively, with no SDK and no glue code.
 
 ### Built on Ika + Encrypt
 
-Andromeda doesn't reimplement the cryptography — it wraps it. Ika provides the 2PC-MPC dWallets; Encrypt provides the FHE evaluation; Andromeda provides everything around them: 8 audited Quasar policy programs, the recovery and identity layers, gas sponsorship, MCP, HMAC-signed webhooks, an externally verifiable ed25519 audit log, and OpenAPI 3.1. The hard cryptographic guarantees come from those networks; the developer experience comes from us.
+Andromeda doesn't reimplement the cryptography; it wraps it. Ika provides the 2PC-MPC dWallets; Encrypt provides the FHE evaluation; Andromeda provides everything around them: 8 audited Quasar policy programs, the recovery and identity layers, gas sponsorship, MCP, HMAC-signed webhooks, an externally verifiable ed25519 audit log, and OpenAPI 3.1. The hard cryptographic guarantees come from those networks; the developer experience comes from us.
 
 ---
 
@@ -50,75 +48,75 @@ Andromeda is a **B2D (Business-to-Developer)** platform.
 - **Web3 developers** building multi-chain apps that need a unified signing surface across EVM, Solana, Bitcoin, Cosmos, NEAR, Aptos, Substrate.
 - **Wallet and smart-wallet teams** that need cross-chain recovery and on-chain policy enforcement without writing Rust.
 - **DeFi protocols** that need treasury policies (allowlists, velocity guards, oracle circuit breakers) enforced by Solana programs, not by a centralised backend.
-- **AI agent builders** integrating signing capabilities into LLM workflows via MCP — no SDK, no glue code, just a streamable HTTP endpoint.
+- **AI agent builders** integrating signing capabilities into LLM workflows via MCP: no SDK, no glue code, just a streamable HTTP endpoint.
 - **Compliance-driven products** that need an externally verifiable audit log, GDPR-ready identity, and KMS-backed signing keys from day one.
 
 ---
 
 ## Use cases
 
-Cases that Andromeda specifically unblocks — not generic Web3 use cases.
+Cases that Andromeda specifically unblocks, not generic Web3 use cases.
 
-- **Cross-chain smart wallets** — same identity drives signing across EVM, Solana, Bitcoin, Cosmos, NEAR and Aptos. The user signs into the app once and the dWallet derived from the OAuth subject is consistent across every client.
-- **DAO treasuries with on-chain rule enforcement** — a Solana Quasar program (allowlist-destinations + velocity-guard) holds the dWallet authority. The treasury can only interact with whitelisted programs, capped at N signatures per slot window, with no ability for the gateway to bypass the policy.
-- **Trading bots with scoped delegation** — the session-keys template grants a temporary key with on-chain limits on slot expiry, number of uses, amount per transaction, and allowed destination programs. Multiple sessions per dWallet (up to 2^32 concurrent), each with its own monotonic replay nonce.
-- **AI agents that sign transactions** — every REST route on the gateway is auto-mirrored as an MCP tool. Drop the endpoint into Claude Desktop or Cursor and the agent can call signing, recovery, or policy operations natively.
-- **Social recovery without a Solana wallet** — primary or M-of-N quorum recovery where the user signs a 32-byte challenge with whatever wallet they already own (MetaMask, Phantom, Keplr, Sui, BTC cold wallet, passkey). Andromeda pays gas and submits the Solana transaction.
-- **FHE-gated confidential signing** — authorisation logic that runs on encrypted inputs. The decision is signed by an ed25519 key held in HashiCorp Vault, then validated on-chain by a Quasar program before the Ika signature is released. Useful for compliance checks, sealed-bid auctions, and private treasury rules.
+- **Cross-chain smart wallets.** Same identity drives signing across EVM, Solana, Bitcoin, Cosmos, NEAR and Aptos. The user signs into the app once and the dWallet derived from the OAuth subject is consistent across every client.
+- **DAO treasuries with on-chain rule enforcement.** A Solana Quasar program (allowlist-destinations + velocity-guard) holds the dWallet authority. The treasury can only interact with whitelisted programs, capped at N signatures per slot window, with no ability for the gateway to bypass the policy.
+- **Trading bots with scoped delegation.** The session-keys template grants a temporary key with on-chain limits on slot expiry, number of uses, amount per transaction, and allowed destination programs. Multiple sessions per dWallet (up to 2^32 concurrent), each with its own monotonic replay nonce.
+- **AI agents that sign transactions.** Every REST route on the gateway is auto-mirrored as an MCP tool. Drop the endpoint into Claude Desktop or Cursor and the agent can call signing, recovery, or policy operations natively.
+- **Social recovery with the wallet you already have.** Primary or M-of-N quorum recovery where the user signs a 32-byte challenge with whatever wallet they already own (MetaMask, Phantom, Keplr, Sui, BTC cold wallet, passkey). Andromeda pays gas and submits the on-chain transaction.
+- **FHE-gated confidential signing.** Authorisation logic that runs on encrypted inputs. The decision is signed by an ed25519 key held in HashiCorp Vault, then validated on-chain by a Quasar program before the Ika signature is released. Useful for compliance checks, sealed-bid auctions, and private treasury rules.
 
 ---
 
 ## What the platform ships
 
-26 capabilities beyond raw signing — the surrounding product that you'd otherwise have to build yourself.
+26 capabilities beyond raw signing: the surrounding product that you'd otherwise have to build yourself.
 
 ### Multi-chain core
-- **Any wallet, any chain adapter for Ika** — uniform REST surface over 4 cryptographic curves (Ed25519, SECP256K1, SECP256R1, Ristretto).
-- **Multi-chain signing pipeline** — DKG, Presign, Sign, Future-Sign, Imported Key, Re-Encrypt Share exposed as stateless REST primitives.
+- **Any wallet, any chain adapter for Ika.** Uniform REST surface over 4 cryptographic curves (Ed25519, SECP256K1, SECP256R1, Ristretto).
+- **Multi-chain signing pipeline.** DKG, Presign, Sign, Future-Sign, Imported Key, Re-Encrypt Share exposed as stateless REST primitives.
 
 ### Wallet-agnostic + gas sponsor
-- **Gas sponsor** — Andromeda absorbs Solana fees on every flow it controls. End users sign 32-byte canonical challenges with whatever wallet they already own; the gateway pays gas and submits.
+- **Gas sponsor.** Andromeda absorbs Solana fees on every flow it controls. End users sign 32-byte canonical challenges with whatever wallet they already own; the gateway pays gas and submits.
 
 ### Custody-free recovery
-- **Recovery layer (primary + M-of-N quorum)** — primary single-sig flow + multi-tx PDA staging quorum. No bound on quorum size.
-- **Cross-chain recovery schemes** — 7 off-chain ownership-proof schemes + 4 on-chain credential schemes, all validated by Solana precompiles. Zero attestor.
-- **On-chain RulesPolicy** — Quasar program that holds dWallet authority with the policy PDA seeded by an init-authority hash (front-running protected), the Solana clock as the only time source, and strict pattern matching on the WebAuthn challenge field.
+- **Recovery layer (primary + M-of-N quorum).** Primary single-sig flow plus multi-tx PDA staging quorum. No bound on quorum size.
+- **Cross-chain recovery schemes.** 7 off-chain ownership-proof schemes plus 4 on-chain credential schemes, all validated by Solana precompiles. Zero attestor.
+- **On-chain RulesPolicy.** Quasar program that holds dWallet authority with the policy PDA seeded by an init-authority hash (front-running protected), the Solana clock as the only time source, and strict pattern matching on the WebAuthn challenge field.
 
 ### Policy templates
-- **8 Quasar policy templates** — rules-policy, allowlist-destinations, velocity-guard, time-lock, oracle-conditional, passkey-step-up, fhe-gated, session-keys. All audited, all wallet-agnostic.
-- **Session keys with multi-session** — up to 2^32 concurrent sessions per dWallet, each with a monotonic replay nonce that binds the message digest, amount, destination program, and signature nonce together.
+- **8 Quasar policy templates.** rules-policy, allowlist-destinations, velocity-guard, time-lock, oracle-conditional, passkey-step-up, fhe-gated, session-keys. All audited, all wallet-agnostic.
+- **Session keys with multi-session.** Up to 2^32 concurrent sessions per dWallet, each with a monotonic replay nonce that binds the message digest, amount, destination program, and signature nonce together.
 
 ### Confidential computing
-- **Confidential Workflows pipeline** — Encrypt FHE evaluation flows into Vault Transit ed25519, then into the Quasar fhe-gated policy, then into the Ika signature. An on-chain authority allowlist plus a non-zero decision-age window are enforced before any signature is released.
+- **Confidential Workflows pipeline.** Encrypt FHE evaluation flows into Vault Transit ed25519, then into the Quasar fhe-gated policy, then into the Ika signature. An on-chain authority allowlist plus a non-zero decision-age window are enforced before any signature is released.
 
 ### On-chain awareness + future-sign
-- **Webhook-driven Future-Sign** — arm a trigger (oracle / slot / event / external webhook), Andromeda fires the signature when the condition matches.
-- **IDL-aware Solana listener** — websocket subscription that parses the 6 canonical Andromeda events and 4 Anchor self-CPI events from Ika, fanning out to per-tenant webhooks.
-- **HMAC-signed webhook system** — replay-protected (5-minute window), retries with backoff, dead-letter queue.
+- **Webhook-driven Future-Sign.** Arm a trigger (oracle / slot / event / external webhook), Andromeda fires the signature when the condition matches.
+- **IDL-aware Solana listener.** Websocket subscription that parses the 6 canonical Andromeda events and 4 Anchor self-CPI events from Ika, fanning out to per-tenant webhooks.
+- **HMAC-signed webhook system.** Replay-protected (5-minute window), retries with backoff, dead-letter queue.
 
 ### Optional identity layer
-- **Identity Layer** — OAuth (Google/Apple/Twitter/GitHub) + email magic link + passkey-as-identity (WebAuthn PRF). The dWallet address is derived deterministically from the OAuth provider plus subject identifier, so any client doing OAuth on the same account derives the same wallet — cross-client recovery comes for free.
-- **Anti-enumeration + atomic single-use tokens** — the email-request endpoint always returns 200 (so attackers cannot probe which emails have accounts), and every token is consumed via an atomic single-use SQL update.
-- **PII encryption-at-rest** — AES-256-GCM envelope applied to identity records, account-link records, and email-token rows in Postgres. A DB dump leak does not become a PII leak.
-- **GDPR endpoints** — GET /me/export returns a full JSON dump of the user's identifiable data; DELETE /me cascades a purge across all linked records.
+- **Identity Layer.** OAuth (Google/Apple/Twitter/GitHub) plus email magic link plus passkey-as-identity (WebAuthn PRF). The dWallet address is derived deterministically from the OAuth provider plus subject identifier, so any client doing OAuth on the same account derives the same wallet, and cross-client recovery comes for free.
+- **Anti-enumeration + atomic single-use tokens.** The email-request endpoint always returns 200 (so attackers cannot probe which emails have accounts), and every token is consumed via an atomic single-use SQL update.
+- **PII encryption-at-rest.** AES-256-GCM envelope applied to identity records, account-link records, and email-token rows in Postgres. A DB dump leak does not become a PII leak.
+- **GDPR endpoints.** GET /me/export returns a full JSON dump of the user's identifiable data; DELETE /me cascades a purge across all linked records.
 
 ### API surface
-- **API key management with scopes and IP allowlist** — granular permissions (read, write, admin, wildcard), CIDR allowlist per key, SHA-256 hashing, async last-used tracking.
+- **API key management with scopes and IP allowlist.** Granular permissions (read, write, admin, wildcard), CIDR allowlist per key, SHA-256 hashing, async last-used tracking.
 
 ### Developer experience
-- **MCP Server with auto-generated tools** — 60 tools auto-registered from the same route catalogue that drives REST. Drop into Claude Desktop or Cursor with zero glue code.
-- **Capabilities endpoint** — public introspection of what is wired in this deployment (engines, features, MCP transport, route count).
-- **OpenAPI 3.1 + curl + Postman** — every public endpoint comes with a typed schema and copy-paste examples in Node, Go, Python, Rust.
-- **SDK metadata endpoint** — for any deployed policy, the gateway returns a tarball URL plus an install command for a typed TypeScript client tailored to that policy.
+- **MCP Server with auto-generated tools.** 60 tools auto-registered from the same route catalogue that drives REST. Drop into Claude Desktop or Cursor with zero glue code.
+- **Capabilities endpoint.** Public introspection of what is wired in this deployment (engines, features, MCP transport, route count).
+- **OpenAPI 3.1 + curl + Postman.** Every public endpoint comes with a typed schema and copy-paste examples in Node, Go, Python, Rust.
+- **SDK metadata endpoint.** For any deployed policy, the gateway returns a tarball URL plus an install command for a typed TypeScript client tailored to that policy.
 
 ### Operational excellence
-- **Idempotency-Key** — safe retries on every mutating endpoint, byte-identical replay, body-collision detection (422).
-- **Dry-run / Simulate** — uses Solana simulateTransaction and returns a structured diagnostic with would-succeed flag, failure boundary, estimated compute units, emitted events, and full logs.
-- **Auto-batching of signatures** — pack up to 64 signature requests into K Solana transactions (greedy packing, 1180-byte cap, max 16 per tx).
+- **Idempotency-Key.** Safe retries on every mutating endpoint, byte-identical replay, body-collision detection (422).
+- **Dry-run / Simulate.** Uses Solana simulateTransaction and returns a structured diagnostic with would-succeed flag, failure boundary, estimated compute units, emitted events, and full logs.
+- **Auto-batching of signatures.** Pack up to 64 signature requests into K Solana transactions (greedy packing, 1180-byte cap, max 16 per tx).
 
 ### Compliance + KMS
-- **Signed exportable Audit Log** — per-tenant ed25519 hash chain signed by HashiCorp Vault Transit. Externally verifiable without trusting Andromeda.
-- **Vault Transit KMS** — two separate ed25519 keys (one for audit signing, one for FHE authority), each with a sign-only policy and its own periodic token. Andromeda never sees the private material.
+- **Signed exportable Audit Log.** Per-tenant ed25519 hash chain signed by HashiCorp Vault Transit. Externally verifiable without trusting Andromeda.
+- **Vault Transit KMS.** Two separate ed25519 keys (one for audit signing, one for FHE authority), each with a sign-only policy and its own periodic token. Andromeda never sees the private material.
 
 ---
 
@@ -148,7 +146,7 @@ Cases that Andromeda specifically unblocks — not generic Web3 use cases.
                 network                   (devnet)
 
      ┌────────────────────────────────────────────────────┐
-     │  Solana devnet — 8 Quasar policy programs          │
+     │  Solana devnet: 8 Quasar policy programs           │
      │  Hold dWallet authority, validate every sig        │
      │  via runtime precompiles (zero attestor)           │
      └────────────────────────────────────────────────────┘
@@ -173,13 +171,13 @@ The product surface is composed of **5 services** plus **8 on-chain Quasar progr
 
 ### Try it now (no install)
 
-A live deployment is available — judge the platform without cloning anything.
+A live deployment is available. Judge the platform without cloning anything.
 
 ```bash
-# Public capability snapshot — no auth
+# Public capability snapshot (no auth)
 curl https://api.andromedainfra.pro/capabilities
 
-# OpenAPI 3.1 spec — auto-generated from routes
+# OpenAPI 3.1 spec (auto-generated from routes)
 curl https://api.andromedainfra.pro/openapi.json
 
 # Public pricing catalogue
@@ -201,12 +199,12 @@ curl -X POST https://api.andromedainfra.pro/v1/recovery/primary/challenge \
     "dwalletAddress": "<DWALLET_ADDRESS>",
     "messageHashHex": "<32-BYTE-HEX>"
   }'
-# → { "challengeBase64": "...", "expectedNonce": 7, "primaryScheme": "Ed25519" }
+# returns { "challengeBase64": "...", "expectedNonce": 7, "primaryScheme": "Ed25519" }
 
 # 2. User signs `challengeBase64` off-chain with their wallet
 #    (MetaMask, Phantom, Keplr, Sui Wallet, BTC cold wallet, passkey, etc.)
 
-# 3. Submit the signature — Andromeda pays gas and broadcasts
+# 3. Submit the signature. Andromeda pays gas and broadcasts
 curl -X POST https://api.andromedainfra.pro/v1/recovery/primary/submit \
   -H "X-Api-Key: $ANDROMEDA_KEY" \
   -H "Content-Type: application/json" \
@@ -216,10 +214,10 @@ curl -X POST https://api.andromedainfra.pro/v1/recovery/primary/submit \
     "signatureBase64": "<USER_SIGNATURE>",
     "expectedNonce": 7
   }'
-# → { "txSignature": "...", "messageApprovalAddress": "..." }
+# returns { "txSignature": "...", "messageApprovalAddress": "..." }
 ```
 
-The end user never holds SOL, never installs a Solana wallet, never sees a Solana RPC endpoint.
+The end user never holds SOL, never installs a new wallet, never sees an RPC endpoint.
 
 ### Connect via MCP
 
@@ -272,7 +270,7 @@ Every service ships a Dockerfile and a Railway config. The dashboard exports to 
 ( cd gateway         && go build -o bin/gateway ./cmd/server )
 ( cd ika-backend     && npm run build )
 ( cd encrypt-backend && npm run build )
-( cd dashboard       && npm run build )      # static export → out/
+( cd dashboard       && npm run build )      # static export to out/
 ```
 
 ### Test
@@ -330,4 +328,4 @@ Dual-licensed under **Apache-2.0 OR MIT**.
 
 ## Team
 
-Built by **Shinka Labs** — shinkalabs.com
+Built by **Shinka Labs**, shinkalabs.com
