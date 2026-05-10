@@ -31,6 +31,7 @@ use andromeda_auth::{
     validate_slot, verify_signature, AuthError, VerifyInput, MEMBER_SLOT_LEN, SCHEME_WEBAUTHN,
 };
 use ika_dwallet_quasar::DWalletContext;
+use andromeda_policy_shared::validate_ika_cpi_accounts;
 use quasar_lang::prelude::*;
 use solana_address::Address;
 
@@ -75,11 +76,11 @@ mod session_keys {
             max_amount_per_tx,
             max_uses,
         )?;
-        emit!(PolicyDeployed {
+        ctx.accounts.program.emit_event(&PolicyDeployed {
             policy: policy_addr,
             dwallet: dwallet_addr,
             ts: current_ts,
-        });
+        }, &ctx.accounts.event_authority, EventAuthority::BUMP)?;
         Ok(())
     }
 
@@ -115,11 +116,11 @@ mod session_keys {
         let current_ts: i64 = ctx.accounts.clock.unix_timestamp.into();
         let policy_addr = *ctx.accounts.session.address();
         let request_hash = Address::from(message_digest);
-        emit!(SignatureRequested {
+        ctx.accounts.program.emit_event(&SignatureRequested {
             policy: policy_addr,
             request_hash,
             ts: current_ts,
-        });
+        }, &ctx.accounts.event_authority, EventAuthority::BUMP)?;
         ctx.accounts.request(
             message_digest,
             metadata_digest,
@@ -132,11 +133,11 @@ mod session_keys {
             current_slot,
             expected_signature_nonce,
         )?;
-        emit!(SignatureApproved {
+        ctx.accounts.program.emit_event(&SignatureApproved {
             policy: policy_addr,
             request_hash,
             ts: current_ts,
-        });
+        }, &ctx.accounts.event_authority, EventAuthority::BUMP)?;
         Ok(())
     }
 
@@ -152,10 +153,10 @@ mod session_keys {
         let current_ts: i64 = ctx.accounts.clock.unix_timestamp.into();
         let policy_addr = *ctx.accounts.session.address();
         ctx.accounts.revoke(expected_nonce)?;
-        emit!(PolicyPaused {
+        ctx.accounts.program.emit_event(&PolicyPaused {
             policy: policy_addr,
             ts: current_ts,
-        });
+        }, &ctx.accounts.event_authority, EventAuthority::BUMP)?;
         Ok(())
     }
 
@@ -199,10 +200,10 @@ mod session_keys {
         let current_ts: i64 = ctx.accounts.clock.unix_timestamp.into();
         let policy_addr = *ctx.accounts.session.address();
         ctx.accounts.close(expected_nonce)?;
-        emit!(PolicyPaused {
+        ctx.accounts.program.emit_event(&PolicyPaused {
             policy: policy_addr,
             ts: current_ts,
-        });
+        }, &ctx.accounts.event_authority, EventAuthority::BUMP)?;
         Ok(())
     }
 
@@ -222,10 +223,10 @@ mod session_keys {
         let policy_addr = *ctx.accounts.session.address();
         let recipient_view = ctx.accounts.recipient.to_account_view();
         ctx.accounts.session.close(recipient_view)?;
-        emit!(PolicyPaused {
+        ctx.accounts.program.emit_event(&PolicyPaused {
             policy: policy_addr,
             ts: current_ts,
-        });
+        }, &ctx.accounts.event_authority, EventAuthority::BUMP)?;
         Ok(())
     }
 }
@@ -305,6 +306,8 @@ pub struct CreateSession {
 
     pub rent: Sysvar<Rent>,
     pub system_program: Program<SystemProgram>,
+    pub event_authority: EventAuthority,
+    pub program: Program<SessionKeys>,
 }
 
 impl CreateSession {
@@ -419,6 +422,8 @@ pub struct RequestSignatureViaSession {
     pub dwallet_program: UncheckedAccount,
     pub clock: Sysvar<Clock>,
     pub system_program: Program<SystemProgram>,
+    pub event_authority: EventAuthority,
+    pub program: Program<SessionKeys>,
 }
 
 impl RequestSignatureViaSession {
@@ -474,6 +479,13 @@ impl RequestSignatureViaSession {
         // Audit H3: increment signature nonce atomically before CPI.
         self.session.next_signature_nonce = (on_chain_nonce + 1).into();
         self.session.used_count = (used + 1).into();
+        require!(
+            validate_ika_cpi_accounts(
+                &self.dwallet_program.to_account_view(),
+                &self.dwallet_account.to_account_view(),
+            ),
+            SessionError::AuthFailed
+        );
 
         let dwallet_ctx = DWalletContext {
             dwallet_program: self.dwallet_program.to_account_view(),
@@ -515,6 +527,8 @@ pub struct AdminAction {
 
     #[account(mut)]
     pub payer: Signer,
+    pub event_authority: EventAuthority,
+    pub program: Program<SessionKeys>,
 }
 
 impl AdminAction {
@@ -633,6 +647,8 @@ pub struct CloseSession {
     /// so a stolen signature can't redirect rent.
     #[account(mut)]
     pub recipient: UncheckedAccount,
+    pub event_authority: EventAuthority,
+    pub program: Program<SessionKeys>,
 }
 
 impl CloseSession {
@@ -696,6 +712,8 @@ pub struct CloseExpiredSession {
 
     #[account(mut)]
     pub payer: Signer,
+    pub event_authority: EventAuthority,
+    pub program: Program<SessionKeys>,
 }
 
 #[inline]
