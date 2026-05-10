@@ -71,7 +71,7 @@ Cases that Andromeda specifically unblocks, not generic Web3 use cases.
 26 capabilities beyond the core Ika and Encrypt primitives: the surrounding product that you'd otherwise have to build yourself.
 
 ### Multi-chain core
-- **Any wallet, any chain adapter for Ika.** Uniform REST surface over 4 cryptographic curves (Ed25519, SECP256K1, SECP256R1, Ristretto).
+- **Any wallet, any chain adapter for Ika on Solana.** Uniform REST surface over 4 cryptographic curves (Ed25519, SECP256K1, SECP256R1, Ristretto).
 - **Multi-chain signing pipeline.** DKG, Presign, Sign, Future-Sign, Imported Key, Re-Encrypt Share exposed as stateless REST primitives.
 
 ### Wallet-agnostic + gas sponsor
@@ -309,6 +309,10 @@ All artefacts live on Solana **devnet** during pre-alpha.
 | passkey-step-up | 7xNwfNHtN11kf5JFNhsQTuciBskmWmZ8XcHSAeNdvorC | Require passkey proof above threshold |
 | fhe-gated | 6NhfKThEydSHH6R7gBm94reo3simopRJmb4nDzkKU7np | Gate signing on confidential FHE evaluation |
 | session-keys | 3Y2QaXiJH3aSiooDnGQsZQhYN72r47mYYbHp9YWyiASm | Multi-session scoped delegation |
+
+### Omniboard: retail showcase (in development)
+
+[Omniboard](https://omniboard.pro) is our retail-facing product, built entirely on top of Andromeda. Where Andromeda is the developer infrastructure (B2D), Omniboard is the consumer-facing app that puts the platform in front of end users: spin up a cross-chain wallet, attach on-chain policies, run signature flows and social recovery from the browser, with no code. It is still under active development; the link above is a preview of where it will live.
 
 ---
 
