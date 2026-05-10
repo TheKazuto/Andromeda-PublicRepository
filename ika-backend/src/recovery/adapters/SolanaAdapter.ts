@@ -54,6 +54,7 @@ import {
   decodeQuorumSessionAccount,
   decodeRulesPolicyAccount,
   findCpiAuthorityPda,
+  findEventAuthorityPda,
   findMessageApprovalPda,
   findQuorumSessionPda,
   findRulesPolicyPda,
@@ -330,6 +331,7 @@ export class SolanaAdapter implements PolicyAdapter {
     const dwallet = toAddress(input.dwalletAddress)
     const payer = getGasSponsorAddress()
     const policyPda = await findRulesPolicyPda(programId, dwallet, initAuthorityHash)
+    const eventAuthorityPda = await findEventAuthorityPda(programId)
 
     const primarySlot = memberSlotToCanonical(cfg.primary)
 
@@ -361,6 +363,7 @@ export class SolanaAdapter implements PolicyAdapter {
       policyPda: policyPda.address,
       dwallet,
       payer,
+      eventAuthorityPda: eventAuthorityPda.address,
       initAuthoritySlot: initAuthoritySlotBuf,
       initAuthorityHash,
       primarySlot,
@@ -515,6 +518,7 @@ export class SolanaAdapter implements PolicyAdapter {
 
     const policyPda = await findRulesPolicyPda(programId, dwallet, input.initAuthorityHash)
     const cpiAuthorityPda = await findCpiAuthorityPda(programId)
+    const eventAuthorityPda = await findEventAuthorityPda(programId)
     const messageApproval = await findMessageApprovalPda(ikaProgramId, dwallet, input.messageDigest)
 
     const precompileIx = buildCredentialPrecompile(
@@ -533,6 +537,7 @@ export class SolanaAdapter implements PolicyAdapter {
       cpiAuthorityPda: cpiAuthorityPda.address,
       callerProgram: programId,
       ikaProgramId,
+      eventAuthorityPda: eventAuthorityPda.address,
       initAuthorityHash: input.initAuthorityHash,
       messageDigest: input.messageDigest,
       metadataDigest: input.metadataDigest,
@@ -758,6 +763,7 @@ export class SolanaAdapter implements PolicyAdapter {
     const dwallet = session.dwalletAddress
     const policyPda = await findRulesPolicyPda(programId, dwallet, input.initAuthorityHash)
     const cpiAuthorityPda = await findCpiAuthorityPda(programId)
+    const eventAuthorityPda = await findEventAuthorityPda(programId)
     const messageApproval = await findMessageApprovalPda(
       ikaProgramId,
       dwallet,
@@ -776,6 +782,7 @@ export class SolanaAdapter implements PolicyAdapter {
       cpiAuthorityPda: cpiAuthorityPda.address,
       callerProgram: programId,
       ikaProgramId,
+      eventAuthorityPda: eventAuthorityPda.address,
       initAuthorityHash: input.initAuthorityHash,
       cpiAuthorityBump: cpiAuthorityPda.bump,
     })

@@ -79,6 +79,7 @@ export function buildInitPolicyInstruction(input: {
   policyPda: Address
   dwallet: Address
   payer: Address
+  eventAuthorityPda: Address
   initAuthoritySlot: Uint8Array
   initAuthorityHash: Uint8Array
   primarySlot: Uint8Array
@@ -111,6 +112,8 @@ export function buildInitPolicyInstruction(input: {
     { address: SYSVAR_CLOCK_ADDRESS, role: AccountRole.READONLY },
     { address: SYSVAR_RENT_ADDRESS, role: AccountRole.READONLY },
     { address: SYSTEM_PROGRAM_ADDRESS, role: AccountRole.READONLY },
+    { address: input.eventAuthorityPda, role: AccountRole.READONLY },
+    { address: input.programId, role: AccountRole.READONLY },
   ])
 }
 
@@ -126,6 +129,7 @@ export function buildRecoverAsPrimaryInstruction(input: {
   cpiAuthorityPda: Address
   callerProgram: Address
   ikaProgramId: Address
+  eventAuthorityPda: Address
   initAuthorityHash: Uint8Array
   messageDigest: Uint8Array
   metadataDigest: Uint8Array
@@ -163,6 +167,8 @@ export function buildRecoverAsPrimaryInstruction(input: {
     { address: SYSVAR_INSTRUCTIONS_ADDRESS, role: AccountRole.READONLY },
     { address: SYSVAR_CLOCK_ADDRESS, role: AccountRole.READONLY },
     { address: SYSTEM_PROGRAM_ADDRESS, role: AccountRole.READONLY },
+    { address: input.eventAuthorityPda, role: AccountRole.READONLY },
+    { address: input.programId, role: AccountRole.READONLY },
   ])
 }
 
@@ -295,6 +301,7 @@ export function buildQuorumSessionFinalizeInstruction(input: {
   cpiAuthorityPda: Address
   callerProgram: Address
   ikaProgramId: Address
+  eventAuthorityPda: Address
   initAuthorityHash: Uint8Array
   cpiAuthorityBump: number
 }): Instruction {
@@ -317,6 +324,8 @@ export function buildQuorumSessionFinalizeInstruction(input: {
     { address: input.ikaProgramId, role: AccountRole.READONLY },
     { address: SYSVAR_CLOCK_ADDRESS, role: AccountRole.READONLY },
     { address: SYSTEM_PROGRAM_ADDRESS, role: AccountRole.READONLY },
+    { address: input.eventAuthorityPda, role: AccountRole.READONLY },
+    { address: input.programId, role: AccountRole.READONLY },
   ])
 }
 
