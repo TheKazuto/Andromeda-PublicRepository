@@ -77,28 +77,30 @@ var All = []Route{
 	{Method: "POST", Path: "/v1/dwallet/re-encrypt-share/submit", Upstream: UpstreamIka, Key: "ika.re-encrypt-share.submit", Idempotent: true, RateClass: RateClassTx},
 	{Method: "POST", Path: "/v1/dwallet/make-share-public/submit", Upstream: UpstreamIka, Key: "ika.make-share-public.submit", Idempotent: true, RateClass: RateClassTx},
 
-	// Recovery — discovery (public-ish recovery flow gated by appId)
+	// Recovery — discovery (proves ownership of an external wallet; gated by appId)
 	{Method: "POST", Path: "/v1/recovery/challenge", Upstream: UpstreamIka, Key: "ika.recovery.challenge", Idempotent: true, RateClass: RateClassRead},
 	{Method: "POST", Path: "/v1/recovery/resolve", Upstream: UpstreamIka, Key: "ika.recovery.resolve", Idempotent: true, RateClass: RateClassTx},
 
-	// Recovery — primary (RulesPolicy bypass)
-	{Method: "POST", Path: "/v1/recovery/primary/prepare", Upstream: UpstreamIka, Key: "ika.recovery.primary.prepare", RateClass: RateClassTx},
+	// Recovery — primary (RulesPolicy primary-owner bypass; single tx, challenge-based)
+	{Method: "POST", Path: "/v1/recovery/primary/challenge", Upstream: UpstreamIka, Key: "ika.recovery.primary.challenge", Idempotent: true, RateClass: RateClassRead},
 	{Method: "POST", Path: "/v1/recovery/primary/submit", Upstream: UpstreamIka, Key: "ika.recovery.primary.submit", Idempotent: true, RateClass: RateClassTx},
 
-	// Recovery — quorum (M-of-N signers)
-	{Method: "POST", Path: "/v1/recovery/quorum/session/start", Upstream: UpstreamIka, Key: "ika.recovery.quorum.start", Idempotent: true, RateClass: RateClassTx},
+	// Recovery — quorum (M-of-N members; staged in a PDA, challenge-based)
+	{Method: "POST", Path: "/v1/recovery/quorum/session/open/challenge", Upstream: UpstreamIka, Key: "ika.recovery.quorum.open.challenge", Idempotent: true, RateClass: RateClassRead},
+	{Method: "POST", Path: "/v1/recovery/quorum/session/open", Upstream: UpstreamIka, Key: "ika.recovery.quorum.open", Idempotent: true, RateClass: RateClassTx},
+	{Method: "POST", Path: "/v1/recovery/quorum/session/contribute/challenge", Upstream: UpstreamIka, Key: "ika.recovery.quorum.contribute.challenge", Idempotent: true, RateClass: RateClassRead},
 	{Method: "POST", Path: "/v1/recovery/quorum/session/contribute", Upstream: UpstreamIka, Key: "ika.recovery.quorum.contribute", Idempotent: true, RateClass: RateClassTx},
-	{Method: "GET", Path: "/v1/recovery/quorum/session/{id}", Upstream: UpstreamIka, Key: "ika.recovery.quorum.get", RateClass: RateClassRead},
 	{Method: "POST", Path: "/v1/recovery/quorum/session/finalize", Upstream: UpstreamIka, Key: "ika.recovery.quorum.finalize", Idempotent: true, RateClass: RateClassTx, TimeoutSeconds: 120},
+	{Method: "POST", Path: "/v1/recovery/quorum/session/close", Upstream: UpstreamIka, Key: "ika.recovery.quorum.close", Idempotent: true, RateClass: RateClassTx},
+	{Method: "GET", Path: "/v1/recovery/quorum/session/{address}", Upstream: UpstreamIka, Key: "ika.recovery.quorum.get", RateClass: RateClassRead},
 
 	// Recovery — policy (RulesPolicy on-chain config)
 	{Method: "POST", Path: "/v1/recovery/policy/preview", Upstream: UpstreamIka, Key: "ika.recovery.policy.preview", RateClass: RateClassRead},
-	{Method: "POST", Path: "/v1/recovery/policy/deploy/prepare", Upstream: UpstreamIka, Key: "ika.recovery.policy.deploy.prepare", RateClass: RateClassTx},
-	{Method: "POST", Path: "/v1/recovery/policy/deploy/submit", Upstream: UpstreamIka, Key: "ika.recovery.policy.deploy.submit", Idempotent: true, RateClass: RateClassTx},
+	{Method: "POST", Path: "/v1/recovery/policy/deploy", Upstream: UpstreamIka, Key: "ika.recovery.policy.deploy", Idempotent: true, RateClass: RateClassTx},
 	{Method: "GET", Path: "/v1/recovery/policy/{dwalletAddress}", Upstream: UpstreamIka, Key: "ika.recovery.policy.get", RateClass: RateClassRead},
-	{Method: "POST", Path: "/v1/recovery/policy/change/prepare", Upstream: UpstreamIka, Key: "ika.recovery.policy.change.prepare", RateClass: RateClassTx},
-	{Method: "POST", Path: "/v1/recovery/policy/change/apply", Upstream: UpstreamIka, Key: "ika.recovery.policy.change.apply", Idempotent: true, RateClass: RateClassTx},
-	{Method: "POST", Path: "/v1/recovery/policy/revoke", Upstream: UpstreamIka, Key: "ika.recovery.policy.revoke", Idempotent: true, RateClass: RateClassTx},
+	{Method: "POST", Path: "/v1/recovery/policy/admin/challenge", Upstream: UpstreamIka, Key: "ika.recovery.policy.admin.challenge", Idempotent: true, RateClass: RateClassRead},
+	{Method: "POST", Path: "/v1/recovery/policy/admin/submit", Upstream: UpstreamIka, Key: "ika.recovery.policy.admin.submit", Idempotent: true, RateClass: RateClassTx},
+	{Method: "POST", Path: "/v1/recovery/policy/apply-pending", Upstream: UpstreamIka, Key: "ika.recovery.policy.apply-pending", Idempotent: true, RateClass: RateClassTx},
 
 	// Identity (opt-in email magic-link)
 	{Method: "POST", Path: "/v1/identity/email/request", Upstream: UpstreamIka, Key: "ika.identity.email.request", Idempotent: true, RateClass: RateClassTx},
