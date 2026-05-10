@@ -25,6 +25,7 @@ use andromeda_auth::{
     validate_slot, verify_signature, AuthError, VerifyInput, MEMBER_SLOT_LEN, SCHEME_WEBAUTHN,
 };
 use ika_dwallet_quasar::DWalletContext;
+use andromeda_policy_shared::validate_ika_cpi_accounts;
 use quasar_lang::prelude::*;
 use solana_address::Address;
 
@@ -103,11 +104,11 @@ mod oracle_conditional {
             max_age_slots,
             max_confidence_bps,
         )?;
-        emit!(PolicyDeployed {
+        ctx.accounts.program.emit_event(&PolicyDeployed {
             policy: policy_addr,
             dwallet: dwallet_addr,
             ts: current_ts,
-        });
+        }, &ctx.accounts.event_authority, EventAuthority::BUMP)?;
         Ok(())
     }
 
@@ -130,11 +131,11 @@ mod oracle_conditional {
         let current_ts: i64 = ctx.accounts.clock.unix_timestamp.into();
         let policy_addr = *ctx.accounts.policy.address();
         let request_hash = Address::from(message_digest);
-        emit!(SignatureRequested {
+        ctx.accounts.program.emit_event(&SignatureRequested {
             policy: policy_addr,
             request_hash,
             ts: current_ts,
-        });
+        }, &ctx.accounts.event_authority, EventAuthority::BUMP)?;
         ctx.accounts.request(
             message_digest,
             metadata_digest,
@@ -144,11 +145,11 @@ mod oracle_conditional {
             cpi_authority_bump,
             current_slot,
         )?;
-        emit!(SignatureApproved {
+        ctx.accounts.program.emit_event(&SignatureApproved {
             policy: policy_addr,
             request_hash,
             ts: current_ts,
-        });
+        }, &ctx.accounts.event_authority, EventAuthority::BUMP)?;
         Ok(())
     }
 
@@ -185,10 +186,10 @@ mod oracle_conditional {
         let current_ts: i64 = ctx.accounts.clock.unix_timestamp.into();
         let policy_addr = *ctx.accounts.policy.address();
         ctx.accounts.pause(expected_nonce)?;
-        emit!(PolicyPaused {
+        ctx.accounts.program.emit_event(&PolicyPaused {
             policy: policy_addr,
             ts: current_ts,
-        });
+        }, &ctx.accounts.event_authority, EventAuthority::BUMP)?;
         Ok(())
     }
 
@@ -202,10 +203,10 @@ mod oracle_conditional {
         let current_ts: i64 = ctx.accounts.clock.unix_timestamp.into();
         let policy_addr = *ctx.accounts.policy.address();
         ctx.accounts.resume(expected_nonce)?;
-        emit!(PolicyResumed {
+        ctx.accounts.program.emit_event(&PolicyResumed {
             policy: policy_addr,
             ts: current_ts,
-        });
+        }, &ctx.accounts.event_authority, EventAuthority::BUMP)?;
         Ok(())
     }
 }
@@ -312,6 +313,8 @@ pub struct InitPolicy {
     pub clock: Sysvar<Clock>,
     pub rent: Sysvar<Rent>,
     pub system_program: Program<SystemProgram>,
+    pub event_authority: EventAuthority,
+    pub program: Program<OracleConditional>,
 }
 
 impl InitPolicy {
@@ -422,6 +425,8 @@ pub struct RequestSignature {
     pub dwallet_program: UncheckedAccount,
     pub clock: Sysvar<Clock>,
     pub system_program: Program<SystemProgram>,
+    pub event_authority: EventAuthority,
+    pub program: Program<OracleConditional>,
 }
 
 impl RequestSignature {
@@ -467,6 +472,7 @@ impl RequestSignature {
         require!(current_price <= max, OracleError::PriceOutOfBounds);
 
         let max_age: u64 = self.policy.max_age_slots.into();
+        require!(current_slot >= posted_slot, OracleError::PriceTooStale);
         let age = current_slot.saturating_sub(posted_slot);
         require!(age <= max_age, OracleError::PriceTooStale);
 
@@ -488,6 +494,13 @@ impl RequestSignature {
                 OracleError::PriceTooUncertain
             );
         }
+        require!(
+            validate_ika_cpi_accounts(
+                &self.dwallet_program.to_account_view(),
+                &self.dwallet_account.to_account_view(),
+            ),
+            OracleError::AuthFailed
+        );
 
         let dwallet_ctx = DWalletContext {
             dwallet_program: self.dwallet_program.to_account_view(),
@@ -528,6 +541,8 @@ pub struct AdminAction {
 
     #[account(mut)]
     pub payer: Signer,
+    pub event_authority: EventAuthority,
+    pub program: Program<OracleConditional>,
 }
 
 impl AdminAction {
