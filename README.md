@@ -39,6 +39,8 @@ Andromeda removes all of that. You call an HTTPS endpoint. We run the engines, t
 
 Andromeda doesn't reimplement the cryptography; it wraps it. Ika provides the 2PC-MPC dWallets; Encrypt provides the FHE evaluation; Andromeda provides everything around them: 8 audited Quasar policy programs, the recovery and identity layers, gas sponsorship, MCP, HMAC-signed webhooks, an externally verifiable ed25519 audit log, and OpenAPI 3.1. The hard cryptographic guarantees come from those networks; the developer experience comes from us.
 
+Reference docs: [Ika](https://docs.ika.xyz/) · [Encrypt](https://docs.encrypt.xyz/).
+
 ---
 
 ## Who it's for
