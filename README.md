@@ -32,7 +32,7 @@ Andromeda removes all of that. You call an HTTPS endpoint. We run the engines, t
 
 - **Multi-chain is still mostly glue code.** Every team rebuilds key management, recovery, and per-chain signing from scratch. Andromeda is one API for all of it.
 - **"Smart wallet" usually means "trust our backend."** Andromeda's policies (allowlists, velocity guards, time-locks, oracle circuit breakers, session keys) are enforced by Solana programs that hold the dWallet authority. The gateway literally cannot bypass them.
-- **Recovery is crypto's unsolved UX problem.** Andromeda does social recovery where the user proves ownership of *any* wallet they already have (MetaMask, Phantom, Keplr, a BTC cold wallet, a passkey) by signing a 32-byte challenge. Andromeda pays the gas and submits the Solana transaction. Zero attestor: every signature is checked by a Solana runtime precompile, so a compromised Andromeda backend still cannot forge anyone's approval.
+- **Recovery is crypto's unsolved UX problem.** Andromeda does social recovery where the user proves ownership of *any* credential they already have (MetaMask, Phantom, a BTC cold wallet, Gmail, Apple, a passkey) by signing a 32-byte challenge. Andromeda pays the gas and submits the Solana transaction. Zero attestor: every signature is checked by a Solana runtime precompile, so a compromised Andromeda backend still cannot forge anyone's approval.
 - **AI agents need to sign things.** Every REST route is auto-mirrored as an MCP tool, so an agent in Claude Desktop or Cursor can do signing, recovery and policy operations natively, with no SDK and no glue code.
 
 ### Built on Ika + Encrypt
@@ -61,14 +61,14 @@ Cases that Andromeda specifically unblocks, not generic Web3 use cases.
 - **DAO treasuries with on-chain rule enforcement.** A Solana Quasar program (allowlist-destinations + velocity-guard) holds the dWallet authority. The treasury can only interact with whitelisted programs, capped at N signatures per slot window, with no ability for the gateway to bypass the policy.
 - **Trading bots with scoped delegation.** The session-keys template grants a temporary key with on-chain limits on slot expiry, number of uses, amount per transaction, and allowed destination programs. Multiple sessions per dWallet (up to 2^32 concurrent), each with its own monotonic replay nonce.
 - **AI agents that sign transactions.** Every REST route on the gateway is auto-mirrored as an MCP tool. Drop the endpoint into Claude Desktop or Cursor and the agent can call signing, recovery, or policy operations natively.
-- **Social recovery with the wallet you already have.** Primary or M-of-N quorum recovery where the user signs a 32-byte challenge with whatever wallet they already own (MetaMask, Phantom, Keplr, Sui, BTC cold wallet, passkey). Andromeda pays gas and submits the on-chain transaction.
+- **Social recovery with the wallet you already have.** A dWallet can be configured with a primary owner plus a roster of recovery owners: another device's passkey, a hardware wallet, trusted friends or family, a backup service. If the user ever loses their seed phrase, the dWallet is restored when any M-of-N of those owners each sign a 32-byte challenge with whatever they already use (MetaMask, Phantom, a BTC cold wallet, Gmail, Apple, and a passkey). Andromeda sponsors the gas and submits the on-chain transaction; the user needs no SDK and no extra wallet.
 - **FHE-gated confidential signing.** Authorisation logic that runs on encrypted inputs. The decision is signed by an ed25519 key held in HashiCorp Vault, then validated on-chain by a Quasar program before the Ika signature is released. Useful for compliance checks, sealed-bid auctions, and private treasury rules.
 
 ---
 
 ## What the platform ships
 
-26 capabilities beyond raw signing: the surrounding product that you'd otherwise have to build yourself.
+26 capabilities beyond the core Ika and Encrypt primitives: the surrounding product that you'd otherwise have to build yourself.
 
 ### Multi-chain core
 - **Any wallet, any chain adapter for Ika.** Uniform REST surface over 4 cryptographic curves (Ed25519, SECP256K1, SECP256R1, Ristretto).
@@ -201,8 +201,8 @@ curl -X POST https://api.andromedainfra.pro/v1/recovery/primary/challenge \
   }'
 # returns { "challengeBase64": "...", "expectedNonce": 7, "primaryScheme": "Ed25519" }
 
-# 2. User signs `challengeBase64` off-chain with their wallet
-#    (MetaMask, Phantom, Keplr, Sui Wallet, BTC cold wallet, passkey, etc.)
+# 2. User signs `challengeBase64` off-chain with their credential
+#    (MetaMask, Phantom, BTC cold wallet, Gmail, Apple, passkey, etc.)
 
 # 3. Submit the signature. Andromeda pays gas and broadcasts
 curl -X POST https://api.andromedainfra.pro/v1/recovery/primary/submit \
@@ -328,4 +328,4 @@ Dual-licensed under **Apache-2.0 OR MIT**.
 
 ## Team
 
-Built by **Shinka Labs**, shinkalabs.com
+Built by **Shinka Labs**, https://www.shinkalabs.tech/
