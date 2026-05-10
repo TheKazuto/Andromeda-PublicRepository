@@ -3,9 +3,15 @@
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
+import dynamic from "next/dynamic";
 import { ArrowRight } from "lucide-react";
 import { OAuthButtons } from "@/components/OAuthButtons";
 import { api, bootstrapSession, setToken, type AuthResp } from "@/lib/api";
+
+const SpacetimeBackground = dynamic(
+  () => import("@/components/SpacetimeBackground").then((m) => m.SpacetimeBackground),
+  { ssr: false },
+);
 
 export default function LoginPage() {
   const router = useRouter();
@@ -46,8 +52,9 @@ export default function LoginPage() {
   }
 
   return (
-    <main className="min-h-screen flex items-center justify-center px-4 atmosphere-ember">
-      <div className="w-full max-w-[400px] animate-fade-up">
+    <main className="relative min-h-screen flex items-center justify-center px-4">
+      <SpacetimeBackground />
+      <div className="relative w-full max-w-[400px] animate-fade-up" style={{ zIndex: 10 }}>
         <div className="card p-7">
           <h1 className="text-[22px] font-semibold tracking-tight mb-1">Welcome back</h1>
           <p className="text-sm text-slate-300 mb-6">Sign in to your Andromeda dashboard.</p>

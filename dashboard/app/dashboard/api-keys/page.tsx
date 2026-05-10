@@ -1,11 +1,14 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Plus, KeyRound, Copy, Check, Trash2, X, Pencil, Globe } from "lucide-react";
+import { Plus, KeyRound, Copy, Check, Trash2, X, Pencil, Globe, Link2 } from "lucide-react";
 import { Topbar } from "@/components/Topbar";
 import { PageTitle } from "@/components/PageTitle";
 import { api, type APIKey } from "@/lib/api";
 import { formatDate, timeAgo } from "@/lib/format";
+
+const API_ENDPOINT =
+  process.env.NEXT_PUBLIC_GATEWAY_URL || "https://api.andromedainfra.pro";
 
 // Convert a textarea value (one origin per line) to a clean string array.
 function parseOriginsInput(raw: string): string[] {
@@ -38,7 +41,14 @@ export default function ApiKeysPage() {
 
   const [revealedKey, setRevealedKey] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [endpointCopied, setEndpointCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  function copyEndpoint() {
+    navigator.clipboard.writeText(API_ENDPOINT);
+    setEndpointCopied(true);
+    setTimeout(() => setEndpointCopied(false), 1500);
+  }
 
   function refresh() {
     setLoading(true);
@@ -176,6 +186,33 @@ export default function ApiKeysPage() {
               {error}
             </div>
           )}
+
+          <div className="card p-5 mb-6">
+            <div className="flex items-start gap-4">
+              <div className="w-10 h-10 grid place-items-center rounded-lg bg-ember/10 border border-ember/20 shrink-0">
+                <Link2 size={16} strokeWidth={1.6} className="text-ember-soft" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="text-[13px] font-medium text-snow mb-0.5">API endpoint</div>
+                <p className="text-xs text-slate-400 mb-3">
+                  Point your HTTPS requests to this base URL. Authenticate with any active key below using the <code className="font-mono text-slate-300">X-Api-Key</code> header.
+                </p>
+                <div className="flex items-stretch gap-2">
+                  <div className="flex-1 font-mono text-[13px] bg-void border border-white/[0.06] rounded-lg px-3 py-2.5 break-all">
+                    {API_ENDPOINT}
+                  </div>
+                  <button
+                    onClick={copyEndpoint}
+                    className="btn-secondary shrink-0"
+                    aria-label="Copy API endpoint"
+                  >
+                    {endpointCopied ? <Check size={14} strokeWidth={1.6} /> : <Copy size={14} strokeWidth={1.6} />}
+                    {endpointCopied ? "Copied" : "Copy"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
 
           <div className="card overflow-hidden">
             <div className="grid grid-cols-[1.4fr_1.5fr_1fr_1fr_100px] gap-4 px-5 py-3 border-b border-white/[0.05] text-[11px] uppercase tracking-[0.12em] text-slate-400 font-medium">
