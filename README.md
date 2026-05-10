@@ -7,6 +7,8 @@
 
   <p>Connect any blockchain to threshold signing and confidential computing<br/>without writing Rust, Move, or running a single node.</p>
 
+  <p><em>One API for cross-chain wallets, on-chain policy enforcement, and social recovery —<br/>no SDK, no seed phrase, no Solana wallet for your users.</em></p>
+
   <p>
     <img src="https://img.shields.io/badge/license-Apache--2.0%20OR%20MIT-blue.svg" alt="License" />
     <img src="https://img.shields.io/badge/status-devnet%20pre--alpha-orange.svg" alt="Status" />
@@ -20,17 +22,24 @@
 
 ---
 
-## How we help teams adopt Ika and Encrypt
+## What is Andromeda?
 
-Ika and Encrypt deliver world-class primitives — 2PC-MPC threshold signing and homomorphic computation on Solana. Andromeda's role is to make those primitives painless to adopt for any team that wants to ship on top of them, without forcing the integrator to run validators, learn Rust, or build the surrounding product platform from scratch.
+Andromeda is hosted infrastructure that turns two of Solana's most powerful primitives — Ika's 2PC-MPC threshold signing and Encrypt's homomorphic computation — into plain REST endpoints and MCP tools.
 
-- **Zero-install integration.** Andromeda exposes every Ika operation and every Encrypt instruction as stateless REST. Teams integrate from any language in hours, without running gRPC clients, validator nodes, or a Node runtime on their side.
+Threshold signing lets a single identity control wallets on every chain (EVM, Bitcoin, Cosmos, NEAR, Aptos, Solana, Substrate) with no seed phrase and no single point of compromise. Confidential computing lets authorization logic run directly on encrypted data. Both are extraordinary — and both, today, require running validator clients, writing Rust or Move programs that hold wallet authority, and shipping a Node runtime to your users.
 
-- **Audited policy templates ready to use.** Adopting Ika to power signing usually means authoring custom Solana programs that hold dWallet authority. We ship 8 audited Quasar templates (recovery, allowlist, velocity, time-lock, oracle, passkey, FHE-gated, session keys) so teams skip months of Rust + audit cycles.
+Andromeda removes all of that. You call an HTTPS endpoint. We run the engines, the on-chain policy programs, the gas, the wallet-agnostic auth layer, and the product surface around it. Your users never touch a Solana wallet, never hold SOL, never know there's an MPC network underneath.
 
-- **Wallet-agnostic UX out of the box.** End users of Ika/Encrypt-powered apps come from every ecosystem. We built a gas-sponsor + challenge-based authentication layer so an EVM, BTC, Cosmos, NEAR, Aptos or passkey user can interact with the stack without ever holding SOL or installing a Solana wallet.
+## Why it matters
 
-- **Production-ready developer tooling.** Beyond the cryptographic core, teams building on Ika/Encrypt benefit from surfaces that ship as part of the same platform: a native MCP server (so AI agents and IDEs integrate without glue code), HMAC-signed webhooks for on-chain events, an externally verifiable ed25519 audit log per tenant, idempotency keys on every mutating endpoint, OpenAPI 3.1 specs, dry-run simulation before signing, and auto-batching of multiple signatures into the smallest number of Solana transactions.
+- **Multi-chain is still mostly glue code.** Every team rebuilds key management, recovery, and per-chain signing from scratch. Andromeda is one API for all of it.
+- **"Smart wallet" usually means "trust our backend."** Andromeda's policies — allowlists, velocity guards, time-locks, oracle circuit breakers, session keys — are enforced by Solana programs that hold the dWallet authority. The gateway literally cannot bypass them.
+- **Recovery is crypto's unsolved UX problem.** Andromeda does social recovery where the user proves ownership of *any* wallet they already have — MetaMask, Phantom, Keplr, a BTC cold wallet, a passkey — by signing a 32-byte challenge. Andromeda pays the gas and submits the Solana transaction. Zero attestor: every signature is checked by a Solana runtime precompile, so a compromised Andromeda backend still cannot forge anyone's approval.
+- **AI agents need to sign things.** Every REST route is auto-mirrored as an MCP tool — an agent in Claude Desktop or Cursor can do signing, recovery and policy operations natively, with no SDK and no glue code.
+
+### Built on Ika + Encrypt
+
+Andromeda doesn't reimplement the cryptography — it wraps it. Ika provides the 2PC-MPC dWallets; Encrypt provides the FHE evaluation; Andromeda provides everything around them: 8 audited Quasar policy programs, the recovery and identity layers, gas sponsorship, MCP, HMAC-signed webhooks, an externally verifiable ed25519 audit log, and OpenAPI 3.1. The hard cryptographic guarantees come from those networks; the developer experience comes from us.
 
 ---
 
@@ -55,13 +64,13 @@ Cases that Andromeda specifically unblocks — not generic Web3 use cases.
 - **Trading bots with scoped delegation** — the session-keys template grants a temporary key with on-chain limits on slot expiry, number of uses, amount per transaction, and allowed destination programs. Multiple sessions per dWallet (up to 2^32 concurrent), each with its own monotonic replay nonce.
 - **AI agents that sign transactions** — every REST route on the gateway is auto-mirrored as an MCP tool. Drop the endpoint into Claude Desktop or Cursor and the agent can call signing, recovery, or policy operations natively.
 - **Social recovery without a Solana wallet** — primary or M-of-N quorum recovery where the user signs a 32-byte challenge with whatever wallet they already own (MetaMask, Phantom, Keplr, Sui, BTC cold wallet, passkey). Andromeda pays gas and submits the Solana transaction.
-- **FHE-gated confidential signing** — authorisation logic that runs on encrypted inputs. The decision is signed by an ed25519 key held in HashiCorp Vault Transit, then validated by an on-chain Quasar program before the Ika signature is released.
+- **FHE-gated confidential signing** — authorisation logic that runs on encrypted inputs. The decision is signed by an ed25519 key held in HashiCorp Vault, then validated on-chain by a Quasar program before the Ika signature is released. Useful for compliance checks, sealed-bid auctions, and private treasury rules.
 
 ---
 
-## Extra features
+## What the platform ships
 
-26 capabilities delivered on top of the Ika/Encrypt primitives.
+26 capabilities beyond raw signing — the surrounding product that you'd otherwise have to build yourself.
 
 ### Multi-chain core
 - **Any wallet, any chain adapter for Ika** — uniform REST surface over 4 cryptographic curves (Ed25519, SECP256K1, SECP256R1, Ristretto).
@@ -236,7 +245,7 @@ The agent can immediately call any of the 60 auto-generated tools, covering sign
 The monorepo runs on Postgres + Redis + 5 services. Each service has its own .env.example.
 
 ```bash
-git clone <REPO_URL> andromeda
+git clone https://github.com/TheKazuto/Andromeda-PublicRepository andromeda
 cd andromeda
 
 # 1. Provision Postgres and (optionally) Redis locally.
