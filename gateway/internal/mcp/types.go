@@ -39,11 +39,15 @@ const (
 	rpcInternalError  = -32603
 )
 
-// initializeResult is sent in response to initialize.
+// initializeResult is sent in response to initialize. Instructions is an
+// optional, free-form hint clients pass to the model — Andromeda uses it
+// to state up front that the server is gas-sponsored and custody-free so
+// the model doesn't stall asking the user for fee-payer keypairs etc.
 type initializeResult struct {
 	ProtocolVersion string         `json:"protocolVersion"`
 	Capabilities    map[string]any `json:"capabilities"`
 	ServerInfo      map[string]any `json:"serverInfo"`
+	Instructions    string         `json:"instructions,omitempty"`
 }
 
 // Tool describes one MCP tool. Annotations follow the MCP spec hints

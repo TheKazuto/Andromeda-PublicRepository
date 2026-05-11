@@ -368,6 +368,19 @@ func (s *Server) Router() http.Handler {
 		sub.Use(s.requireSubscription)
 		sub.Use(s.applyRateLimitFor(routes.RateClassTx))
 		sub.Use(s.idempotencyChain)
+		// Carry the authenticated tenant identity into the request context
+		// so the MCP tool proxy can forward it to engines as
+		// X-Andromeda-User-Id (same as the REST proxy). Without it,
+		// tenant-scoped routes like POST /v1/dwallet/create 401 with
+		// "missing tenant identity".
+		sub.Use(func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if a := authFrom(r); a != nil && a.User != nil {
+					r = r.WithContext(mcp.WithTenantIdentity(r.Context(), a.User.ID))
+				}
+				next.ServeHTTP(w, r)
+			})
+		})
 		sub.Handle("/", mcpHandler)
 		sub.Handle("/*", mcpHandler)
 	})

@@ -121,7 +121,7 @@ func pingUpstream(ctx context.Context, s *Server, name string) checkStatus {
 	probeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	start := time.Now()
-	res, err := target.Call(probeCtx, "GET", "/health", nil, nil)
+	res, err := target.Call(probeCtx, "GET", "/health", nil, nil, nil)
 	if err != nil {
 		return checkStatus{OK: false, Error: err.Error(),
 			LatencyMs: int(time.Since(start).Milliseconds())}

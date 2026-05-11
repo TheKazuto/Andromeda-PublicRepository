@@ -67,6 +67,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				"version":   "0.1.0",
 				"toolCount": h.tools.Count(),
 			},
+			Instructions: serverInstructions,
 		})
 
 	case "notifications/initialized":

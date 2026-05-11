@@ -127,6 +127,7 @@ func (r *ToolRegistry) seedDiscoveryTools(all []routes.Route) {
 }
 
 func buildToolFromRoute(route routes.Route) Tool {
+	hint, hasHint := routeHints[route.Key]
 	params := pathParamNames(route.Path)
 	props := map[string]any{}
 	required := []string{}
@@ -158,10 +159,17 @@ func buildToolFromRoute(route routes.Route) Tool {
 	}
 
 	if methodAcceptsBody(route.Method) {
-		props["body"] = map[string]any{
-			"type":                 "object",
-			"description":          "JSON body forwarded verbatim to the engine. Shape matches the upstream contract for " + route.Path + ".",
-			"additionalProperties": true,
+		if hasHint && hint.BodySchema != nil {
+			props["body"] = hint.BodySchema
+			if hint.BodyRequired {
+				required = append(required, "body")
+			}
+		} else {
+			props["body"] = map[string]any{
+				"type":                 "object",
+				"description":          "JSON body forwarded verbatim to the engine. Shape matches the upstream contract for " + route.Path + ".",
+				"additionalProperties": true,
+			}
 		}
 	}
 
@@ -181,9 +189,14 @@ func buildToolFromRoute(route routes.Route) Tool {
 		OpenWorldHint:   true, // every tool talks to ika or encrypt over the network
 	}
 
+	description := fmt.Sprintf("%s %s → %s-backend (custody-free proxy).", route.Method, route.Path, route.Upstream)
+	if hasHint && hint.Description != "" {
+		description = hint.Description
+	}
+
 	return Tool{
 		Name:        route.Key,
-		Description: fmt.Sprintf("%s %s → %s-backend (custody-free proxy).", route.Method, route.Path, route.Upstream),
+		Description: description,
 		InputSchema: schema,
 		Annotations: annotations,
 	}
@@ -229,7 +242,14 @@ func makeProxyHandler(upstreams *upstream.Registry, route routes.Route) ToolHand
 			}
 		}
 
-		res, err := target.Call(ctx, route.Method, path, query, bodyBytes)
+		var extraHeaders map[string]string
+		if tenant := TenantIdentityFrom(ctx); tenant != "" {
+			// Mirror the REST proxy: tenant-scoped engine routes (e.g.
+			// POST /v1/dwallet/create) reject calls without this header.
+			extraHeaders = map[string]string{"X-Andromeda-User-Id": tenant}
+		}
+
+		res, err := target.Call(ctx, route.Method, path, query, bodyBytes, extraHeaders)
 		if err != nil {
 			return toolCallError("upstream call failed: " + err.Error()), nil
 		}
