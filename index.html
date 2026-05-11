@@ -1578,10 +1578,10 @@
 
         <div class="position-body">
           <p>
-            Connect every blockchain — Ethereum, Solana, Bitcoin, Cosmos, Sui, NEAR, Aptos, Polkadot — through a single REST API or MCP server. One key, one signing surface, every chain.
+            Connect every blockchain (Ethereum, Solana, Bitcoin, Cosmos, Sui, NEAR, Aptos, Polkadot) through a single REST API or MCP server. One key, one signing surface, every chain.
           </p>
           <p>
-            You never custody your users&rsquo; keys. Each signing key is split by 2PC-MPC: one share lives on your client, one in the MPC network. The full key never exists in any single place — including ours.
+            You never custody your users&rsquo; keys. Each signing key is split by 2PC-MPC: one share lives on your client, one in the MPC network. The full key never exists in any single place, including ours.
           </p>
           <p>
             We handle the cryptography, recovery, identity, on-chain policies, and confidential computing. <strong>You write product code.</strong>
@@ -1663,7 +1663,7 @@
         <li>
           <span class="num" aria-hidden="true">003</span>
           <h4>Custody-free recovery across any chain</h4>
-          <p>Lost a device? Recover with whatever wallet your user already owns — MetaMask, Phantom, Keplr, a Bitcoin cold wallet, even a passkey. We abstract gas fees end-to-end. Users never need to hold native tokens.</p>
+          <p>Lost a device? Recover with whatever wallet your user already owns: MetaMask, Phantom, Keplr, a Bitcoin cold wallet, even a passkey. We abstract gas fees end-to-end. Users never need to hold native tokens.</p>
         </li>
         <li>
           <span class="num" aria-hidden="true">004</span>
@@ -1691,7 +1691,7 @@
     <div class="wrap">
       <div class="engine-intro reveal">
         <span class="uppercase-label">// 03 · how it works</span>
-        <h2>Three rules that keep your users safe — <span class="accent">and you out of trouble.</span></h2>
+        <h2>Three rules that keep your users safe, <span class="accent">and you out of trouble.</span></h2>
         <p>If you remember three things about Andromeda, remember these. They make custody-free real, not marketing.</p>
       </div>
 
@@ -1701,7 +1701,7 @@
           <span class="protocol-num">protocol · i</span>
           <h3>Two shares. One signature. Neither side wins alone.</h3>
           <p>
-            A wallet&rsquo;s signing key is split — one share on your client, one in the MPC network. Producing a signature requires both at the same time.
+            A wallet&rsquo;s signing key is split: one share on your client, one in the MPC network. Producing a signature requires both at the same time.
           </p>
           <p>
             <strong>Compromise one side completely, and no signature ever comes out.</strong> Every dWallet you create uses this same split, across every chain.
@@ -1845,7 +1845,7 @@
             Every signing endpoint uses <strong>prepare → submit</strong>. We return an unsigned payload, your client signs locally with whatever key the user already has, you submit. The service has no path to extract the user&rsquo;s key.
           </p>
           <p>
-            The pattern is enforced at the API itself — not as a configuration you can flip.
+            The pattern is enforced at the API itself, not as a configuration you can flip.
           </p>
           <ul class="protocol-bullets">
             <li>POST /v1/sign/prepare → unsigned payload</li>
@@ -1861,10 +1861,10 @@
           <span class="protocol-num">protocol · iii</span>
           <h3>If we disappear, your users keep their wallets.</h3>
           <p>
-            Wallet state lives on-chain — that&rsquo;s the source of truth. Our database is just a cache. Wipe it and signing rebuilds from chain. Replace our backend tomorrow and the same user signs in with the same wallet.
+            Wallet state lives on-chain. That&rsquo;s the source of truth. Our database is just a cache. Wipe it and signing rebuilds from chain. Replace our backend tomorrow and the same user signs in with the same wallet.
           </p>
           <p>
-            <strong>Your users own their continuity.</strong> A regenerated dWallet would be a different wallet with a different address — we never do that.
+            <strong>Your users own their continuity.</strong> A regenerated dWallet would be a different wallet with a different address. We never do that.
           </p>
           <ul class="protocol-bullets">
             <li>Canonical on-chain state</li>
@@ -1933,7 +1933,7 @@
         <div class="engine-code-text">
           <span class="protocol-num">code · the whole thing</span>
           <h3>From zero to signed in eight lines.</h3>
-          <p>One challenge, one submit — and a signature is produced on-chain. No SDK, no funding required from your user.</p>
+          <p>One challenge, one submit, and a signature is produced on-chain. No SDK, no funding required from your user.</p>
         </div>
 
         <div class="code-shell" id="js-code-shell">
@@ -1947,7 +1947,7 @@
             <button class="copy-btn" type="button" aria-label="Copy code">COPY</button>
           </div>
 
-          <pre class="code-body" data-tab-panel="curl"><code><span class="tok-com"># 1. Get a recovery challenge — server returns a canonical message</span>
+          <pre class="code-body" data-tab-panel="curl"><code><span class="tok-com"># 1. Get a recovery challenge (server returns a canonical message)</span>
 curl -X POST https://api.andromedainfra.pro/v1/recovery/challenge \
   -H <span class="tok-str">"X-Api-Key: $ANDROMEDA_KEY"</span> -H <span class="tok-str">"Content-Type: application/json"</span> \
   -d <span class="tok-str">'{"appId":"demo","scheme":"secp256k1-eip191","walletAddress":"0xAbC..."}'</span>
@@ -1957,7 +1957,7 @@ curl -X POST https://api.andromedainfra.pro/v1/recovery/primary/submit \
   -H <span class="tok-str">"X-Api-Key: $ANDROMEDA_KEY"</span> -H <span class="tok-str">"Content-Type: application/json"</span> \
   -d <span class="tok-str">'{"dwalletAddress":"...","messageHashHex":"...","signatureBase64":"...","expectedNonce":7}'</span></code></pre>
 
-          <pre class="code-body" data-tab-panel="js" hidden><code><span class="tok-com">// Plain fetch — no SDK required.</span>
+          <pre class="code-body" data-tab-panel="js" hidden><code><span class="tok-com">// Plain fetch, no SDK required.</span>
 <span class="tok-kw">const</span> headers = {
   <span class="tok-str">"X-Api-Key"</span>: process.env.<span class="tok-meta">ANDROMEDA_KEY</span>,
   <span class="tok-str">"Content-Type"</span>: <span class="tok-str">"application/json"</span>,
@@ -2001,7 +2001,7 @@ curl -X POST https://api.andromedainfra.pro/v1/recovery/primary/submit \
 
         <div class="trust-body">
           <p>
-            We don&rsquo;t ask you to trust us. We architect things so you don&rsquo;t have to. Custody-free signing, on-chain policy enforcement, isolated engines, and redacted logs come with the system — not as features you opt into.
+            We don&rsquo;t ask you to trust us. We architect things so you don&rsquo;t have to. Custody-free signing, on-chain policy enforcement, isolated engines, and redacted logs come with the system, not features you opt into.
           </p>
           <p>
             Our gateway absorbs every public request and applies auth and quotas. Behind it, the signing and FHE engines have no path to the public internet. User signing keys are split via 2PC-MPC and never reconstructed. PII and key material are redacted at source.
@@ -2010,7 +2010,7 @@ curl -X POST https://api.andromedainfra.pro/v1/recovery/primary/submit \
           <ul class="trust-claims">
             <li>
               <span class="key">key custody</span>
-              <span class="val">None. We can&rsquo;t sign on your users&rsquo; behalf — the math doesn&rsquo;t allow it.</span>
+              <span class="val">None. We can&rsquo;t sign on your users&rsquo; behalf. The math doesn&rsquo;t allow it.</span>
             </li>
             <li>
               <span class="key">recovery</span>
