@@ -11,6 +11,7 @@ import { submitSign } from './sign.js'
 import { submitPresign, listPresigns } from './presign.js'
 import { submitFutureSign, submitSignWithPartialUserSig } from './future-sign.js'
 import { submitReEncryptShare, submitMakeSharePublic } from './re-encrypt-share.js'
+import { mountMcpWalletRoutes } from './ika-client/routes.js'
 
 const submitSchema = z.object({
   userSignatureBase64: z.string().min(1).max(512).regex(/^[A-Za-z0-9+/]+={0,2}$/),
@@ -31,6 +32,10 @@ export function buildEngineRouter(config: AppConfig): Router {
 
   const router = Router()
   router.use(requireServiceApiKey)
+
+  // High-level, tenant-scoped dWallet ops (option A2): /create, /presign, /sign
+  // → the MCP tools `create_dwallet`, `presign`, `sign_message`.
+  mountMcpWalletRoutes(router, config)
 
   router.post('/dkg/prepare', (req, res) => {
     try {

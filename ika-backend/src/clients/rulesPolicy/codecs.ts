@@ -24,7 +24,11 @@ import {
 } from './program.js'
 
 const LE = true
-export const ACCOUNT_DISCRIMINATOR_LEN = 8
+// Quasar `#[account(discriminator = N)]` emits a single-byte account
+// discriminator (`RulesPolicy` = 1, `QuorumSession` = 2 — see `program.ts`),
+// not an 8-byte Anchor-style one. The first account field (`dwallet`) starts
+// at byte offset 1.
+export const ACCOUNT_DISCRIMINATOR_LEN = 1
 export const ADDRESS_LEN = 32
 export const MEMBERS_FLAT_SIZE = MAX_MEMBERS * MEMBER_SLOT_LEN // 544
 export const DESTINATIONS_FLAT_SIZE = MAX_DESTINATIONS * ADDRESS_LEN // 512

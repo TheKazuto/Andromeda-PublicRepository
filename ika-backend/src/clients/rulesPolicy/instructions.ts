@@ -127,7 +127,6 @@ export function buildRecoverAsPrimaryInstruction(input: {
   messageApproval: Address
   payer: Address
   cpiAuthorityPda: Address
-  callerProgram: Address
   ikaProgramId: Address
   eventAuthorityPda: Address
   initAuthorityHash: Uint8Array
@@ -155,6 +154,8 @@ export function buildRecoverAsPrimaryInstruction(input: {
   w.writeU8(input.cpiAuthorityBump)
   w.writeU64LE(input.expectedNonce)
 
+  // NOTE: no separate `caller_program` slot — the contract reuses `program`
+  // as the Ika CPI caller (passing this program twice triggers AccountBorrowFailed).
   return ix(input.programId, w.toUint8Array(), [
     { address: input.dwallet, role: AccountRole.READONLY },
     { address: input.policyPda, role: AccountRole.WRITABLE },
@@ -162,7 +163,6 @@ export function buildRecoverAsPrimaryInstruction(input: {
     { address: input.messageApproval, role: AccountRole.WRITABLE },
     { address: input.payer, role: AccountRole.WRITABLE_SIGNER },
     { address: input.cpiAuthorityPda, role: AccountRole.READONLY },
-    { address: input.callerProgram, role: AccountRole.READONLY },
     { address: input.ikaProgramId, role: AccountRole.READONLY },
     { address: SYSVAR_INSTRUCTIONS_ADDRESS, role: AccountRole.READONLY },
     { address: SYSVAR_CLOCK_ADDRESS, role: AccountRole.READONLY },
@@ -299,7 +299,6 @@ export function buildQuorumSessionFinalizeInstruction(input: {
   messageApproval: Address
   payer: Address
   cpiAuthorityPda: Address
-  callerProgram: Address
   ikaProgramId: Address
   eventAuthorityPda: Address
   initAuthorityHash: Uint8Array
@@ -312,6 +311,7 @@ export function buildQuorumSessionFinalizeInstruction(input: {
   w.writeBytes(input.initAuthorityHash)
   w.writeU8(input.cpiAuthorityBump)
 
+  // NOTE: no separate `caller_program` slot — see buildRecoverAsPrimaryInstruction.
   return ix(input.programId, w.toUint8Array(), [
     { address: input.dwallet, role: AccountRole.READONLY },
     { address: input.policyPda, role: AccountRole.WRITABLE },
@@ -320,7 +320,6 @@ export function buildQuorumSessionFinalizeInstruction(input: {
     { address: input.messageApproval, role: AccountRole.WRITABLE },
     { address: input.payer, role: AccountRole.WRITABLE_SIGNER },
     { address: input.cpiAuthorityPda, role: AccountRole.READONLY },
-    { address: input.callerProgram, role: AccountRole.READONLY },
     { address: input.ikaProgramId, role: AccountRole.READONLY },
     { address: SYSVAR_CLOCK_ADDRESS, role: AccountRole.READONLY },
     { address: SYSTEM_PROGRAM_ADDRESS, role: AccountRole.READONLY },

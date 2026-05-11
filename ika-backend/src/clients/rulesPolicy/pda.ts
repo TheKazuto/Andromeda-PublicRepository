@@ -5,6 +5,7 @@ import {
   QUORUM_SESSION_PDA_SEED,
   RULES_POLICY_PDA_SEED,
 } from './program.js'
+import { getSolanaRpc } from '../../engine/solana-rpc.js'
 
 const addrEncoder = getAddressEncoder()
 
@@ -170,6 +171,11 @@ const MESSAGE_APPROVAL_SEED = new TextEncoder().encode('message_approval')
 /**
  * MessageApproval PDA on the Ika dWallet program.
  * seeds = [b"message_approval", dwallet, message_digest]
+ *
+ * NOTE: the live devnet program at 87W54kGY... appears to use a different
+ * (hierarchical) seed layout for the `create_account` PDA-signing — see
+ * `findMessageApprovalPdaHierarchical` below. This simple form is kept for
+ * back-compat / litesvm tests but is NOT used by the recovery primary path.
  */
 export async function findMessageApprovalPda(
   ikaProgramId: Address,
@@ -183,6 +189,83 @@ export async function findMessageApprovalPda(
   const [address, bump] = await getProgramDerivedAddress({
     programAddress: ikaProgramId,
     seeds: [MESSAGE_APPROVAL_SEED, dwalletBytes, messageDigest],
+  })
+  return { address, bump }
+}
+
+const DWALLET_SEED = new TextEncoder().encode('dwallet')
+
+// `(curve, public_key)` doesn't change for a dWallet — cache it forever.
+const dwalletInfoCache = new Map<Address, { curve: number; publicKey: Uint8Array }>()
+
+/** Read a dWallet account's `curve` (u16 LE @34) and `public_key` (length `pkLen` @37, bytes @38). */
+async function readDwalletCurveAndPublicKey(
+  dwallet: Address,
+): Promise<{ curve: number; publicKey: Uint8Array }> {
+  const cached = dwalletInfoCache.get(dwallet)
+  if (cached) return cached
+  const { value } = await getSolanaRpc()
+    .getAccountInfo(dwallet, { encoding: 'base64', commitment: 'confirmed' })
+    .send()
+  if (!value) throw new Error(`dWallet account not found on-chain: ${dwallet}`)
+  const dataField = value.data
+  const base64 = Array.isArray(dataField) ? dataField[0] : dataField
+  if (typeof base64 !== 'string') throw new Error('dWallet account has no data')
+  const data = Uint8Array.from(Buffer.from(base64, 'base64'))
+  if (data.length < 70) throw new Error(`dWallet account data too short: ${data.length}`)
+  const curve = (data[34] ?? 0) | ((data[35] ?? 0) << 8)
+  const pkLen = data[37] ?? 0
+  if (pkLen < 1 || pkLen > 65) throw new Error(`invalid dWallet public_key_len: ${pkLen}`)
+  const publicKey = data.slice(38, 38 + pkLen)
+  const result = { curve, publicKey }
+  dwalletInfoCache.set(dwallet, result)
+  return result
+}
+
+/**
+ * MessageApproval PDA (hierarchical form — the live devnet Ika program at
+ * 87W54kGY... appears to use this layout for its internal `create_account`
+ * PDA-signing of the MessageApproval):
+ *
+ *   seeds = [b"dwallet", chunks_of(curve_u16_le || public_key), b"message_approval",
+ *            scheme_u16_le, message_digest, metadata_digest]
+ *
+ * `metadata_digest` is always 32 bytes — zero (32×0) when there is no
+ * metadata. The dWallet's `(curve, public_key)` is read from chain (cached
+ * per dWallet — they don't change).
+ */
+export async function findMessageApprovalPdaHierarchical(input: {
+  ikaProgramId: Address
+  dwallet: Address
+  signatureScheme: number
+  messageDigest: Uint8Array
+  metadataDigest: Uint8Array
+}): Promise<PdaResult> {
+  if (input.messageDigest.length !== 32) {
+    throw new Error('message_digest must be 32 bytes')
+  }
+  if (input.metadataDigest.length !== 32) {
+    throw new Error('metadata_digest must be 32 bytes')
+  }
+  const { curve, publicKey } = await readDwalletCurveAndPublicKey(input.dwallet)
+
+  const combined = new Uint8Array(2 + publicKey.length)
+  combined[0] = curve & 0xff
+  combined[1] = (curve >> 8) & 0xff
+  combined.set(publicKey, 2)
+  const chunks: Uint8Array[] = []
+  for (let i = 0; i < combined.length; i += 32) {
+    chunks.push(combined.slice(i, Math.min(i + 32, combined.length)))
+  }
+  const schemeLE = new Uint8Array(2)
+  schemeLE[0] = input.signatureScheme & 0xff
+  schemeLE[1] = (input.signatureScheme >> 8) & 0xff
+
+  // Variant: no `metadata_digest` seed (the "with-meta" variant also failed
+  // on devnet with `signer privilege escalated`, so try the slimmer form).
+  const [address, bump] = await getProgramDerivedAddress({
+    programAddress: input.ikaProgramId,
+    seeds: [DWALLET_SEED, ...chunks, MESSAGE_APPROVAL_SEED, schemeLE, input.messageDigest],
   })
   return { address, bump }
 }

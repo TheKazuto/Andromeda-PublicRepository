@@ -40,8 +40,16 @@ const SECP256K1_SIG_WITH_RECID_LEN = 65
 
 const LONG_OFFSETS_LEN = 14
 const SHORT_OFFSETS_LEN = 11
+// Ed25519 (`solana-ed25519-program`) and Secp256r1 (`solana-secp256r1-program`)
+// programs both treat `u16::MAX` (0xFFFF) as a sentinel meaning "data lives in
+// THIS instruction itself". The Secp256k1 program (`solana-secp256k1-program`)
+// does NOT — it uses `signature_instruction_index as usize` directly to index
+// into `instruction_datas`, with no sentinel handling. For self-reference, you
+// must pass the ACTUAL tx-level index of the precompile instruction (0 in all
+// of Andromeda's flows since `signAndSendInstructions([precompileIx, mainIx],…)`
+// always puts the precompile first).
 const LONG_SELF_INDEX = 0xffff
-const SHORT_SELF_INDEX = 0xff
+const SECP256K1_SELF_INDEX = 0
 
 function emptyAccounts(): { address: Address; role: AccountRole }[] {
   return []
@@ -124,12 +132,12 @@ export function buildSecp256k1PrecompileInstruction(input: {
   data[0] = 1 // num_records
   let off = headerLen
   dv.setUint16(off, sigOffset, true); off += 2
-  data[off] = SHORT_SELF_INDEX; off += 1
+  data[off] = SECP256K1_SELF_INDEX; off += 1
   dv.setUint16(off, ethAddrOffset, true); off += 2
-  data[off] = SHORT_SELF_INDEX; off += 1
+  data[off] = SECP256K1_SELF_INDEX; off += 1
   dv.setUint16(off, messageOffset, true); off += 2
   dv.setUint16(off, input.message.length, true); off += 2
-  data[off] = SHORT_SELF_INDEX; off += 1
+  data[off] = SECP256K1_SELF_INDEX; off += 1
   // payload
   data.set(input.signature, sigOffset)
   data.set(input.ethAddress, ethAddrOffset)

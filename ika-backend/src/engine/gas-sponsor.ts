@@ -171,6 +171,13 @@ async function estimateTransactionFeeLamports(messageBytes: ArrayLike<number>): 
   return BigInt(value)
 }
 
+// JSON.stringify chokes on bigint; the Solana RPC error/status objects can
+// carry u64 fields parsed as bigint by @solana/kit. Stringify those as decimal
+// strings so the diagnostic message survives.
+function jsonStr(v: unknown): string {
+  return JSON.stringify(v, (_k, val) => (typeof val === 'bigint' ? val.toString() : val))
+}
+
 async function simulateOrThrow(wireTransactionBase64: string): Promise<void> {
   const { value } = await getSolanaRpc()
     .simulateTransaction(wireTransactionBase64 as never, {
@@ -180,7 +187,10 @@ async function simulateOrThrow(wireTransactionBase64: string): Promise<void> {
     })
     .send()
   if (value.err) {
-    throw new Error(`Solana transaction simulation failed: ${JSON.stringify(value.err)}`)
+    const logs = Array.isArray(value.logs) ? value.logs.join(' | ') : ''
+    throw new Error(
+      `Solana transaction simulation failed: ${jsonStr(value.err)}${logs ? ` — logs: ${logs}` : ''}`,
+    )
   }
 }
 
@@ -192,7 +202,7 @@ async function waitForSignatureConfirmation(signature: string): Promise<void> {
       .send()
     const status = value[0]
     if (status?.err) {
-      throw new Error(`Solana transaction failed: ${JSON.stringify(status.err)}`)
+      throw new Error(`Solana transaction failed: ${jsonStr(status.err)}`)
     }
     if (status?.confirmationStatus === 'confirmed' || status?.confirmationStatus === 'finalized') {
       return
