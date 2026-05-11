@@ -13,11 +13,13 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "migrate": "tsx scripts/run-migrations.ts"
+    "migrate": "node dist/cmd/migrate.js",
+    "migrate:dev": "tsx scripts/run-migrations.ts"
   },
   "dependencies": {
     "@grpc/grpc-js": "^1.14.3",
     "@grpc/proto-loader": "^0.8.0",
+    "@mysten/bcs": "^2.0.5",
     "@noble/curves": "^2.2.0",
     "@noble/hashes": "^2.2.0",
     "@polkadot/util-crypto": "^14.0.3",
