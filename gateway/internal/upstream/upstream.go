@@ -243,12 +243,14 @@ type CallResult struct {
 // the non-proxy path used by MCP tool handlers (and any other internal
 // caller that needs to read the response body before forwarding).
 //
-// The auth header configured on the target is set automatically. Non-2xx
-// responses are returned without error — the caller decides how to handle
-// them. A nil error with StatusCode == 0 indicates the target is not
+// The auth header configured on the target is set automatically; any
+// entries in extraHeaders are applied on top (e.g. X-Andromeda-User-Id so
+// tenant-scoped engine routes know the caller). extraHeaders may be nil.
+// Non-2xx responses are returned without error — the caller decides how to
+// handle them. A nil error with StatusCode == 0 indicates the target is not
 // configured (BaseURL empty); ErrUpstreamNotConfigured is returned in that
 // case.
-func (t *Target) Call(ctx context.Context, method, path string, query url.Values, body []byte) (*CallResult, error) {
+func (t *Target) Call(ctx context.Context, method, path string, query url.Values, body []byte, extraHeaders map[string]string) (*CallResult, error) {
 	if t == nil || t.BaseURL == nil {
 		return nil, fmt.Errorf("%w: %s", ErrUpstreamNotConfigured, t.safeName())
 	}
@@ -274,6 +276,12 @@ func (t *Target) Call(ctx context.Context, method, path string, query url.Values
 		req.Header.Set("Content-Type", "application/json")
 	}
 	req.Header.Set("Accept", "application/json")
+	for k, v := range extraHeaders {
+		if k == "" || v == "" {
+			continue
+		}
+		req.Header.Set(k, v)
+	}
 
 	client := t.client
 	if client == nil {

@@ -67,6 +67,22 @@ var All = []Route{
 	{Method: "POST", Path: "/v1/dwallet/dkg/submit", Upstream: UpstreamIka, Key: "ika.dkg.submit", Idempotent: true, RateClass: RateClassTx, TimeoutSeconds: 120},
 	{Method: "GET", Path: "/v1/dwallet/presigns/{userPubkey}", Upstream: UpstreamIka, Key: "ika.presigns.list", RateClass: RateClassRead},
 
+	// High-level, tenant-scoped dWallet ops (option A2): Andromeda does the
+	// client side; the tenant only supplies a passphrase. These auto-register
+	// as the MCP tools `create_dwallet` / `transfer_ownership` / `approve` /
+	// `presign` / `sign_message`.
+	{Method: "POST", Path: "/v1/dwallet/create", Upstream: UpstreamIka, Key: "ika.dwallet.create", Idempotent: true, RateClass: RateClassTx, TimeoutSeconds: 120},
+	{Method: "POST", Path: "/v1/dwallet/transfer-ownership", Upstream: UpstreamIka, Key: "ika.dwallet.transferOwnership", Idempotent: true, RateClass: RateClassTx, TimeoutSeconds: 90},
+	{Method: "POST", Path: "/v1/dwallet/approve", Upstream: UpstreamIka, Key: "ika.dwallet.approve", Idempotent: true, RateClass: RateClassTx, TimeoutSeconds: 90},
+	// Passphrase-driven "add a quorum recovery member" — only for dWallets whose
+	// policy primary owner is the server keystore key (the default). The engine
+	// signs the on-chain admin challenge with the unwrapped keystore key and
+	// submits, gas-sponsored — so an agent can add a member without an external
+	// wallet on screen. External-primary policies use /v1/recovery/policy/admin/*.
+	{Method: "POST", Path: "/v1/dwallet/admin/add-member", Upstream: UpstreamIka, Key: "ika.dwallet.adminAddMember", Idempotent: true, RateClass: RateClassTx, TimeoutSeconds: 90},
+	{Method: "POST", Path: "/v1/dwallet/presign", Upstream: UpstreamIka, Key: "ika.dwallet.presign", Idempotent: true, RateClass: RateClassTx, TimeoutSeconds: 90},
+	{Method: "POST", Path: "/v1/dwallet/sign", Upstream: UpstreamIka, Key: "ika.dwallet.sign", Idempotent: true, RateClass: RateClassTx, TimeoutSeconds: 90},
+
 	// Signing
 	{Method: "POST", Path: "/v1/dwallet/sign/submit", Upstream: UpstreamIka, Key: "ika.sign.submit", Idempotent: true, RateClass: RateClassTx, TimeoutSeconds: 90},
 	{Method: "POST", Path: "/v1/dwallet/presign/submit", Upstream: UpstreamIka, Key: "ika.presign.submit", Idempotent: true, RateClass: RateClassTx, TimeoutSeconds: 90},
