@@ -393,8 +393,15 @@ export function buildPolicyRouter(config: AppConfig): Router {
       })
       res.json(ok({ txSignature: result.txSignature }))
     } catch (err) {
+      // Surface the underlying error message + throw site for debugging.
+      // No PII / no full stack; just enough to diagnose without log dives.
       const safe = sanitizeError('recovery/policy/admin/submit', err)
-      res.status(400).json(fail(safe.message, safe.traceId))
+      const detail = err instanceof Error && err.message ? err.message : String(err)
+      const at =
+        err instanceof Error && err.stack
+          ? err.stack.split('\n').slice(1, 4).map((l) => l.trim().replace(/^at\s+/, '')).join(' <- ')
+          : ''
+      res.status(400).json(fail(at ? `${safe.message} — ${detail} | at: ${at}` : `${safe.message} — ${detail}`, safe.traceId))
     }
   })
 

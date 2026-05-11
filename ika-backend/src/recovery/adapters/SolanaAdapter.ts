@@ -56,6 +56,7 @@ import {
   findCpiAuthorityPda,
   findEventAuthorityPda,
   findMessageApprovalPda,
+  findMessageApprovalPdaHierarchical,
   findQuorumSessionPda,
   findRulesPolicyPda,
   type MemberSlotData,
@@ -519,7 +520,15 @@ export class SolanaAdapter implements PolicyAdapter {
     const policyPda = await findRulesPolicyPda(programId, dwallet, input.initAuthorityHash)
     const cpiAuthorityPda = await findCpiAuthorityPda(programId)
     const eventAuthorityPda = await findEventAuthorityPda(programId)
-    const messageApproval = await findMessageApprovalPda(ikaProgramId, dwallet, input.messageDigest)
+    // Hierarchical seeds — the devnet Ika program rejects the simple form
+    // (`signer privilege escalated` on the MessageApproval PDA → 2026-05 smoke test).
+    const messageApproval = await findMessageApprovalPdaHierarchical({
+      ikaProgramId,
+      dwallet,
+      signatureScheme: input.signatureScheme,
+      messageDigest: input.messageDigest,
+      metadataDigest: input.metadataDigest,
+    })
 
     const precompileIx = buildCredentialPrecompile(
       memberSlotFromCanonical(primarySlotData.raw),
@@ -535,7 +544,6 @@ export class SolanaAdapter implements PolicyAdapter {
       messageApproval: messageApproval.address,
       payer,
       cpiAuthorityPda: cpiAuthorityPda.address,
-      callerProgram: programId,
       ikaProgramId,
       eventAuthorityPda: eventAuthorityPda.address,
       initAuthorityHash: input.initAuthorityHash,
@@ -780,7 +788,6 @@ export class SolanaAdapter implements PolicyAdapter {
       messageApproval: messageApproval.address,
       payer,
       cpiAuthorityPda: cpiAuthorityPda.address,
-      callerProgram: programId,
       ikaProgramId,
       eventAuthorityPda: eventAuthorityPda.address,
       initAuthorityHash: input.initAuthorityHash,
