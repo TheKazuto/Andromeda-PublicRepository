@@ -72,31 +72,42 @@ gateway/
 
 ## Authenticated endpoints (`X-Api-Key`)
 
-Every successful response carries `X-Andromeda-Tokens-{Cost,Used,Limit}` and `X-Andromeda-Upstream` headers.
+Every successful response carries `X-Andromeda-Tokens-{Cost,Used,Limit}` and `X-Andromeda-Upstream`
+headers; deprecated routes also get RFC 8594 `Deprecation`/`Sunset` headers. The gateway forwards the
+authenticated tenant identity to the engines as `X-Andromeda-User-Id` (required by the high-level,
+tenant-scoped dWallet ops). Read-class routes need scope `read`; everything else needs `write`; the
+gateway-native admin features (webhooks, audit, policies, future-sign) need scope `admin`. Request
+bodies are capped at 25 MiB.
 
-| Group | Routes | Upstream |
-|-------|--------|----------|
-| **dWallet** | `dwallet/{dkg,sign,presign,future-sign,re-encrypt-share,make-share-public}/{prepare,submit}` | ika |
-| **Recovery — discovery** | `recovery/{challenge,resolve}` | ika |
-| **Recovery — primary** | `recovery/primary/{challenge,submit}` | ika |
-| **Recovery — quorum** | `recovery/quorum/session/{open,contribute,finalize,close,...}` | ika |
-| **Recovery — policy** | `recovery/policy/{preview,deploy,admin/challenge,admin/submit,apply-pending}` | ika |
-| **Identity** | `identity/email/{request,verify}`, OAuth, passkey | ika |
-| **Private TX** | `private-tx/{submit,status}` | encrypt |
-| **Ciphertext** | `ciphertext/{create,read,account/{address}}` | encrypt |
-| **Graph / DSL / NEK / Decrypt / Events** | full FHE primitives | encrypt |
-| **Wallet (private)** | `wallet/{balance,transfer,...}/prepare` | encrypt |
-| **Authority / Fees / Ownership** | Encrypt program admin ops | encrypt |
-| **Webhooks** | CRUD + retry, scope=admin | gateway |
-| **Audit log** | per-tenant signed chain read | gateway |
-| **Future-sign triggers** | oracle / slot / event / external watchers | gateway |
-| **Policies** | 8 Quasar templates: rules-policy, allowlist-destinations, velocity-guard, time-lock, oracle-conditional, passkey-step-up, fhe-gated, session-keys. Endpoints: `init`, `admin/challenge`, `admin/submit`, `request-signature`. Wallet-agnostic + gas-sponsored. | gateway |
-| **SDK metadata** | `GET /v1/policies/{address}/sdk` → typed TypeScript SDK tarball | gateway |
-| **Simulate** | `POST /v1/signatures/simulate` → dry-run via `simulateTransaction` | gateway |
-| **Auto-batching** | `POST /v1/signatures/batch` → up to 64 ops in K txs | gateway |
-| **Confidential** | `POST /v1/confidential/sign` → FHE evaluation + Vault sign + fhe-gated tx | gateway |
+| Group | Routes (under `/v1`) | Scope | Upstream |
+|-------|----------------------|-------|----------|
+| **dWallet — high-level (MCP tools)** | `dwallet/create`, `dwallet/transfer-ownership`, `dwallet/approve`, `dwallet/admin/add-member`, `dwallet/presign`, `dwallet/sign` (→ MCP `create_dwallet` / `transfer_ownership` / `approve` / `admin_add_member` / `presign` / `sign_message`) | write | ika |
+| **dWallet — low-level** | `dwallet/dkg/{prepare,submit}`, `dwallet/{sign,presign,future-sign,future-sign/complete,re-encrypt-share,make-share-public}/submit`, `GET dwallet/presigns/{userPubkey}` | write / read | ika |
+| **Recovery — discovery** | `recovery/{challenge,resolve}` | write | ika |
+| **Recovery — primary** | `recovery/primary/{challenge,submit}` | write | ika |
+| **Recovery — quorum** | `recovery/quorum/session/{open/challenge,open,contribute/challenge,contribute,finalize,close}`, `GET recovery/quorum/session/{address}` | write / read | ika |
+| **Recovery — policy** | `recovery/policy/{preview,deploy,admin/challenge,admin/submit,apply-pending}`, `GET recovery/policy/{dwalletAddress}` | write / read | ika |
+| **Identity** | `identity/email/{request,verify}` (OAuth + passkey are engine-internal, not proxied) | write | ika |
+| **Private TX** | `private-tx/submit`, `GET private-tx/status/{signature}` | write / read | encrypt |
+| **Ciphertext** | `ciphertext/{create,read}`, `GET ciphertext/account/{address}` | write / read | encrypt |
+| **Graph** | `graph/{execute,register,execute-registered,commit}/prepare`, `graph/submit`, `graph/operations/register-bytes`, `GET graph/{status/{signature},operations}` | write / read | encrypt |
+| **DSL** | `GET dsl/types`, `dsl/op/prepare` | read / write | encrypt |
+| **Decrypt** | `decrypt/request/prepare`, `GET decrypt/poll/{account}` | write / read | encrypt |
+| **NEK** | `GET nek/current` | read | encrypt |
+| **Events** | `events/emit/prepare`, `GET events/by-signature/{signature}` | write / read | encrypt |
+| **Wallet (private)** | `wallet/balance/init` | write | encrypt |
+| **Authority / Fees / Ownership** | `authority/{add,remove,register-nek}/prepare`, `fees/deposit/{create,top-up,withdraw,request-withdraw,reimburse}/prepare`, `fees/config/update/prepare`, `ownership/{transfer,copy,make-public}/prepare` | write | encrypt |
+| **Webhooks** | CRUD + retry | admin | gateway |
+| **Audit log** | per-tenant signed hash-chain read | admin | gateway |
+| **Future-sign triggers** | oracle / slot / event / external watchers | admin | gateway |
+| **Policies** | 8 Quasar templates: rules-policy, allowlist-destinations, velocity-guard, time-lock, oracle-conditional, passkey-step-up, fhe-gated, session-keys. Endpoints: `templates`, `init`, `admin/challenge`, `admin/submit`, `request-signature`. Wallet-agnostic + gas-sponsored. | admin | gateway |
+| **SDK metadata** | `GET /v1/policies/{address}/sdk` → typed TypeScript SDK tarball location | admin | gateway |
+| **Simulate** | `POST /v1/signatures/simulate` → dry-run via `simulateTransaction` | admin | gateway |
+| **Auto-batching** | `POST /v1/signatures/batch` → up to 64 ops in K txs | admin | gateway |
+| **Confidential** | `POST /v1/confidential/sign` → FHE evaluation (encrypt-backend) + Vault sign + fhe-gated tx | admin | gateway |
 
-Full machine-readable catalogue in `internal/routes/routes.go` and `/openapi.json`.
+Full machine-readable catalogue of the proxied routes in `internal/routes/routes.go`; everything
+(including the gateway-native endpoints above) is in `/openapi.json`.
 
 ## MCP server (`/mcp`)
 
@@ -145,65 +156,84 @@ Consumption order (atomic): `credits → monthly → overage`. Refund on upstrea
 
 ## Background workers
 
-| Worker | Cadence | Purpose |
-|--------|--------:|---------|
-| `pricer` | 60s | Cache `request_costs` |
-| `webhook-dispatcher` | 5s | Deliver webhook events with HMAC + retries |
-| `solana-listener` | continuous | logsSubscribe → CanonicalEvent fanout |
-| `metrics-scraper` | 15s | Sample gauges |
-| `usage-recorder` | inline | Async usage events |
+| Worker | Cadence | Purpose | Enabled when |
+|--------|--------:|---------|--------------|
+| `pricer` | `PRICING_REFRESH_SECONDS` (60s) | Cache `request_costs` | always |
+| `usage-recorder` | inline / buffered | Async usage events | always |
+| `webhook-dispatcher` | 5s | Deliver webhook events with HMAC + retries | always |
+| `solana-listener` | continuous | `logsSubscribe` → CanonicalEvent fanout to tenants | `SOLANA_RPC_URL` set + ≥1 program id |
+| `future-sign-watcher` | 5s (slot/time) · 30s (external) | Fire future-sign triggers (oracle/slot/event/external) → ika engine | `IKA_UPSTREAM_URL` + `INTERNAL_API_KEY` set |
+| `metrics-scraper` | 15s | Sample runtime gauges (usage buffer, etc.) | metrics enabled |
+
+The pricing-history applier, admin bootstrap, mailer/quota/pricing notification workers, the Stripe
+service and the gift observer moved to the `backend/` service (architecture split M1–M4).
 
 ## Environment variables
+
+`.env.example` is the reference. Boot is fail-fast — `DATABASE_URL` is always required, and in
+`ENV=production` the gateway also refuses to start without `ADMIN_TOKEN` (≥32 chars, non-default),
+`INTERNAL_API_KEY`, `IKA_UPSTREAM_URL` and `ENCRYPT_UPSTREAM_URL`.
 
 ### Required
 | Var | Notes |
 |-----|-------|
-| `DATABASE_URL` | Postgres DSN. Same DB the backend uses. |
-| `ADMIN_TOKEN` | Strong secret (≥32 chars). Gates `/metrics`. |
+| `DATABASE_URL` | Postgres DSN. Same DB the `backend/` service uses (gateway owns the schema). |
 
-### Required in production
+### Required in production (validated at boot)
 | Var | Notes |
 |-----|-------|
-| `INTERNAL_API_KEY` | Shared secret. Sent as X-Api-Key to ika-backend and X-Internal-Key to encrypt-backend. The same value must be set in both engines. |
-| `IKA_UPSTREAM_URL` | Private network URL of ika-backend. |
-| `ENCRYPT_UPSTREAM_URL` | Private network URL of encrypt-backend. |
-| `REDIS_URL` | Without it, rate limit + idempotency are no-ops. |
-| `ALLOWED_ORIGINS` | CORS allowlist for the dashboard. |
+| `ADMIN_TOKEN` | Strong secret (≥32 chars). Gates `/metrics`. Dev fallback `dev-only-admin-token-change-me` is rejected in production. |
+| `INTERNAL_API_KEY` | Shared secret — sent as `X-Api-Key` to ika-backend and `X-Internal-Key` to encrypt-backend. The same value must be set in both engines. |
+| `IKA_UPSTREAM_URL` | Private-network URL of ika-backend. |
+| `ENCRYPT_UPSTREAM_URL` | Private-network URL of encrypt-backend. |
 
-### Audit signing (production)
+### Recommended
 | Var | Notes |
 |-----|-------|
-| `ANDROMEDA_AUDIT_SIGNER` | `env` (dev) or `vault` (production HashiCorp Vault Transit). |
-| `ANDROMEDA_AUDIT_PRIVATE_KEY` | Required when `=env`. Base64 ed25519. |
-| `ANDROMEDA_AUDIT_VAULT_{ADDR,TOKEN,KEY_NAME,PUBKEY_B64}` | Required when `=vault`. All-or-nothing. |
+| `REDIS_URL` | Without it, rate limit + idempotency are no-ops (a warning is logged). |
+| `ALLOWED_ORIGINS` | CSV CORS allowlist for the dashboard. Empty = no cross-origin (server-to-server only). |
+| `ANDROMEDA_DASHBOARD_BASE_URL` | Public dashboard URL. Used to build shareable links (e.g. gift-card redeem). Empty → relative paths. |
+
+### Server
+| Var | Default | Notes |
+|-----|---------|-------|
+| `PORT` | `8081` | Injected by Railway — do not set it there. |
+| `ENV` | `development` | `development` / `production`. Drives the boot validations above and the OTel `deployment.environment`. |
+| `LOG_LEVEL` | `info` | slog level. |
+
+### Audit signing
+| Var | Notes |
+|-----|-------|
+| `ANDROMEDA_AUDIT_SIGNER` | `env` (default, dev) or `vault` (HashiCorp Vault Transit, ed25519). In `production` with `env`, a loud warning is logged — migrate to `vault` (see `docs/AUDIT_KMS.md`). |
+| `ANDROMEDA_AUDIT_PRIVATE_KEY` | Base64 ed25519 (32-byte seed or 64-byte key). Used only when signer = `env`. Falls back to an ephemeral key if empty in dev. |
+| `ANDROMEDA_AUDIT_VAULT_{ADDR,TOKEN,KEY_NAME,PUBKEY_B64}` | Required (all-or-nothing) when signer = `vault`. Every signature is locally re-verified against `PUBKEY_B64`. |
 
 ### Solana / policies
 | Var | Notes |
 |-----|-------|
-| `SOLANA_RPC_URL` | Enables on-chain event listener. |
-| `IKA_PROGRAM_ID` + `IKA_COORDINATOR_ADDRESS` | Required for policies service. |
-| `ANDROMEDA_TEMPLATE_PROGRAM_IDS_JSON` | `{template-name: program-id}` map for the 8 deployed templates. |
-| `ANDROMEDA_GAS_SPONSOR_KEYPAIR` | JSON byte array (64 B). Gateway pays gas for every Solana tx. |
-| `ANDROMEDA_SDK_BASE_URL` + `ANDROMEDA_SDK_VERSION_TAG` | SDK tarball serving for `/v1/policies/{address}/sdk`. |
+| `SOLANA_RPC_URL` | Enables the on-chain event listener; also required (with the two below) for the policies service. |
+| `IKA_PROGRAM_ID` | Ika dWallet program (must match the ika-backend's). |
+| `IKA_COORDINATOR_ADDRESS` | Ika `DWalletCoordinator` PDA. The **policies service** mounts only when `SOLANA_RPC_URL` + `IKA_PROGRAM_ID` + `IKA_COORDINATOR_ADDRESS` are all set. |
+| `ANDROMEDA_TEMPLATE_PROGRAM_IDS_JSON` | `{"template-name":"program-id"}` map for the 8 deployed templates. A template missing here is still listed by `/v1/policies/templates` but `deploy`/`request-signature` return `503`. |
+| `ANDROMEDA_GAS_SPONSOR_KEYPAIR` | JSON byte array (64 B, `solana-keygen` format). Gateway pays gas for every policy/recovery Solana tx so users never need a Solana wallet. Never commit it; keep it funded. |
+| `ANDROMEDA_SDK_BASE_URL` + `ANDROMEDA_SDK_VERSION_TAG` | SDK-tarball location for `GET /v1/policies/{address}/sdk`. Tag defaults to `sdk-v0.1.0`. |
 
 ### OpenTelemetry (opt-in)
 | Var | Notes |
 |-----|-------|
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP/HTTP collector URL. When unset, otel is no-op. |
-| `OTEL_EXPORTER_OTLP_HEADERS` | Auth headers. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP/HTTP collector URL. When unset, otel is a no-op. |
+| `OTEL_EXPORTER_OTLP_HEADERS` | Auth headers (standard OTLP env, honoured by the exporter SDK). |
 | `OTEL_SERVICE_NAME` | Default `andromeda-gateway`. |
-| `OTEL_TRACES_SAMPLER_ARG` | 0.0–1.0, default 0.1. |
+| `OTEL_TRACES_SAMPLER_ARG` | 0.0–1.0, default `0.1`. |
 
 ### Tuning
 | Var | Default | Notes |
 |-----|---------|-------|
-| `RATE_LIMIT_FAIL_OPEN` | `true` | Allow through when Redis unreachable. |
-| `DEFAULT_REQUEST_COST` | `1` | Fallback cost for unknown route_keys. |
-| `PRICING_REFRESH_SECONDS` | `60` | Pricer cache refresh. |
-| `UPSTREAM_TIMEOUT_SECONDS` | `30` | Default upstream timeout. |
-| `TRUSTED_PROXY_CIDRS` | empty | CIDRs allowed to supply `X-Forwarded-For`. |
-
-`PORT` is injected by Railway — do not set it.
+| `RATE_LIMIT_FAIL_OPEN` | `true` | When Redis is configured but unreachable: `true` allows requests through, `false` rejects with `503`. |
+| `DEFAULT_REQUEST_COST` | `1` | Fallback token cost for route keys not in `request_costs` (must be ≥ 1). |
+| `PRICING_REFRESH_SECONDS` | `60` | Pricer cache refresh interval. |
+| `UPSTREAM_TIMEOUT_SECONDS` | `30` | Default upstream timeout (per-route overrides exist for heavy MPC ops — DKG, sign, quorum finalize: 90–120s). |
+| `TRUSTED_PROXY_CIDRS` | empty | CIDRs of reverse proxies whose `X-Forwarded-For` / `X-Real-IP` may be trusted for API-key IP allowlists. Empty = trust only the socket peer. |
 
 ## Run locally
 
