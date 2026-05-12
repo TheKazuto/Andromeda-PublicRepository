@@ -152,17 +152,12 @@ function respondErr(res: Response, scope: string, err: unknown): void {
     res.status(status).json(fail(err instanceof Error ? err.message : String(err)))
     return
   }
-  // These MCP dWallet endpoints surface the underlying error message + the
-  // throw site (operational debugging — our own dist paths, no PII / no full
-  // dump) so callers can diagnose without digging through logs. The full error
-  // + stack is still logged with the trace id by sanitizeError.
+  // 5xx: never echo the raw message or stack back to the caller (the gateway
+  // forwards this response to external clients). `sanitizeError` returns a
+  // safe message (verbatim only for the allowlisted patterns) plus a trace id,
+  // and logs the full error + stack server-side under that trace id.
   const safe = sanitizeError(scope, err)
-  const detail = err instanceof Error && err.message ? err.message : String(err)
-  const at =
-    err instanceof Error && err.stack
-      ? err.stack.split('\n').slice(1, 4).map((l) => l.trim().replace(/^at\s+/, '')).join(' <- ')
-      : ''
-  res.status(500).json(fail(at ? `${safe.message} — ${detail} | at: ${at}` : `${safe.message} — ${detail}`, safe.traceId))
+  res.status(500).json(fail(safe.message, safe.traceId))
 }
 
 export function mountMcpWalletRoutes(router: Router, config: AppConfig): void {

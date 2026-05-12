@@ -18,6 +18,24 @@ import { defineBcsTypes, type CurveName } from './bcs.js'
 
 const T = defineBcsTypes()
 
+// Decoded shapes the BCS response codecs produce — a tagged-union object with
+// exactly one variant key present. Used to type the `.parse()` results without
+// reaching for `any`.
+interface BcsNetworkSignedAttestation {
+  attestation_data: number[]
+  network_signature: number[]
+  network_pubkey: number[]
+  epoch: string | number | bigint
+}
+type BcsTransactionResponse =
+  | { Signature: { signature: number[] } }
+  | { Attestation: BcsNetworkSignedAttestation }
+  | { Error: { message: string } }
+interface BcsDwalletDataAttestationV1 {
+  public_key: number[]
+  public_output: number[]
+}
+
 // ── MPC adapter ──────────────────────────────────────────────────────────
 // Everything cryptographically heavy in the 2PC-MPC protocol goes through
 // this interface so the pre-alpha stub (zeros) and a future real adapter
@@ -66,9 +84,14 @@ export function setMpcAdapter(adapter: MpcAdapter): void {
 
 // ── Curve / chain helpers ────────────────────────────────────────────────
 
-// Typed `any` because @mysten/bcs's enum input shape only type-checks against
-// fresh inline literals, not values held in a map. Runtime is fine.
-const CURVE_VARIANT: Record<CurveName, any> = {
+// `@mysten/bcs`'s enum input shape only type-checks against fresh inline
+// literals, not values held in a map — so spell the variant union out.
+type CurveVariant =
+  | { Secp256k1: true }
+  | { Secp256r1: true }
+  | { Curve25519: true }
+  | { Ristretto: true }
+const CURVE_VARIANT: Record<CurveName, CurveVariant> = {
   Secp256k1: { Secp256k1: true },
   Secp256r1: { Secp256r1: true },
   Curve25519: { Curve25519: true },
@@ -77,7 +100,12 @@ const CURVE_VARIANT: Record<CurveName, any> = {
 
 // (curve → presign signature algorithm) — the algorithm used to allocate a
 // presign for that curve. Hash is applied at sign time.
-const CURVE_PRESIGN_ALGO: Record<CurveName, any> = {
+type PresignAlgoVariant =
+  | { ECDSASecp256k1: true }
+  | { ECDSASecp256r1: true }
+  | { EdDSA: true }
+  | { SchnorrkelSubstrate: true }
+const CURVE_PRESIGN_ALGO: Record<CurveName, PresignAlgoVariant> = {
   Secp256k1: { ECDSASecp256k1: true },
   Secp256r1: { ECDSASecp256r1: true },
   Curve25519: { EdDSA: true },
@@ -122,9 +150,9 @@ async function submitAndDecode(signedRequestData: Uint8Array, signerPubkey: Uint
   if (!(resp.response_data instanceof Uint8Array) || resp.response_data.length === 0) {
     throw new Error('Ika returned an empty response')
   }
-  const parsed = T.TransactionResponseData.parse(resp.response_data) as any
-  if (parsed.Signature) return { kind: 'signature', signature: new Uint8Array(parsed.Signature.signature) }
-  if (parsed.Attestation) {
+  const parsed = T.TransactionResponseData.parse(resp.response_data) as BcsTransactionResponse
+  if ('Signature' in parsed) return { kind: 'signature', signature: new Uint8Array(parsed.Signature.signature) }
+  if ('Attestation' in parsed) {
     const a = parsed.Attestation
     return {
       kind: 'attestation',
@@ -134,7 +162,7 @@ async function submitAndDecode(signedRequestData: Uint8Array, signerPubkey: Uint
       epoch: BigInt(a.epoch),
     }
   }
-  if (parsed.Error) return { kind: 'error', message: String(parsed.Error.message) }
+  if ('Error' in parsed) return { kind: 'error', message: String(parsed.Error.message) }
   return { kind: 'error', message: 'unrecognized TransactionResponseData variant' }
 }
 
@@ -218,7 +246,7 @@ export async function requestDkg(params: {
   if (resp.kind === 'error') throw new Error(`DKG rejected: ${resp.message}`)
   if (resp.kind !== 'attestation') throw new Error('DKG: expected an attestation response')
 
-  const payload = T.VersionedDWalletDataAttestation.parse(resp.attestationData) as any
+  const payload = T.VersionedDWalletDataAttestation.parse(resp.attestationData) as { V1?: BcsDwalletDataAttestationV1 }
   if (!payload.V1) throw new Error('DKG: unexpected attestation payload variant')
 
   return {

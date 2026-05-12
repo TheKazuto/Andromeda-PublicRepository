@@ -39,6 +39,37 @@ export interface PresignInfoWire {
   epoch: bigint
 }
 
+interface PresignsResponseWire {
+  presigns?: PresignInfoWire[]
+}
+
+type UnaryCallback<TResp> = (err: grpc.ServiceError | null, resp: TResp) => void
+
+// Minimal structural view of the gRPC service stub `@grpc/proto-loader` builds.
+// We only call the methods we declare here; `waitForReady` / `close` / `Check`
+// are optional because they depend on the grpc-js version / server features.
+interface DWalletServiceClient {
+  SubmitTransaction(req: UserSignedRequestWire, options: grpc.CallOptions, cb: UnaryCallback<TransactionResponseWire>): void
+  GetPresigns(req: { user_pubkey: Uint8Array }, options: grpc.CallOptions, cb: UnaryCallback<PresignsResponseWire>): void
+  GetPresignsForDWallet(
+    req: { user_pubkey: Uint8Array; dwallet_id: Uint8Array },
+    options: grpc.CallOptions,
+    cb: UnaryCallback<PresignsResponseWire>,
+  ): void
+  waitForReady?(deadline: Date, cb: (err: Error | null) => void): void
+  close?(): void
+  Check?(req: object, options: grpc.CallOptions, cb: (err: Error | null) => void): void
+}
+
+interface DWalletServiceCtor {
+  new (address: string, creds: grpc.ChannelCredentials, options?: grpc.ChannelOptions): DWalletServiceClient
+}
+
+interface GrpcPackage {
+  ika?: { dwallet?: { v1?: { DWalletService?: DWalletServiceCtor } }; DWalletService?: DWalletServiceCtor }
+  DWalletService?: DWalletServiceCtor
+}
+
 export interface GrpcClientOptions {
   url: string
   tls: boolean
@@ -59,16 +90,16 @@ const DEFAULT_DEADLINE_SECONDS = 30
 const DEFAULT_MAX_RETRIES = 2
 
 export class IkaGrpcClient {
-  private client: any | null = null
+  private client: DWalletServiceClient | null = null
   private readonly opts: GrpcClientOptions
 
   constructor(opts: GrpcClientOptions) {
     this.opts = opts
   }
 
-  private ensureClient(): any {
+  private ensureClient(): DWalletServiceClient {
     if (this.client) return this.client
-    let pkg: any
+    let pkg: GrpcPackage
     try {
       const def = loadSync(PROTO_PATH, {
         keepCase: true,
@@ -77,7 +108,7 @@ export class IkaGrpcClient {
         defaults: true,
         oneofs: true,
       })
-      pkg = grpc.loadPackageDefinition(def)
+      pkg = grpc.loadPackageDefinition(def) as unknown as GrpcPackage
     } catch (err) {
       logger.warn({ err, path: PROTO_PATH }, 'proto file missing — gRPC client in stub mode')
       throw new Error(
@@ -135,10 +166,8 @@ export class IkaGrpcClient {
     return typeof code === 'number' && retryableCodes.has(code)
   }
 
-  private async unaryWithRetry<TReq, TResp>(
-    method: string,
-    req: TReq,
-    invoke: (client: any, req: TReq, cb: (err: Error | null, resp: TResp) => void) => void,
+  private async unaryWithRetry<TResp>(
+    call: (client: DWalletServiceClient, options: grpc.CallOptions, cb: UnaryCallback<TResp>) => void,
     retryableCodes: ReadonlySet<number> = READ_RETRYABLE_CODES,
   ): Promise<TResp> {
     const max = this.opts.maxRetries ?? DEFAULT_MAX_RETRIES
@@ -149,16 +178,10 @@ export class IkaGrpcClient {
           const client = this.ensureClient()
           // Each call carries its own deadline so a slow call cannot hang the request.
           const deadline = this.buildDeadline()
-          // grpc-js accepts deadline as an option object on the metadata-less variant.
-          ;(client[method] as Function).call(
-            client,
-            req,
-            { deadline } as grpc.CallOptions,
-            (err: Error | null, resp: TResp) => {
-              if (err) reject(err)
-              else resolve(resp)
-            },
-          )
+          call(client, { deadline }, (err, resp) => {
+            if (err) reject(err)
+            else resolve(resp)
+          })
         })
       } catch (err) {
         lastErr = err
@@ -173,31 +196,22 @@ export class IkaGrpcClient {
   }
 
   async submitTransaction(req: UserSignedRequestWire): Promise<TransactionResponseWire> {
-    return this.unaryWithRetry(
-      'SubmitTransaction',
-      req,
-      (c, r, cb) => c.SubmitTransaction(r, cb),
+    return this.unaryWithRetry<TransactionResponseWire>(
+      (c, opts, cb) => c.SubmitTransaction(req, opts, cb),
       SUBMIT_RETRYABLE_CODES,
     )
   }
 
   async getPresigns(userPubkey: Uint8Array): Promise<PresignInfoWire[]> {
-    const resp = await this.unaryWithRetry<{ user_pubkey: Uint8Array }, { presigns?: PresignInfoWire[] }>(
-      'GetPresigns',
-      { user_pubkey: userPubkey },
-      (c, r, cb) => c.GetPresigns(r, cb),
+    const resp = await this.unaryWithRetry<PresignsResponseWire>((c, opts, cb) =>
+      c.GetPresigns({ user_pubkey: userPubkey }, opts, cb),
     )
     return resp.presigns ?? []
   }
 
   async getPresignsForDWallet(userPubkey: Uint8Array, dwalletId: Uint8Array): Promise<PresignInfoWire[]> {
-    const resp = await this.unaryWithRetry<
-      { user_pubkey: Uint8Array; dwallet_id: Uint8Array },
-      { presigns?: PresignInfoWire[] }
-    >(
-      'GetPresignsForDWallet',
-      { user_pubkey: userPubkey, dwallet_id: dwalletId },
-      (c, r, cb) => c.GetPresignsForDWallet(r, cb),
+    const resp = await this.unaryWithRetry<PresignsResponseWire>((c, opts, cb) =>
+      c.GetPresignsForDWallet({ user_pubkey: userPubkey, dwallet_id: dwalletId }, opts, cb),
     )
     return resp.presigns ?? []
   }
@@ -208,12 +222,11 @@ export class IkaGrpcClient {
       const deadline = new Date(Date.now() + timeoutMs)
       try {
         const c = this.ensureClient()
-        const fn = (c as Record<string, unknown>).Check
-        if (typeof fn !== 'function') {
+        if (typeof c.Check !== 'function') {
           resolve(true) // server doesn't expose Health — assume reachable if channel established
           return
         }
-        ;(fn as Function).call(c, {}, { deadline }, (err: Error | null) => resolve(!err))
+        c.Check({}, { deadline }, (err) => resolve(!err))
       } catch {
         resolve(false)
       }

@@ -26,6 +26,7 @@
 // stays the same — `alg` and `v` fields gate forward compatibility.
 
 import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto'
+import { logger } from '../../logger.js'
 
 const ENVELOPE_VERSION = 1 as const
 const ALGORITHM = 'aes-256-gcm' as const
@@ -52,11 +53,10 @@ function getMasterKey(): Buffer | null {
       // Log once on first miss so operators have a clear breadcrumb. We
       // don't throw here because reads need to keep working on legacy
       // plaintext rows; the throw lives in `encrypt()` instead.
-      // eslint-disable-next-line no-console
-      console.warn(
-        '[ika-backend][identity][pii] IKA_IDENTITY_PII_KEY is unset — ' +
-          'PII writes will throw. Set a base64-encoded 32-byte key (e.g. ' +
-          '`openssl rand -base64 32`). Reads of legacy plaintext rows still work.',
+      logger.warn(
+        '[identity][pii] IKA_IDENTITY_PII_KEY is unset — PII writes will throw. ' +
+          'Set a base64-encoded 32-byte key (e.g. `openssl rand -base64 32`). ' +
+          'Reads of legacy plaintext rows still work.',
       )
       keyMissingLogged = true
     }

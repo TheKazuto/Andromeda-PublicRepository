@@ -1,4 +1,5 @@
 import { getIkaGrpcClient } from './grpc-client.js'
+import { defineBcsTypes } from './ika-client/bcs.js'
 
 export interface IkaSubmitInput {
   userSignature: Uint8Array
@@ -10,18 +11,25 @@ export interface RawBcsSubmitResult {
   responseDataBase64: string
 }
 
-// Per the local pinned proto comments, TransactionResponseData variants are
-// ordered as Signature, Attestation, Presign, Error. BCS enum encoding stores
-// the variant index first, so reject the explicit Error variant here even
-// before the full typed decoder is wired.
-const TRANSACTION_RESPONSE_ERROR_VARIANT = 3
+// `TransactionResponseData` has three variants in the vendored BCS schema
+// (`ika-client/bcs.ts`, mirroring `crates/ika-dwallet-types/src/lib.rs`):
+// `Signature`, `Attestation`, `Error`. The upstream `.proto` comment loosely
+// lists a "Presign" variant — that does not exist on the wire; presigns come
+// back wrapped in `Attestation` (`VersionedPresignDataAttestation`). The
+// vendored codec is the source of truth here, so decode against it rather than
+// hardcoding a variant index.
+const T = defineBcsTypes()
+
+function isErrorVariant(parsed: unknown): parsed is { Error: { message?: unknown } } {
+  return typeof parsed === 'object' && parsed !== null && 'Error' in parsed
+}
 
 /**
  * Relay one signed Ika request and reject responses that are definitely not
- * usable by the gateway. Full TransactionResponseData decoding depends on the
- * pinned upstream BCS schema; until that is wired, keep this guard centralized
- * so every primitive fails the same way instead of treating malformed output
- * as a successful operation.
+ * usable by the gateway. The low-level routes hand the raw BCS bytes straight
+ * back to the gateway, so this is the only place a network-side `Error` would
+ * otherwise be treated as a successful operation — decode the envelope and fail
+ * loudly on the `Error` variant (and on anything that does not decode at all).
  */
 export async function submitIkaTransaction(input: IkaSubmitInput): Promise<RawBcsSubmitResult> {
   const client = getIkaGrpcClient()
@@ -33,9 +41,17 @@ export async function submitIkaTransaction(input: IkaSubmitInput): Promise<RawBc
   if (!(responseData instanceof Uint8Array) || responseData.length === 0) {
     throw new Error('Invalid Ika response')
   }
-  if (responseData[0] === TRANSACTION_RESPONSE_ERROR_VARIANT) {
+
+  let parsed: unknown
+  try {
+    parsed = T.TransactionResponseData.parse(responseData)
+  } catch {
+    throw new Error('Ika returned an undecodable response')
+  }
+  if (isErrorVariant(parsed)) {
     throw new Error('Ika transaction rejected')
   }
+
   return {
     responseKind: 'raw-bcs',
     responseDataBase64: Buffer.from(responseData).toString('base64'),

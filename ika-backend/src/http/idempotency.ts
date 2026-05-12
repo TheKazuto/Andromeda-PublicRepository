@@ -275,6 +275,13 @@ export function idempotencyMiddleware() {
           request_hash: requestHash,
           expires_at: expiresAtMs,
         })
+        // L2 persist is fire-and-forget *by design* (fail-open): a Postgres
+        // hiccup must not block or fail the response the caller already got.
+        // The worst case is a cross-replica retry that re-executes — same as
+        // having no L2 — and L1 still de-dupes retries hitting this replica.
+        // (If ika-backend ever gains a Redis dependency, L1 could move there
+        // for cross-replica coherence; today the gateway is the durable
+        // idempotency layer, so the extra moving part isn't worth it.)
         pool
           .query({
             name: 'idempotency_persist',

@@ -37,13 +37,14 @@ export function buildEngineRouter(config: AppConfig): Router {
   // → the MCP tools `create_dwallet`, `presign`, `sign_message`.
   mountMcpWalletRoutes(router, config)
 
-  router.post('/dkg/prepare', (req, res) => {
+  router.post('/dkg/prepare', async (req, res) => {
     try {
       const parsed = dkgRequestSchema.parse(req.body)
-      res.json(ok(prepareDkg(parsed)))
+      res.json(ok(await prepareDkg(parsed)))
     } catch (err) {
       const safe = sanitizeError('dkg/prepare', err)
-      res.status(400).json(fail(safe.message, safe.traceId))
+      const status = err instanceof z.ZodError || safe.message.startsWith('Invalid ') ? 400 : 500
+      res.status(status).json(fail(safe.message, safe.traceId))
     }
   })
 

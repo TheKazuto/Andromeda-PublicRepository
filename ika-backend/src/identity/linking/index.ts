@@ -3,15 +3,10 @@
 import { Router } from 'express'
 import { getIdentityConfig } from '../config.js'
 import { requireUserAuth } from '../middleware.js'
-import {
-  handleDeleteLink,
-  handleLinkEmailRequest,
-  handleLinkEmailVerify,
-  handleLinkOauthCallback,
-  handleLinkOauthStart,
-  handleLinkPasskeyRegisterOptions,
-  handleLinkPasskeyRegisterVerify,
-} from './flows.js'
+import { handleLinkOauthCallback, handleLinkOauthStart } from './oauth.js'
+import { handleLinkEmailRequest, handleLinkEmailVerify } from './email.js'
+import { handleLinkPasskeyRegisterOptions, handleLinkPasskeyRegisterVerify } from './passkey.js'
+import { handleDeleteLink } from './delete.js'
 
 export function buildLinkingRouter(): Router {
   const router = Router()
