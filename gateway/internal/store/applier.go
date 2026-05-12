@@ -8,11 +8,11 @@ import (
 )
 
 // ApplyPendingPricingChanges runs one tick of the pricing applier:
-//   1. Fetches every pricing_history row whose effective_at has arrived
-//      and which has not been applied or cancelled.
-//   2. For each, copies new_value into the live table (request_costs
-//      for route_cost, plans for plan_*).
-//   3. Stamps applied_at on the pricing_history row.
+//  1. Fetches every pricing_history row whose effective_at has arrived
+//     and which has not been applied or cancelled.
+//  2. For each, copies new_value into the live table (request_costs
+//     for route_cost, plans for plan_*).
+//  3. Stamps applied_at on the pricing_history row.
 //
 // Each change runs in its own transaction so a failure on one does not
 // block the rest. Returns a slice of outcomes (one per change) so the

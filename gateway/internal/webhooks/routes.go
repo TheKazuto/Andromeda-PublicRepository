@@ -12,6 +12,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"github.com/shinkalabs/andromeda-gateway/internal/httpx"
 	"github.com/shinkalabs/andromeda-gateway/internal/netsafety"
 )
 
@@ -35,7 +36,7 @@ type AuditEvent struct {
 type RouteOptions struct {
 	Store     *Store
 	ResolveID APIKeyResolver
-	Audit     AuditAppender       // optional; nil → no-op
+	Audit     AuditAppender        // optional; nil → no-op
 	URLGuard  *netsafety.Validator // optional; nil → use a default production validator
 }
 
@@ -306,11 +307,9 @@ func genSecret(n int) string {
 }
 
 func writeJSON(w http.ResponseWriter, code int, body any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(body)
+	httpx.WriteJSON(w, code, body)
 }
 
 func writeError(w http.ResponseWriter, code int, errCode, msg string) {
-	writeJSON(w, code, map[string]any{"error": map[string]string{"code": errCode, "message": msg}})
+	httpx.WriteError(w, code, errCode, msg)
 }

@@ -12,7 +12,6 @@ var (
 	ErrNotFound          = errors.New("not found")
 	ErrAlreadyExists     = errors.New("already exists")
 	ErrQuotaExceeded     = errors.New("quota exceeded")
-	ErrNoSubscription    = errors.New("no active subscription")
 	ErrKeyRevoked        = errors.New("api key revoked")
 	ErrGiftAlreadyUsed   = errors.New("gift card already redeemed")
 	ErrGiftExpired       = errors.New("gift card expired")
@@ -54,58 +53,58 @@ type APIKey struct {
 // buckets (Read* / Tx*) so the existing middleware keeps working until
 // it's migrated.
 type Plan struct {
-	ID                 string         `json:"id"`
-	Code               string         `json:"code"`
-	Name               string         `json:"name"`
-	MonthlyTokens      int64          `json:"monthlyTokens"`
-	PriceCents         int            `json:"priceCents"`
-	AnnualPriceCents   int            `json:"annualPriceCents"`
-	OveragePer1kCents  int            `json:"overagePer1kCents"`
-	RateLimitRPS       int            `json:"rateLimitRps"`   // legacy single bucket
-	RateLimitBurst     int            `json:"rateLimitBurst"` // legacy single bucket
-	ReadRPS            int            `json:"readRps"`
-	ReadBurst          int            `json:"readBurst"`
-	TxRPS              int            `json:"txRps"`
-	TxBurst            int            `json:"txBurst"`
-	Features           map[string]any `json:"features"`
-	IsActive           bool           `json:"isActive"`
-	IsGiftable         bool           `json:"isGiftable"`
-	SortOrder          int            `json:"sortOrder"`
-	CreatedAt          time.Time      `json:"createdAt"`
-	UpdatedAt          time.Time      `json:"updatedAt"`
+	ID                string         `json:"id"`
+	Code              string         `json:"code"`
+	Name              string         `json:"name"`
+	MonthlyTokens     int64          `json:"monthlyTokens"`
+	PriceCents        int            `json:"priceCents"`
+	AnnualPriceCents  int            `json:"annualPriceCents"`
+	OveragePer1kCents int            `json:"overagePer1kCents"`
+	RateLimitRPS      int            `json:"rateLimitRps"`   // legacy single bucket
+	RateLimitBurst    int            `json:"rateLimitBurst"` // legacy single bucket
+	ReadRPS           int            `json:"readRps"`
+	ReadBurst         int            `json:"readBurst"`
+	TxRPS             int            `json:"txRps"`
+	TxBurst           int            `json:"txBurst"`
+	Features          map[string]any `json:"features"`
+	IsActive          bool           `json:"isActive"`
+	IsGiftable        bool           `json:"isGiftable"`
+	SortOrder         int            `json:"sortOrder"`
+	CreatedAt         time.Time      `json:"createdAt"`
+	UpdatedAt         time.Time      `json:"updatedAt"`
 }
 
 // Subscription is the per-user copy of a plan, snapshotted at activation
 // time. Plan changes don't affect active subscriptions until rollover —
 // this is what enforces the "grandfather" contract on pricing changes.
 type Subscription struct {
-	ID                   string    `json:"id"`
-	UserID               string    `json:"userId"`
-	PlanID               string    `json:"planId"`
-	PlanCode             string    `json:"planCode"`
-	Status               string    `json:"status"`
-	BillingCycle         string    `json:"billingCycle"` // 'monthly' | 'annual'
-	CurrentPeriodStart   time.Time `json:"currentPeriodStart"`
-	CurrentPeriodEnd     time.Time `json:"currentPeriodEnd"`
-	TokensUsed           int64     `json:"tokensUsed"`
-	TokensLimit          int64     `json:"tokensLimit"`
-	OverageEnabled         bool      `json:"overageEnabled"`
-	OverageCardPresent     bool      `json:"overageCardPresent"`
-	OverageUsedTokens      int64     `json:"overageUsedTokens"`
-	OverageCapTokens       int64     `json:"overageCapTokens"` // hard cap (2× tokens_limit)
-	OverageReportedTokens  int64     `json:"overageReportedTokens"`
-	OverageLastReportedAt  *time.Time `json:"overageLastReportedAt,omitempty"`
-	StripeOverageItemID    string    `json:"stripeOverageItemId,omitempty"`
-	RateLimitRPS         int       `json:"rateLimitRps"`     // legacy single bucket
-	RateLimitBurst       int       `json:"rateLimitBurst"`   // legacy single bucket
-	ReadRPS              int       `json:"readRps"`
-	ReadBurst            int       `json:"readBurst"`
-	TxRPS                int       `json:"txRps"`
-	TxBurst              int       `json:"txBurst"`
-	StripeCustomerID     string    `json:"stripeCustomerId,omitempty"`
-	StripeSubscriptionID string    `json:"stripeSubscriptionId,omitempty"`
-	CreatedAt            time.Time `json:"createdAt"`
-	UpdatedAt            time.Time `json:"updatedAt"`
+	ID                    string     `json:"id"`
+	UserID                string     `json:"userId"`
+	PlanID                string     `json:"planId"`
+	PlanCode              string     `json:"planCode"`
+	Status                string     `json:"status"`
+	BillingCycle          string     `json:"billingCycle"` // 'monthly' | 'annual'
+	CurrentPeriodStart    time.Time  `json:"currentPeriodStart"`
+	CurrentPeriodEnd      time.Time  `json:"currentPeriodEnd"`
+	TokensUsed            int64      `json:"tokensUsed"`
+	TokensLimit           int64      `json:"tokensLimit"`
+	OverageEnabled        bool       `json:"overageEnabled"`
+	OverageCardPresent    bool       `json:"overageCardPresent"`
+	OverageUsedTokens     int64      `json:"overageUsedTokens"`
+	OverageCapTokens      int64      `json:"overageCapTokens"` // hard cap (2× tokens_limit)
+	OverageReportedTokens int64      `json:"overageReportedTokens"`
+	OverageLastReportedAt *time.Time `json:"overageLastReportedAt,omitempty"`
+	StripeOverageItemID   string     `json:"stripeOverageItemId,omitempty"`
+	RateLimitRPS          int        `json:"rateLimitRps"`   // legacy single bucket
+	RateLimitBurst        int        `json:"rateLimitBurst"` // legacy single bucket
+	ReadRPS               int        `json:"readRps"`
+	ReadBurst             int        `json:"readBurst"`
+	TxRPS                 int        `json:"txRps"`
+	TxBurst               int        `json:"txBurst"`
+	StripeCustomerID      string     `json:"stripeCustomerId,omitempty"`
+	StripeSubscriptionID  string     `json:"stripeSubscriptionId,omitempty"`
+	CreatedAt             time.Time  `json:"createdAt"`
+	UpdatedAt             time.Time  `json:"updatedAt"`
 }
 
 type RequestCost struct {
@@ -354,13 +353,13 @@ type CreditDebit struct {
 // FIRST time this period crosses the percentage; subsequent calls return
 // false even if the value stays above the threshold.
 type ConsumptionResult struct {
-	Cost          int           `json:"cost"`
-	FromCredits   int           `json:"fromCredits"`
-	FromMonthly   int           `json:"fromMonthly"`
-	FromOverage   int           `json:"fromOverage"`
-	TokensUsed    int64         `json:"tokensUsed"`
-	OverageUsed   int64         `json:"overageUsed"`
-	Subscription  *Subscription `json:"-"`
+	Cost         int           `json:"cost"`
+	FromCredits  int           `json:"fromCredits"`
+	FromMonthly  int           `json:"fromMonthly"`
+	FromOverage  int           `json:"fromOverage"`
+	TokensUsed   int64         `json:"tokensUsed"`
+	OverageUsed  int64         `json:"overageUsed"`
+	Subscription *Subscription `json:"-"`
 	// CreditDebits records WHICH credit rows were debited and by how
 	// much. Empty when FromCredits == 0. RefundTokensV2 reverses each
 	// entry exactly to undo a charge cleanly.
@@ -386,12 +385,12 @@ type Balance struct {
 // being marked redeemed, plus the subscription that received the benefit
 // and a label describing what happened.
 //
-//   * Action == "created"  — user had no active subscription; a new one was
-//                           assigned with the gift's plan + duration.
-//   * Action == "extended" — current subscription's tokens_limit and
-//                           current_period_end were bumped.
-//   * Action == "upgraded" — same as "extended" PLUS the active plan was
-//                           swapped for the gift's plan (gift tier > current).
+//   - Action == "created"  — user had no active subscription; a new one was
+//     assigned with the gift's plan + duration.
+//   - Action == "extended" — current subscription's tokens_limit and
+//     current_period_end were bumped.
+//   - Action == "upgraded" — same as "extended" PLUS the active plan was
+//     swapped for the gift's plan (gift tier > current).
 type GiftCardRedemption struct {
 	GiftCard     *GiftCard     `json:"giftCard"`
 	Subscription *Subscription `json:"subscription"`
@@ -403,11 +402,11 @@ type GiftCardRedemption struct {
 // AppliedPricingChange describes the result of running the pricing
 // applier worker once. Useful for telemetry / admin dashboards.
 type AppliedPricingChange struct {
-	ChangeID    int64
-	ChangeType  string
-	TargetKey   string
-	NewValue    int64
-	Error       error
+	ChangeID   int64
+	ChangeType string
+	TargetKey  string
+	NewValue   int64
+	Error      error
 }
 
 // UsageDailyBucket is one day's worth of consumption for a user.
@@ -427,12 +426,12 @@ type UsageRouteBucket struct {
 // UsageReport bundles the daily series + per-route top list + totals
 // for a user over a window. Used by GET /v1/me/usage.
 type UsageReport struct {
-	Since      time.Time          `json:"since"`
-	Until      time.Time          `json:"until"`
-	Tokens     int64              `json:"tokens"`
-	Calls      int64              `json:"calls"`
-	Daily      []UsageDailyBucket `json:"daily"`
-	TopRoutes  []UsageRouteBucket `json:"topRoutes"`
+	Since     time.Time          `json:"since"`
+	Until     time.Time          `json:"until"`
+	Tokens    int64              `json:"tokens"`
+	Calls     int64              `json:"calls"`
+	Daily     []UsageDailyBucket `json:"daily"`
+	TopRoutes []UsageRouteBucket `json:"topRoutes"`
 }
 
 // =============================================================================
@@ -445,10 +444,6 @@ type Store interface {
 	// --- Lookup hot path ---
 	AuthenticateAPIKey(ctx context.Context, hashedKey string) (*AuthenticatedKey, error)
 	TouchAPIKeyUsed(ctx context.Context, apiKeyID string) error
-
-	// --- Quota (legacy single-bucket — middleware will move to V2 in 5.3) ---
-	ConsumeTokens(ctx context.Context, subscriptionID string, cost int) (newUsed int64, err error)
-	RefundTokens(ctx context.Context, subscriptionID string, cost int) error
 
 	// --- Quota V2 (credits → monthly → overage) ---
 	// ConsumeTokensV2 charges `cost` against credits first, then monthly

@@ -136,6 +136,15 @@ func (l *Listener) Start(ctx context.Context) {
 	}
 }
 
+// readWindow bounds how long ReadMessage may block without any traffic
+// before the connection is considered dead. pingEvery (< readWindow/2) is
+// the outbound ping cadence — every pong refreshes the window, so two
+// consecutive missed pongs trip the reconnect.
+const (
+	readWindow = 45 * time.Second
+	pingEvery  = 20 * time.Second
+)
+
 // runOnce establishes one WebSocket connection, subscribes, and pumps messages
 // until either the context is cancelled or the connection drops.
 func (l *Listener) runOnce(ctx context.Context, wsURL string) error {
@@ -145,6 +154,17 @@ func (l *Listener) runOnce(ctx context.Context, wsURL string) error {
 		return fmt.Errorf("dial: %w", err)
 	}
 	defer conn.Close()
+
+	// A half-open TCP connection makes ReadMessage block forever, so the
+	// reconnect loop never fires. Set a read deadline and push it forward
+	// on every pong; the ping ticker below forces the server to keep
+	// answering.
+	if err := conn.SetReadDeadline(time.Now().Add(readWindow)); err != nil {
+		return fmt.Errorf("set read deadline: %w", err)
+	}
+	conn.SetPongHandler(func(string) error {
+		return conn.SetReadDeadline(time.Now().Add(readWindow))
+	})
 
 	// Subscribe to every program. Mention IDs in JSON-RPC ID so we can correlate
 	// subscription confirmations.
@@ -163,11 +183,9 @@ func (l *Listener) runOnce(ctx context.Context, wsURL string) error {
 		}
 	}
 
-	// Read pump. The Solana RPC sends pings every ~30s; gorilla handles them
-	// automatically. We set a short read deadline so a dead connection doesn't
-	// block forever.
 	closeOnCtx := make(chan struct{})
 	defer close(closeOnCtx)
+	// On context cancel: send a clean close and force the reader to unblock.
 	go func() {
 		select {
 		case <-ctx.Done():
@@ -178,12 +196,33 @@ func (l *Listener) runOnce(ctx context.Context, wsURL string) error {
 		case <-closeOnCtx:
 		}
 	}()
+	// Keepalive pinger. WriteControl is safe to call concurrently with the
+	// reader and the close goroutine above.
+	go func() {
+		t := time.NewTicker(pingEvery)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-closeOnCtx:
+				return
+			case <-t.C:
+				if err := conn.WriteControl(websocket.PingMessage, nil,
+					time.Now().Add(5*time.Second)); err != nil {
+					return // reader will surface the failure on its next read
+				}
+			}
+		}
+	}()
 
 	for {
 		_, raw, err := conn.ReadMessage()
 		if err != nil {
 			return fmt.Errorf("read: %w", err)
 		}
+		// Any inbound frame proves the link is alive — extend the window.
+		_ = conn.SetReadDeadline(time.Now().Add(readWindow))
 		l.handle(raw)
 	}
 }

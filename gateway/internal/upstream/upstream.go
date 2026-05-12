@@ -23,6 +23,13 @@ import (
 // tripped. Callers must short-circuit with 503 Service Unavailable.
 var ErrCircuitOpen = errors.New("circuit breaker open")
 
+// StatusClientClosedRequest mirrors nginx's 499: the reverse-proxy
+// ErrorHandler writes it when the upstream RoundTrip failed because the
+// *client's* context was cancelled (caller went away mid-flight). The
+// proxy handler treats it as "not an upstream fault" — it does not feed
+// the circuit breaker and does not auto-refund mutating routes.
+const StatusClientClosedRequest = 499
+
 // breakerSettings controls the trip threshold and recovery window.
 // Tuned conservatively: open after 5 consecutive failures (or 50%
 // failure rate over 20 requests), stay open for 30 seconds, then
@@ -223,8 +230,18 @@ func newTarget(name, baseURL, authHeader, authValue string, timeout time.Duratio
 			resp.Header.Set("X-Andromeda-Upstream", name)
 			return nil
 		},
-		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, _ error) {
-			http.Error(w, `{"error":"bad gateway"}`, http.StatusBadGateway)
+		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
+			// A cancelled *client* context is not the engine's fault —
+			// signal 499 so the proxy handler skips the breaker and the
+			// auto-refund-on-5xx path. A deadline exceeded here is the
+			// per-route timeout firing (engine too slow) → keep it 502.
+			if errors.Is(err, context.Canceled) {
+				w.WriteHeader(StatusClientClosedRequest)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = w.Write([]byte(`{"error":"bad gateway","code":"upstream_error"}`))
 		},
 	}
 	t.Proxy = rp

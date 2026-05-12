@@ -106,3 +106,14 @@ func (s *pgStore) GetUsageReport(ctx context.Context, userID string, since, unti
 
 	return report, nil
 }
+
+func (s *pgStore) InsertUsageEvent(ctx context.Context, e UsageEvent) error {
+	_, err := s.pool.Exec(ctx, `
+        INSERT INTO usage_events
+            (user_id, api_key_id, subscription_id, route_key, cost_tokens,
+             status_code, latency_ms, request_id, occurred_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+		e.UserID, e.APIKeyID, e.SubscriptionID, e.RouteKey, e.CostTokens,
+		e.StatusCode, e.LatencyMs, e.RequestID, e.OccurredAt)
+	return err
+}

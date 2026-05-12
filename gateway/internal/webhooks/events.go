@@ -11,17 +11,17 @@ import (
 // the Andromeda policy templates. The schema mirrors `contracts/shared/src/
 // events.rs` — keep them in lockstep.
 type CanonicalEvent struct {
-	Type        string         `json:"type"`         // dotted name (signature.requested, policy.paused, ...)
-	Discriminator uint8        `json:"discriminator"`
-	Policy      string         `json:"policy"`         // base58 PublicKey
-	Dwallet     string         `json:"dwallet,omitempty"`
-	Owner       string         `json:"owner,omitempty"`
-	RequestHash string         `json:"requestHash,omitempty"`
-	TS          int64          `json:"ts"`
-	ReasonCode  *uint64        `json:"reasonCode,omitempty"`
-	Slot        int64          `json:"slot,omitempty"`
-	Signature   string         `json:"signature,omitempty"`
-	Raw         map[string]any `json:"raw,omitempty"` // catch-all for forward-compat
+	Type          string         `json:"type"` // dotted name (signature.requested, policy.paused, ...)
+	Discriminator uint8          `json:"discriminator"`
+	Policy        string         `json:"policy"` // base58 PublicKey
+	Dwallet       string         `json:"dwallet,omitempty"`
+	Owner         string         `json:"owner,omitempty"`
+	RequestHash   string         `json:"requestHash,omitempty"`
+	TS            int64          `json:"ts"`
+	ReasonCode    *uint64        `json:"reasonCode,omitempty"`
+	Slot          int64          `json:"slot,omitempty"`
+	Signature     string         `json:"signature,omitempty"`
+	Raw           map[string]any `json:"raw,omitempty"` // catch-all for forward-compat
 }
 
 // Event discriminators must match `contracts/shared/src/events.rs`.
@@ -49,10 +49,10 @@ var ikaEventTagLE = [8]byte{0x1d, 0x9a, 0xcb, 0x51, 0xea, 0x45, 0xa5, 0xe4}
 // payload size and surface unknown discriminators as ika.event.unknown so
 // later schema drift surfaces as a parse warning, not a silent miss.
 const (
-	ikaEventDWalletCreated       = 0 // dwallet(32) + authority(32) + curve(1) = 65
+	ikaEventDWalletCreated         = 0 // dwallet(32) + authority(32) + curve(1) = 65
 	ikaEventMessageApprovalCreated = 1 // dwallet(32) + message_hash(32) + caller_program(32) = 96
-	ikaEventSignatureCommitted   = 2 // message_approval(32) + signature_len(u16 LE) = 34
-	ikaEventAuthorityTransferred = 3 // dwallet(32) + old(32) + new(32) = 96
+	ikaEventSignatureCommitted     = 2 // message_approval(32) + signature_len(u16 LE) = 34
+	ikaEventAuthorityTransferred   = 3 // dwallet(32) + old(32) + new(32) = 96
 )
 
 // programDataPrefix is the line prefix Solana uses for `emit!()` payloads —
@@ -79,12 +79,12 @@ func extractEventLines(logs []string) []string {
 //
 // Two payload layouts are supported:
 //
-//   1. **Andromeda templates (Quasar)**: a single discriminator byte followed
-//      by the struct's fields in declaration order. Field order matches
-//      `contracts/shared/src/events.rs`.
-//   2. **Ika dWallet program (Anchor self-CPI)**: 8-byte `IkaEventTagLE`
-//      prefix + 1-byte disc + event-specific payload. Documented in
-//      `ika-pre-alpha/docs/src/reference/events.md`.
+//  1. **Andromeda templates (Quasar)**: a single discriminator byte followed
+//     by the struct's fields in declaration order. Field order matches
+//     `contracts/shared/src/events.rs`.
+//  2. **Ika dWallet program (Anchor self-CPI)**: 8-byte `IkaEventTagLE`
+//     prefix + 1-byte disc + event-specific payload. Documented in
+//     `ika-pre-alpha/docs/src/reference/events.md`.
 //
 // The dispatcher inspects the first 8 bytes; a match against `ikaEventTagLE`
 // routes to the Ika decoder, otherwise the legacy Quasar decoder runs.

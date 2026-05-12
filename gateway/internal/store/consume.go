@@ -10,13 +10,13 @@ import (
 
 // ConsumeTokensV2 charges `cost` tokens following the consumption order:
 //
-//   credits  → monthly  → overage
+//	credits  → monthly  → overage
 //
 // The whole operation runs in a single ReadCommitted transaction with
 // FOR UPDATE locks on:
 //
-//   * the subscription row (so concurrent calls serialise per user)
-//   * each active credit row touched (so the row's `consumed` is correct)
+//   - the subscription row (so concurrent calls serialise per user)
+//   - each active credit row touched (so the row's `consumed` is correct)
 //
 // Period rollover happens in-line if `current_period_end` has passed:
 // the subscription is reset with a fresh limit/buckets pulled from the
@@ -24,9 +24,9 @@ import (
 //
 // Errors:
 //
-//   * ErrQuotaExceeded — buckets combined cannot cover `cost`. Includes
+//   - ErrQuotaExceeded — buckets combined cannot cover `cost`. Includes
 //     the case where overage is needed but disabled / no card on file.
-//   * ErrNotFound      — subscription does not exist or is not active.
+//   - ErrNotFound      — subscription does not exist or is not active.
 func (s *pgStore) ConsumeTokensV2(ctx context.Context, subscriptionID string, cost int) (*ConsumptionResult, error) {
 	if cost <= 0 {
 		return nil, errInvalid("cost must be > 0")
@@ -40,12 +40,12 @@ func (s *pgStore) ConsumeTokensV2(ctx context.Context, subscriptionID string, co
 
 	// 1. Lock subscription. We need the user_id to consume credits.
 	var (
-		userID                                   string
-		periodStart, periodEnd                   time.Time
-		used, limit                              int64
-		overageUsed, overageCap                  int64
-		overageEnabled, cardPresent              bool
-		planID, billingCycle                     string
+		userID                      string
+		periodStart, periodEnd      time.Time
+		used, limit                 int64
+		overageUsed, overageCap     int64
+		overageEnabled, cardPresent bool
+		planID, billingCycle        string
 	)
 	err = tx.QueryRow(ctx, `
         SELECT user_id, current_period_start, current_period_end,
@@ -68,10 +68,10 @@ func (s *pgStore) ConsumeTokensV2(ctx context.Context, subscriptionID string, co
 	now := time.Now().UTC()
 	if !now.Before(periodEnd) {
 		var (
-			newLimit                           int64
-			newRPS, newBurst                   int
-			newReadRPS, newReadBurst           int
-			newTxRPS, newTxBurst               int
+			newLimit                 int64
+			newRPS, newBurst         int
+			newReadRPS, newReadBurst int
+			newTxRPS, newTxBurst     int
 		)
 		err = tx.QueryRow(ctx, `
             SELECT monthly_tokens, rate_limit_rps, rate_limit_burst,
@@ -82,21 +82,7 @@ func (s *pgStore) ConsumeTokensV2(ctx context.Context, subscriptionID string, co
 		if err != nil {
 			return nil, fmt.Errorf("load plan on rollover: %w", err)
 		}
-		newStart := periodEnd
-		var newEnd time.Time
-		if billingCycle == "annual" {
-			newEnd = annualPeriodEnd(newStart)
-		} else {
-			newEnd = nextPeriodEnd(newStart)
-		}
-		for !now.Before(newEnd) {
-			newStart = newEnd
-			if billingCycle == "annual" {
-				newEnd = annualPeriodEnd(newStart)
-			} else {
-				newEnd = nextPeriodEnd(newStart)
-			}
-		}
+		newStart, newEnd := rollPeriod(periodEnd, billingCycle == "annual", now)
 		newOverageCap := newLimit * 2
 
 		if _, err := tx.Exec(ctx, `
@@ -128,109 +114,60 @@ func (s *pgStore) ConsumeTokensV2(ctx context.Context, subscriptionID string, co
 		periodEnd = newEnd
 	}
 
-	remaining := cost
-	var fromCredits, fromMonthly, fromOverage int
-	var creditDebitsCaptured []CreditDebit
-
-	// 3a. Credits — oldest-expiring first, locked.
-	if remaining > 0 {
-		creditRows, err := tx.Query(ctx, `
-            SELECT id, amount, consumed
-            FROM credits
-            WHERE user_id = $1
-              AND exhausted_at IS NULL
-              AND expires_at > now()
-            ORDER BY expires_at ASC, created_at ASC
-            FOR UPDATE`, userID)
-		if err != nil {
+	// 3. Read the active credit rows (oldest-expiring first, locked) then let
+	//    the pure allocator decide the credits → monthly → overage split.
+	//    The arithmetic lives in allocateConsumption (see quotamath.go).
+	creditRows, err := tx.Query(ctx, `
+        SELECT id, amount, consumed
+        FROM credits
+        WHERE user_id = $1
+          AND exhausted_at IS NULL
+          AND expires_at > now()
+        ORDER BY expires_at ASC, created_at ASC
+        FOR UPDATE`, userID)
+	if err != nil {
+		return nil, err
+	}
+	var buckets []creditBucket
+	for creditRows.Next() {
+		var b creditBucket
+		if err := creditRows.Scan(&b.id, &b.amount, &b.consumed); err != nil {
+			creditRows.Close()
 			return nil, err
 		}
-		type creditRow struct {
-			id                string
-			amount, consumed  int64
-		}
-		var credits []creditRow
-		for creditRows.Next() {
-			var cr creditRow
-			if err := creditRows.Scan(&cr.id, &cr.amount, &cr.consumed); err != nil {
-				creditRows.Close()
-				return nil, err
-			}
-			credits = append(credits, cr)
-		}
-		creditRows.Close()
-
-		var debits []CreditDebit
-		for _, cr := range credits {
-			if remaining == 0 {
-				break
-			}
-			avail := cr.amount - cr.consumed
-			if avail <= 0 {
-				continue
-			}
-			take := avail
-			if int64(remaining) < take {
-				take = int64(remaining)
-			}
-			newConsumed := cr.consumed + take
-			var exhaustedAt any
-			if newConsumed >= cr.amount {
-				exhaustedAt = time.Now().UTC()
-			} else {
-				exhaustedAt = nil
-			}
-			if _, err := tx.Exec(ctx, `
-                UPDATE credits
-                SET consumed = $2, exhausted_at = $3
-                WHERE id = $1`, cr.id, newConsumed, exhaustedAt); err != nil {
-				return nil, err
-			}
-			fromCredits += int(take)
-			remaining -= int(take)
-			debits = append(debits, CreditDebit{CreditID: cr.id, Amount: take})
-		}
-		// Stash debits on the result so RefundTokensV2 can reverse them
-		// per-row. Done outside the loop so a partial drain still records.
-		// We assign back into the outer scope via the closure capture.
-		creditDebitsCaptured = debits
+		buckets = append(buckets, b)
+	}
+	creditRows.Close()
+	if err := creditRows.Err(); err != nil {
+		return nil, err
 	}
 
-	// 3b. Monthly.
-	if remaining > 0 {
-		monthlyAvail := limit - used
-		if monthlyAvail > 0 {
-			take := monthlyAvail
-			if int64(remaining) < take {
-				take = int64(remaining)
-			}
-			fromMonthly = int(take)
-			remaining -= int(take)
+	plan, err := allocateConsumption(cost, buckets, used, limit, overageUsed, overageCap, overageEnabled, cardPresent)
+	if err != nil {
+		return nil, err // ErrQuotaExceeded (buckets can't cover) or errInvalid
+	}
+
+	// 4a. Persist the touched credit rows.
+	for _, cu := range plan.creditUpdates {
+		var exhaustedAt any
+		if cu.exhausted {
+			exhaustedAt = time.Now().UTC()
+		}
+		if _, err := tx.Exec(ctx, `
+            UPDATE credits SET consumed = $2, exhausted_at = $3 WHERE id = $1`,
+			cu.id, cu.newConsumed, exhaustedAt); err != nil {
+			return nil, err
 		}
 	}
 
-	// 3c. Overage — only when card + opt-in.
-	if remaining > 0 {
-		if !overageEnabled || !cardPresent {
-			return nil, ErrQuotaExceeded
-		}
-		overageAvail := overageCap - overageUsed
-		if overageAvail < int64(remaining) {
-			return nil, ErrQuotaExceeded
-		}
-		fromOverage = remaining
-		remaining = 0
-	}
-
-	// 4. Apply monthly + overage updates to the subscription. Credits
-	//    were already updated in their own UPDATEs above.
-	if fromMonthly > 0 || fromOverage > 0 {
+	// 4b. Apply monthly + overage to the subscription counters.
+	if plan.fromMonthly > 0 || plan.fromOverage > 0 {
 		if _, err := tx.Exec(ctx, `
             UPDATE subscriptions
             SET tokens_used         = tokens_used + $2,
                 overage_used_tokens = overage_used_tokens + $3,
                 updated_at          = now()
-            WHERE id = $1`, subscriptionID, fromMonthly, fromOverage); err != nil {
+            WHERE id = $1`, subscriptionID, plan.fromMonthly, plan.fromOverage); err != nil {
 			return nil, err
 		}
 	}
@@ -250,39 +187,30 @@ func (s *pgStore) ConsumeTokensV2(ctx context.Context, subscriptionID string, co
 		return nil, err
 	}
 
-	// 6. Compute threshold crossings against (monthly + overage) usage
-	//    over the monthly limit. The 200% threshold corresponds to the
-	//    overage hard cap.
+	// 6. Build the result + threshold crossings against (monthly + overage)
+	//    usage over the monthly limit (200% == the overage hard cap).
 	res := &ConsumptionResult{
 		Cost:         cost,
-		FromCredits:  fromCredits,
-		FromMonthly:  fromMonthly,
-		FromOverage:  fromOverage,
+		FromCredits:  plan.fromCredits,
+		FromMonthly:  plan.fromMonthly,
+		FromOverage:  plan.fromOverage,
 		TokensUsed:   sub.TokensUsed,
 		OverageUsed:  sub.OverageUsedTokens,
 		Subscription: &sub,
-		CreditDebits: creditDebitsCaptured,
+		CreditDebits: plan.creditDebits,
 	}
 	totalNew := sub.TokensUsed + sub.OverageUsedTokens
-	totalOld := totalNew - int64(fromMonthly+fromOverage)
-	if sub.TokensLimit > 0 {
-		check := func(pct int) bool {
-			thr := (sub.TokensLimit * int64(pct)) / 100
-			return totalOld < thr && totalNew >= thr
-		}
-		res.Crossed80Pct = check(80)
-		res.Crossed95Pct = check(95)
-		res.Crossed100Pct = check(100)
-		res.Crossed200Pct = check(200)
-	}
+	totalOld := totalNew - int64(plan.fromMonthly+plan.fromOverage)
+	res.Crossed80Pct, res.Crossed95Pct, res.Crossed100Pct, res.Crossed200Pct =
+		crossedThresholds(sub.TokensLimit, totalOld, totalNew)
 	return res, nil
 }
 
 // RefundTokensV2 reverses a prior consumption. Refunds happen per
 // bucket using the breakdown captured in ConsumptionResult:
 //
-//   * Monthly + overage: decrement the subscription counters.
-//   * Credits: walk r.CreditDebits and undo each row's `consumed`
+//   - Monthly + overage: decrement the subscription counters.
+//   - Credits: walk r.CreditDebits and undo each row's `consumed`
 //     amount, also clearing exhausted_at when the row no longer
 //     sums to its full amount.
 //

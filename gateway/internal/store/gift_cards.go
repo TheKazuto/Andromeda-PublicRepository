@@ -244,13 +244,13 @@ func nullableStr(s string) any {
 // ApplyGiftCard atomically redeems a gift card AND applies its plan to
 // the recipient's subscription. Three outcomes:
 //
-//   * No active subscription → create one with the gift's plan + duration.
-//   * Active subscription, current plan tier <= gift plan tier → extend
+//   - No active subscription → create one with the gift's plan + duration.
+//   - Active subscription, current plan tier <= gift plan tier → extend
 //     period_end by the gift's duration AND bump tokens_limit by the
 //     gift's contribution. If gift's plan is strictly higher tier, also
 //     swap the plan + RPS limits (Action="upgraded"); otherwise just
 //     extend (Action="extended").
-//   * Active subscription, current plan tier > gift plan tier → still
+//   - Active subscription, current plan tier > gift plan tier → still
 //     extend (don't downgrade). Action="extended".
 //
 // "Tier" is defined by plans.sort_order. Equal sort_order is treated as
@@ -367,12 +367,12 @@ func (s *pgStore) ApplyGiftCard(ctx context.Context, token, recipientUserID stri
 	default:
 		// Case B/C: subscription exists. Compare tiers and decide upgrade.
 		var (
-			currentPlanID         string
-			currentPlanCode       string
-			currentSortOrder      int
-			currentTokensLimit    int64
-			currentPeriodEnd      time.Time
-			currentOverageCap     int64
+			currentPlanID      string
+			currentPlanCode    string
+			currentSortOrder   int
+			currentTokensLimit int64
+			currentPeriodEnd   time.Time
+			currentOverageCap  int64
 		)
 		err = tx.QueryRow(ctx, `
             SELECT sub.plan_id, p.code, p.sort_order,

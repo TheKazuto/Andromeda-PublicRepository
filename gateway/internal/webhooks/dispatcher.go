@@ -52,6 +52,16 @@ func NewDispatcher(store *Store, logger *slog.Logger) *Dispatcher {
 	}
 }
 
+// WithURLGuard overrides the SSRF guard used to validate delivery endpoints.
+// Pass a ModeDevelopment validator in dev so localhost callbacks work; nil is
+// ignored (keeps the safe ModeProduction default).
+func (d *Dispatcher) WithURLGuard(g *netsafety.Validator) *Dispatcher {
+	if g != nil {
+		d.urlGuard = g
+	}
+	return d
+}
+
 // Run blocks until ctx is cancelled, ticking every `dispatcherTick`.
 func (d *Dispatcher) Run(ctx context.Context) {
 	t := time.NewTicker(dispatcherTick)
