@@ -28,7 +28,10 @@ import (
 	"strings"
 	"time"
 
+	chimw "github.com/go-chi/chi/v5/middleware"
 	"github.com/redis/go-redis/v9"
+
+	"github.com/shinkalabs/andromeda-gateway/internal/httpx"
 )
 
 // HeaderName is the request header carrying the idempotency key.
@@ -162,15 +165,26 @@ func handle(w http.ResponseWriter, r *http.Request, next http.Handler, opts Midd
 		return
 	}
 
-	rec := newResponseRecorder(w)
+	// Wrap with chi's response writer so we keep http.Flusher / http.Hijacker
+	// passthrough (a bare struct wrapper would break SSE and WebSocket
+	// upgrades on idempotent routes), and Tee the body into a buffer for the
+	// cache snapshot.
+	var bodyBuf bytes.Buffer
+	rec := chimw.NewWrapResponseWriter(w, r.ProtoMajor)
+	rec.Tee(&bodyBuf)
 	next.ServeHTTP(rec, r)
 
+	status := rec.Status()
+	if status == 0 {
+		status = http.StatusOK
+	}
+
 	// Only persist 2xx/4xx — 5xx must allow legitimate retries.
-	if rec.status >= 200 && rec.status < 500 {
+	if status >= 200 && status < 500 {
 		entry := storedEntry{
-			Status:      rec.status,
-			Body:        rec.buf.Bytes(),
-			Header:      flattenHeader(rec.headers),
+			Status:      status,
+			Body:        bodyBuf.Bytes(),
+			Header:      flattenHeader(w.Header()),
 			RequestHash: bodyHash,
 			SavedAt:     time.Now().UTC().Format(time.RFC3339),
 		}
@@ -256,48 +270,5 @@ func flattenHeader(h http.Header) map[string]string {
 }
 
 func writeJSONError(w http.ResponseWriter, code int, errCode, msg string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	_, _ = w.Write([]byte(fmt.Sprintf(`{"error":{"code":%q,"message":%q}}`, errCode, msg)))
-}
-
-// responseRecorder captures status, headers and body so we can persist a
-// snapshot for later replays.
-type responseRecorder struct {
-	http.ResponseWriter
-	status      int
-	headers     http.Header
-	buf         bytes.Buffer
-	wroteHeader bool
-}
-
-func newResponseRecorder(w http.ResponseWriter) *responseRecorder {
-	return &responseRecorder{ResponseWriter: w, headers: http.Header{}}
-}
-
-func (r *responseRecorder) Header() http.Header {
-	// Mirror writes to both the actual response and our snapshot.
-	return r.ResponseWriter.Header()
-}
-
-func (r *responseRecorder) WriteHeader(code int) {
-	if r.wroteHeader {
-		return
-	}
-	r.status = code
-	r.wroteHeader = true
-	for k, v := range r.ResponseWriter.Header() {
-		if len(v) > 0 {
-			r.headers.Set(k, v[0])
-		}
-	}
-	r.ResponseWriter.WriteHeader(code)
-}
-
-func (r *responseRecorder) Write(b []byte) (int, error) {
-	if !r.wroteHeader {
-		r.WriteHeader(http.StatusOK)
-	}
-	r.buf.Write(b)
-	return r.ResponseWriter.Write(b)
+	httpx.WriteError(w, code, errCode, msg)
 }

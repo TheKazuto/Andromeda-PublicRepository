@@ -23,8 +23,7 @@ type authedRequest struct {
 }
 
 type routedRequest struct {
-	Key      string
-	Upstream string
+	Key string
 }
 
 func withAuth(r *http.Request, a *authedRequest) *http.Request {

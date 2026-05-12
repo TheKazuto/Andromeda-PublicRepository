@@ -56,11 +56,11 @@ type DecisionRequest struct {
 // DecisionResponse is what the encrypt-backend returns: the canonical
 // `EncryptedDecision` bytes split into the parts the on-chain program needs.
 type DecisionResponse struct {
-	RequestHashHex   string `json:"request_hash_hex"`
-	CreatedSlot      uint64 `json:"created_slot"`
-	Authorize        bool   `json:"authorize"`
-	SignatureB64     string `json:"signature_base64"`     // ed25519 over canonical decision bytes
-	FHEAuthorityB64  string `json:"fhe_authority_base64"`  // pubkey for client-side verification
+	RequestHashHex  string `json:"request_hash_hex"`
+	CreatedSlot     uint64 `json:"created_slot"`
+	Authorize       bool   `json:"authorize"`
+	SignatureB64    string `json:"signature_base64"`     // ed25519 over canonical decision bytes
+	FHEAuthorityB64 string `json:"fhe_authority_base64"` // pubkey for client-side verification
 }
 
 // HTTPConfidentialClient is the production implementation that POSTs to the
@@ -305,7 +305,6 @@ func (s *Service) confidentialSign(w http.ResponseWriter, r *http.Request) {
 		MetaDigest:        [32]byte{},
 		UserPubkey:        user,
 		SignatureScheme:   req.SignatureScheme,
-		CurrentTS:         time.Now().Unix(),
 	}
 	ixs, err := BuildFHEGatedRequestSignature(s.Registry, FHEGatedRequestSignatureInput{
 		RequestSigCommon:    common,

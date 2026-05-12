@@ -6,25 +6,36 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	chimw "github.com/go-chi/chi/v5/middleware"
 )
 
 // Middleware returns a chi-style middleware that records request count,
 // duration and in-flight count. Route label uses the chi route pattern
 // (e.g. "/v1/dwallet/{id}") so we don't blow up cardinality with
 // per-id timeseries.
+//
+// The response writer is wrapped with chi's WrapResponseWriter, which
+// exposes Status()/BytesWritten() while still delegating http.Flusher,
+// http.Hijacker and http.Pusher to the underlying writer. That delegation
+// is what keeps SSE responses (GET /mcp) working — a bare struct wrapper
+// would hide Flush() and break streaming.
 func Middleware(m *Metrics) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()
 			m.HTTPInFlight.Inc()
-			rec := &statusRecorder{ResponseWriter: w, status: 200}
+			ww := chimw.NewWrapResponseWriter(w, r.ProtoMajor)
 
-			next.ServeHTTP(rec, r)
+			next.ServeHTTP(ww, r)
 
 			m.HTTPInFlight.Dec()
+			status := ww.Status()
+			if status == 0 {
+				status = http.StatusOK
+			}
 			route := routeOf(r)
 			m.HTTPRequestsTotal.
-				WithLabelValues(r.Method, route, strconv.Itoa(rec.status)).
+				WithLabelValues(r.Method, route, strconv.Itoa(status)).
 				Inc()
 			m.HTTPRequestDuration.
 				WithLabelValues(r.Method, route).
@@ -43,26 +54,4 @@ func routeOf(r *http.Request) string {
 		}
 	}
 	return r.URL.Path
-}
-
-type statusRecorder struct {
-	http.ResponseWriter
-	status int
-	wrote  bool
-}
-
-func (s *statusRecorder) WriteHeader(code int) {
-	if !s.wrote {
-		s.status = code
-		s.wrote = true
-	}
-	s.ResponseWriter.WriteHeader(code)
-}
-
-func (s *statusRecorder) Write(b []byte) (int, error) {
-	if !s.wrote {
-		s.status = http.StatusOK
-		s.wrote = true
-	}
-	return s.ResponseWriter.Write(b)
 }

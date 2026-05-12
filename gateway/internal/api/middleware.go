@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5/middleware"
@@ -15,6 +14,11 @@ import (
 	"github.com/shinkalabs/andromeda-gateway/internal/routes"
 	"github.com/shinkalabs/andromeda-gateway/internal/store"
 )
+
+// apiKeyTouchInterval is the debounce window for last_used_at writes. A
+// busy API key triggers at most one UPDATE per window instead of one per
+// request, which keeps the connection pool from drowning under load.
+const apiKeyTouchInterval = time.Minute
 
 // requireAPIKey authenticates the X-Api-Key / Authorization Bearer header
 // and attaches the user, key and active subscription to the context.
@@ -42,8 +46,19 @@ func (s *Server) requireAPIKey(next http.Handler) http.Handler {
 			return
 		}
 
-		// IP allowlist check — middleware.RealIP populates r.RemoteAddr
-		// upstream of this handler so we can match X-Forwarded-For too.
+		// IP allowlist check — trustedRealIP populates r.RemoteAddr from
+		// X-Forwarded-For when the peer is a trusted proxy. In production
+		// the gateway sits behind the Railway edge proxy, so without a
+		// configured TRUSTED_PROXY_CIDRS the RemoteAddr is the proxy and an
+		// ip_allowlist on the key cannot be matched safely — reject
+		// explicitly instead of locking the key out against the proxy IP.
+		if len(bundle.APIKey.IPAllowlist) > 0 &&
+			s.cfg.Env == "production" && len(s.cfg.TrustedProxyCIDRs) == 0 {
+			writeError(w, http.StatusForbidden, "ip_allowlist_unsupported",
+				"this API key has an IP allowlist but the gateway is not configured "+
+					"with TRUSTED_PROXY_CIDRS — the caller IP cannot be verified")
+			return
+		}
 		if !auth.MatchesIPAllowlist(bundle.APIKey.IPAllowlist, callerIP(r)) {
 			writeError(w, http.StatusForbidden, "ip_not_allowed",
 				"caller IP is not on this API key's allowlist")
@@ -58,12 +73,7 @@ func (s *Server) requireAPIKey(next http.Handler) http.Handler {
 			return
 		}
 
-		// Touch last_used_at asynchronously — don't block the request.
-		go func(id string) {
-			tctx, c := context.WithTimeout(context.Background(), 2*time.Second)
-			defer c()
-			_ = s.store.TouchAPIKeyUsed(tctx, id)
-		}(bundle.APIKey.ID)
+		s.maybeTouchAPIKey(r, bundle.APIKey.ID)
 
 		next.ServeHTTP(w, withAuth(r, &authedRequest{
 			User:         bundle.User,
@@ -71,6 +81,30 @@ func (s *Server) requireAPIKey(next http.Handler) http.Handler {
 			Subscription: bundle.Subscription,
 		}))
 	})
+}
+
+// maybeTouchAPIKey updates api_keys.last_used_at asynchronously, but at
+// most once per apiKeyTouchInterval per key. The DB write runs on a
+// context that survives the request returning (so it actually lands) but
+// is bounded by a short timeout (so it cannot leak past shutdown).
+func (s *Server) maybeTouchAPIKey(r *http.Request, id string) {
+	now := time.Now()
+	if last, ok := s.apiKeyTouched.Load(id); ok {
+		if lt, ok := last.(time.Time); ok && now.Sub(lt) < apiKeyTouchInterval {
+			return
+		}
+	}
+	s.apiKeyTouched.Store(id, now)
+	// context.WithoutCancel keeps the trace/values but drops the request's
+	// cancellation, so the UPDATE isn't aborted the instant ServeHTTP returns.
+	parent := context.WithoutCancel(r.Context())
+	go func() {
+		ctx, cancel := context.WithTimeout(parent, 2*time.Second)
+		defer cancel()
+		if err := s.store.TouchAPIKeyUsed(ctx, id); err != nil {
+			s.logger.Debug("touch api key last_used_at failed", "err", err, "api_key", id)
+		}
+	}()
 }
 
 // requireScope is a middleware factory that gates a request on the
@@ -95,18 +129,6 @@ func (s *Server) requireScope(scope string) func(http.Handler) http.Handler {
 	}
 }
 
-// callerIP picks the client IP for IP-allowlist checks. chi's RealIP
-// middleware (already wired in server.go) rewrites RemoteAddr based on
-// X-Forwarded-For / X-Real-IP headers, so RemoteAddr is the source of
-// truth at this point.
-func callerIP(r *http.Request) string {
-	addr := r.RemoteAddr
-	if i := strings.LastIndex(addr, ":"); i >= 0 {
-		return addr[:i]
-	}
-	return addr
-}
-
 // requireSubscription rejects calls from users without an active
 // subscription. Authentication only proves identity; the subscription
 // is what authorises access to billable upstreams.
@@ -128,7 +150,7 @@ func (s *Server) requireSubscription(next http.Handler) http.Handler {
 //
 // The Redis key includes the class so each bucket has its own window:
 //
-//   ratelimit:<api_key_id>:<class>
+//	ratelimit:<api_key_id>:<class>
 //
 // Plans with rps == 0 (unlimited) are passed through.
 func (s *Server) applyRateLimitFor(class string) func(http.Handler) http.Handler {
@@ -273,27 +295,6 @@ func (s *Server) requireAdmin(next http.Handler) http.Handler {
 		}
 		writeError(w, http.StatusUnauthorized, "admin_unauthorised", "admin token required")
 	})
-}
-
-// statusRecorder lets the proxy know the upstream HTTP status without
-// having to read the body. Used by the usage recorder.
-type statusRecorder struct {
-	http.ResponseWriter
-	status int
-	bytes  int
-}
-
-func (sr *statusRecorder) WriteHeader(code int) {
-	sr.status = code
-	sr.ResponseWriter.WriteHeader(code)
-}
-func (sr *statusRecorder) Write(b []byte) (int, error) {
-	if sr.status == 0 {
-		sr.status = http.StatusOK
-	}
-	n, err := sr.ResponseWriter.Write(b)
-	sr.bytes += n
-	return n, err
 }
 
 // requestIDFromCtx returns chi's request ID, or empty if missing.

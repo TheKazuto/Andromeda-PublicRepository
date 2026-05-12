@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/shinkalabs/andromeda-gateway/internal/mcp"
 	"github.com/shinkalabs/andromeda-gateway/internal/store"
@@ -23,8 +24,8 @@ func newMCPCharger(s *Server) *mcpCharger { return &mcpCharger{srv: s} }
 // subscription, and returns a Refundable backed by RefundTokensV2.
 //
 // Returned errors:
-//   * mcp.QuotaError when the user is out of quota
-//   * generic internal error wrapping the store layer otherwise
+//   - mcp.QuotaError when the user is out of quota
+//   - generic internal error wrapping the store layer otherwise
 func (c *mcpCharger) Charge(ctx context.Context, r *http.Request, toolKey string) (mcp.Refundable, error) {
 	a := authFrom(r)
 	if a == nil || a.User == nil || a.Subscription == nil {
@@ -35,7 +36,12 @@ func (c *mcpCharger) Charge(ctx context.Context, r *http.Request, toolKey string
 		cost = 1
 	}
 
-	result, err := c.srv.store.ConsumeTokensV2(ctx, a.Subscription.ID, cost)
+	// Bound the consume the same way the REST chargeQuota middleware does —
+	// the inbound ctx is the request context and may be cancelled by the
+	// MCP client mid-call.
+	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	result, err := c.srv.store.ConsumeTokensV2(cctx, a.Subscription.ID, cost)
 	switch {
 	case err == nil:
 	case errors.Is(err, store.ErrQuotaExceeded):
@@ -82,7 +88,13 @@ func (r *mcpRefund) Refund(ctx context.Context) {
 	if r == nil || r.consumption == nil {
 		return
 	}
-	if err := r.srv.store.RefundTokensV2(ctx, r.subscriptionID, *r.consumption); err != nil {
+	// Detach from the request context (the MCP client may have disconnected,
+	// which is exactly when we still need to put the tokens back) but keep
+	// any trace span for correlation, and bound it with a short timeout —
+	// same posture as the REST proxy's refund().
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+	defer cancel()
+	if err := r.srv.store.RefundTokensV2(rctx, r.subscriptionID, *r.consumption); err != nil {
 		r.srv.logger.Warn("mcp refund failed",
 			"err", err, "subscription", r.subscriptionID,
 			"from_monthly", r.consumption.FromMonthly,

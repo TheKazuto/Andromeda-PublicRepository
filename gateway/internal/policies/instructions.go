@@ -3,14 +3,14 @@
 //
 // Every admin / write flow follows the same shape:
 //
-//   1. Gateway computes the canonical challenge bytes off-chain (see
-//      `gateway/internal/auth`) and returns them to the caller.
-//   2. The caller's wallet (any chain) signs the challenge off-chain.
-//   3. Gateway calls one of the `Build*Admin*` functions below to assemble
-//      `[precompilePrecallIx, mainAdminIx]` — the precompile validates the
-//      off-chain signature on-chain via `andromeda_auth`; the main ix advances
-//      the policy nonce and applies the state mutation.
-//   4. The gateway gas-sponsor signer pays + sends the transaction.
+//  1. Gateway computes the canonical challenge bytes off-chain (see
+//     `gateway/internal/auth`) and returns them to the caller.
+//  2. The caller's wallet (any chain) signs the challenge off-chain.
+//  3. Gateway calls one of the `Build*Admin*` functions below to assemble
+//     `[precompilePrecallIx, mainAdminIx]` — the precompile validates the
+//     off-chain signature on-chain via `andromeda_auth`; the main ix advances
+//     the policy nonce and applies the state mutation.
+//  4. The gateway gas-sponsor signer pays + sends the transaction.
 //
 // `init_policy` is gas-sponsored but challenge-free in most templates (the
 // dWallet `transfer_ownership` is what truly arms the policy after init).
@@ -123,20 +123,17 @@ type RequestSigCommon struct {
 	MetaDigest        [32]byte
 	UserPubkey        [32]byte
 	SignatureScheme   uint16
-	// CurrentTS retained for backward compatibility with callers that
-	// emit local logs; the on-chain instruction no longer accepts it.
-	CurrentTS int64
 }
 
 // adminAccountSlice constructs the standard 5-account `AdminAction` layout
 // shared by every owner-style template (allowlist / velocity / time-lock /
 // oracle / passkey / fhe-gated):
 //
-//   0. dwallet_account     (readonly)
-//   1. policy              (writable, mut)
-//   2. instructions_sysvar (readonly)
-//   3. clock               (readonly)  ← Audit C1
-//   4. payer               (writable signer)
+//  0. dwallet_account     (readonly)
+//  1. policy              (writable, mut)
+//  2. instructions_sysvar (readonly)
+//  3. clock               (readonly)  ← Audit C1
+//  4. payer               (writable signer)
 func adminAccountSlice(dwallet, policy, sponsor solana.PublicKey) solana.AccountMetaSlice {
 	return solana.AccountMetaSlice{
 		meta(dwallet, accReadonly),
@@ -150,13 +147,13 @@ func adminAccountSlice(dwallet, policy, sponsor solana.PublicKey) solana.Account
 // initAccountSlice constructs the standard 7-account `InitPolicy` layout
 // shared by every owner-style template after Audit C2 (Opção 4):
 //
-//   0. dwallet_account     (readonly)
-//   1. policy              (writable, init)
-//   2. payer               (writable signer)
-//   3. instructions_sysvar (readonly)
-//   4. clock               (readonly)
-//   5. rent                (readonly)
-//   6. system_program      (readonly)
+//  0. dwallet_account     (readonly)
+//  1. policy              (writable, init)
+//  2. payer               (writable signer)
+//  3. instructions_sysvar (readonly)
+//  4. clock               (readonly)
+//  5. rent                (readonly)
+//  6. system_program      (readonly)
 func initAccountSlice(dwallet, policy, sponsor solana.PublicKey) solana.AccountMetaSlice {
 	return solana.AccountMetaSlice{
 		meta(dwallet, accReadonly),
@@ -225,7 +222,6 @@ type AllowlistAdminInput struct {
 	Destination   [32]byte // required for add/remove
 	ExpectedNonce uint64
 	OwnerSig      AdminSignature
-	CurrentTS     int64 // for pause/resume events
 }
 
 // BuildAllowlistAdmin returns `[precompileIx, mainIx]` so the gateway can
@@ -351,7 +347,6 @@ type VelocityAdminInput struct {
 	WindowSlots      uint64 // for update-window
 	ExpectedNonce    uint64
 	OwnerSig         AdminSignature
-	CurrentTS        int64
 }
 
 func BuildVelocityAdmin(reg *Registry, in VelocityAdminInput) ([]solana.Instruction, error) {
@@ -470,7 +465,6 @@ type TimeLockAdminInput struct {
 	RecurringPeriodSlots uint64
 	ExpectedNonce        uint64
 	OwnerSig             AdminSignature
-	CurrentTS            int64
 }
 
 func BuildTimeLockAdmin(reg *Registry, in TimeLockAdminInput) ([]solana.Instruction, error) {

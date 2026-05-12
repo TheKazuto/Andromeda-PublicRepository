@@ -48,17 +48,6 @@ func (p *Pricer) Cost(key string) int {
 	return p.defaultCost
 }
 
-// Snapshot returns a copy of the current cache (for /admin observability).
-func (p *Pricer) Snapshot() map[string]int {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	out := make(map[string]int, len(p.costs))
-	for k, v := range p.costs {
-		out[k] = v
-	}
-	return out
-}
-
 // Refresh pulls the latest costs from the store. Safe to call manually
 // (e.g. right after PATCH /admin/request-costs).
 func (p *Pricer) Refresh(ctx context.Context) error {

@@ -109,9 +109,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 
 		res, err := handler(r.Context(), p.Arguments)
-		// Refund when the tool itself errored or surfaced IsError —
-		// mirrors the REST proxy's 5xx refund path.
-		if refund != nil && (err != nil || (res.IsError)) {
+		// Refund only on a technical/upstream-5xx failure — never on a
+		// 4xx (caller's fault). Mirrors the REST proxy's refund-on-5xx
+		// policy. handler errors are always treated as technical.
+		if refund != nil && (err != nil || res.RefundableError) {
 			refund.Refund(r.Context())
 		}
 		if err != nil {

@@ -51,24 +51,24 @@ const (
 
 // Trigger is the durable representation of an armed future-sign.
 type Trigger struct {
-	ID               uuid.UUID       `json:"id"`
-	APIKeyID         uuid.UUID       `json:"apiKeyId"`
-	PartialSigCapID  string          `json:"partialSigCapId"`
-	DWalletAddress   string          `json:"dwalletAddress"`
-	PolicyProgramID  *string         `json:"policyProgramId,omitempty"`
-	TriggerType      TriggerType     `json:"triggerType"`
-	Condition        json.RawMessage `json:"condition"`
-	WebhookURL       string          `json:"webhookUrl"`
-	Status           Status          `json:"status"`
-	CreatedAt        time.Time       `json:"createdAt"`
-	ExpiresAt        time.Time       `json:"expiresAt"`
-	FiredAt          *time.Time      `json:"firedAt,omitempty"`
-	SignatureHex     *string         `json:"signatureHex,omitempty"`
-	LastCheckSlot    *int64          `json:"lastCheckSlot,omitempty"`
-	LastCheckAt      *time.Time      `json:"lastCheckAt,omitempty"`
-	FailureCount     int             `json:"failureCount"`
-	LastError        *string         `json:"lastError,omitempty"`
-	CompletePayload  json.RawMessage `json:"-"` // never returned via API
+	ID              uuid.UUID       `json:"id"`
+	APIKeyID        uuid.UUID       `json:"apiKeyId"`
+	PartialSigCapID string          `json:"partialSigCapId"`
+	DWalletAddress  string          `json:"dwalletAddress"`
+	PolicyProgramID *string         `json:"policyProgramId,omitempty"`
+	TriggerType     TriggerType     `json:"triggerType"`
+	Condition       json.RawMessage `json:"condition"`
+	WebhookURL      string          `json:"webhookUrl"`
+	Status          Status          `json:"status"`
+	CreatedAt       time.Time       `json:"createdAt"`
+	ExpiresAt       time.Time       `json:"expiresAt"`
+	FiredAt         *time.Time      `json:"firedAt,omitempty"`
+	SignatureHex    *string         `json:"signatureHex,omitempty"`
+	LastCheckSlot   *int64          `json:"lastCheckSlot,omitempty"`
+	LastCheckAt     *time.Time      `json:"lastCheckAt,omitempty"`
+	FailureCount    int             `json:"failureCount"`
+	LastError       *string         `json:"lastError,omitempty"`
+	CompletePayload json.RawMessage `json:"-"` // never returned via API
 }
 
 // CreateRequest is the API-level request to arm a trigger.

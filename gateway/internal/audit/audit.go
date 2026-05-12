@@ -3,10 +3,10 @@
 //
 // Each entry is appended atomically:
 //
-//   prev_hash  = entry_hash of the previous record for the same api_key_id
-//                (or 32 zero bytes for the first record).
-//   entry_hash = SHA-256(prev_hash || canonical(record))
-//   signature  = ed25519_sign(audit_key, entry_hash)
+//	prev_hash  = entry_hash of the previous record for the same api_key_id
+//	             (or 32 zero bytes for the first record).
+//	entry_hash = SHA-256(prev_hash || canonical(record))
+//	signature  = ed25519_sign(audit_key, entry_hash)
 //
 // The audit signing key is loaded from ANDROMEDA_AUDIT_PRIVATE_KEY (base64,
 // 64-byte ed25519 seed-or-private-key). For production this MUST be migrated
@@ -15,6 +15,7 @@
 package audit
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -64,7 +65,18 @@ type Recorder struct {
 	signer Signer
 	logger *slog.Logger
 
-	mu sync.Mutex
+	// chainLocks serialises Append within this process, per api_key_id,
+	// ahead of the transactional pg_advisory_xact_lock (which serialises
+	// across instances). Without it, concurrent appends for one tenant
+	// would each open a transaction and queue on the advisory lock,
+	// holding pool connections for nothing. Keyed by api_key_id string;
+	// entries are never evicted (bounded by the tenant count).
+	chainLocks sync.Map // string -> *sync.Mutex
+}
+
+func (r *Recorder) tenantLock(apiKeyID string) *sync.Mutex {
+	v, _ := r.chainLocks.LoadOrStore(apiKeyID, &sync.Mutex{})
+	return v.(*sync.Mutex)
 }
 
 // NewRecorder returns a Recorder using an in-process EnvSigner. Kept for
@@ -116,10 +128,14 @@ func (r *Recorder) Append(ctx context.Context, ev Event) (*Entry, error) {
 		return nil, fmt.Errorf("audit canonical payload: %w", err)
 	}
 
-	// Per-tenant chain — serialize with a transactional advisory lock so
-	// concurrent appends for the same api_key_id read the latest hash.
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	// Per-tenant chain. Two layers of serialisation:
+	//   1. in-process mutex keyed by api_key_id (avoids piling pool
+	//      connections on the advisory lock under same-tenant concurrency)
+	//   2. pg_advisory_xact_lock(hashtext(api_key_id)) inside the tx below
+	//      (authoritative; also serialises across gateway instances)
+	lock := r.tenantLock(ev.APIKeyID.String())
+	lock.Lock()
+	defer lock.Unlock()
 
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
@@ -216,15 +232,19 @@ func (r *Recorder) Append(ctx context.Context, ev Event) (*Entry, error) {
 
 // canonicalJSON marshals a payload with deterministic key ordering. Go's
 // `encoding/json` already sorts map keys; we re-marshal through json.Marshal
-// to guarantee stable bytes.
+// to guarantee stable bytes. The round-trip decoder uses UseNumber() so a
+// large integer in the payload survives as json.Number instead of being
+// coerced to float64 (which would lose precision above 2^53 and change the
+// canonical bytes — and therefore the audit hash).
 func canonicalJSON(v any) (json.RawMessage, error) {
 	buf, err := json.Marshal(v)
 	if err != nil {
 		return nil, err
 	}
-	// Round-trip to canonicalize (Go marshals map keys sorted).
+	dec := json.NewDecoder(bytes.NewReader(buf))
+	dec.UseNumber()
 	var probe any
-	if err := json.Unmarshal(buf, &probe); err != nil {
+	if err := dec.Decode(&probe); err != nil {
 		return nil, err
 	}
 	out, err := json.Marshal(probe)

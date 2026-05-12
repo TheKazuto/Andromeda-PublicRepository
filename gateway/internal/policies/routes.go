@@ -17,6 +17,7 @@ import (
 
 	"github.com/shinkalabs/andromeda-gateway/internal/auth"
 	"github.com/shinkalabs/andromeda-gateway/internal/gasponsor"
+	"github.com/shinkalabs/andromeda-gateway/internal/httpx"
 )
 
 // APIKeyResolver pulls the authenticated api_key_id from the request context.
@@ -136,10 +137,10 @@ type initRequest struct {
 	// over all init params. The hash of the slot is part of the PDA seed,
 	// so each (dwallet, init_authority) pair maps to a distinct policy
 	// PDA — squat-resistant.
-	InitAuthoritySlot              ownerSlotJSON `json:"init_authority_slot"`
-	InitAuthoritySignatureBase64   string        `json:"init_authority_signature_base64"`
-	InitAuthorityWebauthnAuthData  string        `json:"init_authority_webauthn_auth_data_base64,omitempty"`
-	InitAuthorityWebauthnCDJ       string        `json:"init_authority_webauthn_cdj_base64,omitempty"`
+	InitAuthoritySlot             ownerSlotJSON `json:"init_authority_slot"`
+	InitAuthoritySignatureBase64  string        `json:"init_authority_signature_base64"`
+	InitAuthorityWebauthnAuthData string        `json:"init_authority_webauthn_auth_data_base64,omitempty"`
+	InitAuthorityWebauthnCDJ      string        `json:"init_authority_webauthn_cdj_base64,omitempty"`
 
 	// Audit H6: required for session-keys to support multiple sessions
 	// per dwallet — each session_index produces a distinct PDA.
@@ -433,35 +434,35 @@ func (s *Service) initPolicy(w http.ResponseWriter, r *http.Request) {
 // ── Admin challenge / submit ───────────────────────────────────
 
 type adminChallengeRequest struct {
-	DwalletAddress    string        `json:"dwallet_address"`
-	OwnerSlot         ownerSlotJSON `json:"owner_slot"`
+	DwalletAddress string        `json:"dwallet_address"`
+	OwnerSlot      ownerSlotJSON `json:"owner_slot"`
 
 	// Audit C2 (Opção 4): client supplies the init_authority_hash that
 	// produced this policy's PDA. The gateway does NOT recompute it from
 	// init_authority_slot here — the slot is only signed at init time and
 	// not stored client-side; only the hash is needed to identify which
 	// PDA to address. (For session-keys also session_index — Audit H6.)
-	InitAuthorityHashBase64 string `json:"init_authority_hash_base64"`
+	InitAuthorityHashBase64 string  `json:"init_authority_hash_base64"`
 	SessionIndex            *uint32 `json:"session_index,omitempty"`
 
-	Action            string        `json:"action"`
-	ExpectedNonce     uint64        `json:"expected_nonce"`
-	DestinationBase64 string        `json:"destination_base64,omitempty"`
-	MaxSigsPerWindow  *uint32       `json:"max_sigs_per_window,omitempty"`
-	WindowSlots       *uint64       `json:"window_slots,omitempty"`
-	Mode              *uint8        `json:"mode,omitempty"`
-	StartSlot         *uint64       `json:"start_slot,omitempty"`
-	EndSlot           *uint64       `json:"end_slot,omitempty"`
-	RecurringPeriodSlots *uint64    `json:"recurring_period_slots,omitempty"`
-	MinPrice          *int64        `json:"min_price,omitempty"`
-	MaxPrice          *int64        `json:"max_price,omitempty"`
-	MaxAgeSlots       *uint64       `json:"max_age_slots,omitempty"`
-	MaxConfidenceBps  *uint16       `json:"max_confidence_bps,omitempty"` // Audit M1: 0 (or omit) = disabled.
-	ThresholdAmount   *uint64       `json:"threshold_amount,omitempty"`
-	PasskeyPubkeyB64  string        `json:"passkey_pubkey_base64,omitempty"`
-	NewFHEAuthority   string        `json:"new_fhe_authority,omitempty"`
-	AllowedProgram    string        `json:"allowed_program,omitempty"`
-	Recipient         string        `json:"recipient,omitempty"`
+	Action               string  `json:"action"`
+	ExpectedNonce        uint64  `json:"expected_nonce"`
+	DestinationBase64    string  `json:"destination_base64,omitempty"`
+	MaxSigsPerWindow     *uint32 `json:"max_sigs_per_window,omitempty"`
+	WindowSlots          *uint64 `json:"window_slots,omitempty"`
+	Mode                 *uint8  `json:"mode,omitempty"`
+	StartSlot            *uint64 `json:"start_slot,omitempty"`
+	EndSlot              *uint64 `json:"end_slot,omitempty"`
+	RecurringPeriodSlots *uint64 `json:"recurring_period_slots,omitempty"`
+	MinPrice             *int64  `json:"min_price,omitempty"`
+	MaxPrice             *int64  `json:"max_price,omitempty"`
+	MaxAgeSlots          *uint64 `json:"max_age_slots,omitempty"`
+	MaxConfidenceBps     *uint16 `json:"max_confidence_bps,omitempty"` // Audit M1: 0 (or omit) = disabled.
+	ThresholdAmount      *uint64 `json:"threshold_amount,omitempty"`
+	PasskeyPubkeyB64     string  `json:"passkey_pubkey_base64,omitempty"`
+	NewFHEAuthority      string  `json:"new_fhe_authority,omitempty"`
+	AllowedProgram       string  `json:"allowed_program,omitempty"`
+	Recipient            string  `json:"recipient,omitempty"`
 }
 
 // decodeInitAuthorityHash parses the base64 [u8; 32] init_authority_hash
@@ -512,133 +513,6 @@ func (s *Service) adminChallenge(w http.ResponseWriter, r *http.Request) {
 		"challenge_base64": base64.StdEncoding.EncodeToString(challenge[:]),
 		"expected_nonce":   req.ExpectedNonce,
 	})
-}
-
-func computeAdminChallenge(template string, req adminChallengeRequest, dwallet solana.PublicKey, ownerSlot [auth.MemberSlotLen]byte) ([32]byte, error) {
-	var zero [32]byte
-	switch template {
-	case TemplateAllowlist:
-		switch req.Action {
-		case "add_destination", "remove_destination":
-			dest, derr := decodeBase58OrBase64Bytes32(req.DestinationBase64)
-			if derr != nil {
-				return zero, fmt.Errorf("destination: %w", derr)
-			}
-			if req.Action == "add_destination" {
-				return auth.AllowlistAddDestinationChallenge(dwallet, dest, req.ExpectedNonce, ownerSlot), nil
-			}
-			return auth.AllowlistRemoveDestinationChallenge(dwallet, dest, req.ExpectedNonce, ownerSlot), nil
-		case "pause":
-			return auth.AllowlistPauseChallenge(dwallet, req.ExpectedNonce, ownerSlot), nil
-		case "resume":
-			return auth.AllowlistResumeChallenge(dwallet, req.ExpectedNonce, ownerSlot), nil
-		}
-	case TemplateVelocityGuard:
-		switch req.Action {
-		case "update_window":
-			if req.MaxSigsPerWindow == nil || req.WindowSlots == nil {
-				return zero, errors.New("max_sigs_per_window and window_slots required")
-			}
-			return auth.VelocityUpdateWindowChallenge(dwallet, *req.MaxSigsPerWindow, *req.WindowSlots, req.ExpectedNonce, ownerSlot), nil
-		case "pause":
-			return auth.VelocityPauseChallenge(dwallet, req.ExpectedNonce, ownerSlot), nil
-		case "resume":
-			return auth.VelocityResumeChallenge(dwallet, req.ExpectedNonce, ownerSlot), nil
-		}
-	case TemplateTimeLock:
-		switch req.Action {
-		case "update_window":
-			if req.Mode == nil || req.StartSlot == nil || req.EndSlot == nil || req.RecurringPeriodSlots == nil {
-				return zero, errors.New("mode, start_slot, end_slot, recurring_period_slots required")
-			}
-			return auth.TimeLockUpdateWindowChallenge(dwallet, *req.Mode, *req.StartSlot, *req.EndSlot, *req.RecurringPeriodSlots, req.ExpectedNonce, ownerSlot), nil
-		case "pause":
-			return auth.TimeLockPauseChallenge(dwallet, req.ExpectedNonce, ownerSlot), nil
-		case "resume":
-			return auth.TimeLockResumeChallenge(dwallet, req.ExpectedNonce, ownerSlot), nil
-		}
-	case TemplateOracleConditional:
-		switch req.Action {
-		case "update_bounds":
-			if req.MinPrice == nil || req.MaxPrice == nil || req.MaxAgeSlots == nil {
-				return zero, errors.New("min_price, max_price, max_age_slots required")
-			}
-			var maxConfBps uint16
-			if req.MaxConfidenceBps != nil {
-				maxConfBps = *req.MaxConfidenceBps
-			}
-			return auth.OracleUpdateBoundsChallenge(dwallet, *req.MinPrice, *req.MaxPrice, *req.MaxAgeSlots, maxConfBps, req.ExpectedNonce, ownerSlot), nil
-		case "pause":
-			return auth.OraclePauseChallenge(dwallet, req.ExpectedNonce, ownerSlot), nil
-		case "resume":
-			return auth.OracleResumeChallenge(dwallet, req.ExpectedNonce, ownerSlot), nil
-		}
-	case TemplatePasskeyStepUp:
-		switch req.Action {
-		case "update_policy":
-			if req.ThresholdAmount == nil || req.PasskeyPubkeyB64 == "" {
-				return zero, errors.New("threshold_amount and passkey_pubkey_base64 required")
-			}
-			pkb, derr := base64.StdEncoding.DecodeString(req.PasskeyPubkeyB64)
-			if derr != nil || len(pkb) != 33 {
-				return zero, errors.New("passkey_pubkey_base64 must decode to 33 bytes")
-			}
-			var pk [33]byte
-			copy(pk[:], pkb)
-			return auth.PasskeyUpdatePolicyChallenge(dwallet, *req.ThresholdAmount, pk, req.ExpectedNonce, ownerSlot), nil
-		case "pause":
-			return auth.PasskeyPauseChallenge(dwallet, req.ExpectedNonce, ownerSlot), nil
-		case "resume":
-			return auth.PasskeyResumeChallenge(dwallet, req.ExpectedNonce, ownerSlot), nil
-		}
-	case TemplateFHEGated:
-		switch req.Action {
-		case "rotate_authority":
-			if req.NewFHEAuthority == "" {
-				return zero, errors.New("new_fhe_authority required")
-			}
-			fa, ferr := solana.PublicKeyFromBase58(req.NewFHEAuthority)
-			if ferr != nil {
-				return zero, fmt.Errorf("new_fhe_authority: %w", ferr)
-			}
-			return auth.FHEGatedRotateAuthorityChallenge(dwallet, fa, req.ExpectedNonce, ownerSlot), nil
-		case "pause":
-			return auth.FHEGatedPauseChallenge(dwallet, req.ExpectedNonce, ownerSlot), nil
-		case "resume":
-			return auth.FHEGatedResumeChallenge(dwallet, req.ExpectedNonce, ownerSlot), nil
-		}
-	case TemplateSessionKeys:
-		// Audit C2 (Opção 4): create_session is now an init_policy flow,
-		// not an admin action — use POST /v1/policies/session-keys/init.
-		switch req.Action {
-		case "revoke":
-			return auth.SessionKeysRevokeChallenge(dwallet, req.ExpectedNonce, ownerSlot), nil
-		case "add_allowed_program", "remove_allowed_program":
-			if req.AllowedProgram == "" {
-				return zero, errors.New("allowed_program required")
-			}
-			pid, perr := solana.PublicKeyFromBase58(req.AllowedProgram)
-			if perr != nil {
-				return zero, fmt.Errorf("allowed_program: %w", perr)
-			}
-			if req.Action == "add_allowed_program" {
-				return auth.SessionKeysAddAllowedProgramChallenge(dwallet, pid, req.ExpectedNonce, ownerSlot), nil
-			}
-			return auth.SessionKeysRemoveAllowedProgramChallenge(dwallet, pid, req.ExpectedNonce, ownerSlot), nil
-		case "close_session":
-			if req.Recipient == "" {
-				return zero, errors.New("recipient required")
-			}
-			rcpt, rerr := solana.PublicKeyFromBase58(req.Recipient)
-			if rerr != nil {
-				return zero, fmt.Errorf("recipient: %w", rerr)
-			}
-			return auth.SessionKeysCloseSessionChallenge(dwallet, rcpt, req.ExpectedNonce, ownerSlot), nil
-		case "create_session":
-			return zero, errors.New("create_session is now an init flow — POST /v1/policies/session-keys/init (Audit C2)")
-		}
-	}
-	return zero, fmt.Errorf("unknown template/action: %s/%s", template, req.Action)
 }
 
 type adminSubmitRequest struct {
@@ -720,217 +594,6 @@ func (s *Service) adminSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"tx_signature": txSig.String()})
-}
-
-// dispatchAdminSubmit routes admin actions to the right builder. After
-// Audit C1: no `now`/`current_ts` is needed (Clock sysvar handles it).
-// After Audit C2: AdminContext carries InitAuthorityHash for PDA derivation.
-// After Audit H6: session-keys admin actions also need session_index.
-func dispatchAdminSubmit(reg *Registry, template string, req adminSubmitRequest, ctx AdminContext, sig AdminSignature) ([]solana.Instruction, error) {
-	switch template {
-	case TemplateAllowlist:
-		switch req.Action {
-		case "add_destination", "remove_destination":
-			dest, derr := decodeBase58OrBase64Bytes32(req.DestinationBase64)
-			if derr != nil {
-				return nil, fmt.Errorf("destination: %w", derr)
-			}
-			action := AllowlistAddDestination
-			if req.Action == "remove_destination" {
-				action = AllowlistRemoveDestination
-			}
-			return BuildAllowlistAdmin(reg, AllowlistAdminInput{
-				AdminContext: ctx, Action: action, Destination: dest,
-				ExpectedNonce: req.ExpectedNonce, OwnerSig: sig,
-			})
-		case "pause":
-			return BuildAllowlistAdmin(reg, AllowlistAdminInput{
-				AdminContext: ctx, Action: AllowlistPauseAction,
-				ExpectedNonce: req.ExpectedNonce, OwnerSig: sig,
-			})
-		case "resume":
-			return BuildAllowlistAdmin(reg, AllowlistAdminInput{
-				AdminContext: ctx, Action: AllowlistResumeAction,
-				ExpectedNonce: req.ExpectedNonce, OwnerSig: sig,
-			})
-		}
-	case TemplateVelocityGuard:
-		switch req.Action {
-		case "update_window":
-			if req.MaxSigsPerWindow == nil || req.WindowSlots == nil {
-				return nil, errors.New("max_sigs_per_window and window_slots required")
-			}
-			return BuildVelocityAdmin(reg, VelocityAdminInput{
-				AdminContext:     ctx,
-				Action:           VelocityUpdateWindow,
-				MaxSigsPerWindow: *req.MaxSigsPerWindow,
-				WindowSlots:      *req.WindowSlots,
-				ExpectedNonce:    req.ExpectedNonce, OwnerSig: sig,
-			})
-		case "pause":
-			return BuildVelocityAdmin(reg, VelocityAdminInput{
-				AdminContext: ctx, Action: VelocityPauseAction,
-				ExpectedNonce: req.ExpectedNonce, OwnerSig: sig,
-			})
-		case "resume":
-			return BuildVelocityAdmin(reg, VelocityAdminInput{
-				AdminContext: ctx, Action: VelocityResumeAction,
-				ExpectedNonce: req.ExpectedNonce, OwnerSig: sig,
-			})
-		}
-	case TemplateTimeLock:
-		switch req.Action {
-		case "update_window":
-			if req.Mode == nil || req.StartSlot == nil || req.EndSlot == nil || req.RecurringPeriodSlots == nil {
-				return nil, errors.New("mode, start_slot, end_slot, recurring_period_slots required")
-			}
-			return BuildTimeLockAdmin(reg, TimeLockAdminInput{
-				AdminContext:         ctx,
-				Action:               TimeLockUpdateWindow,
-				Mode:                 *req.Mode,
-				StartSlot:            *req.StartSlot,
-				EndSlot:              *req.EndSlot,
-				RecurringPeriodSlots: *req.RecurringPeriodSlots,
-				ExpectedNonce:        req.ExpectedNonce, OwnerSig: sig,
-			})
-		case "pause":
-			return BuildTimeLockAdmin(reg, TimeLockAdminInput{
-				AdminContext: ctx, Action: TimeLockPauseAction,
-				ExpectedNonce: req.ExpectedNonce, OwnerSig: sig,
-			})
-		case "resume":
-			return BuildTimeLockAdmin(reg, TimeLockAdminInput{
-				AdminContext: ctx, Action: TimeLockResumeAction,
-				ExpectedNonce: req.ExpectedNonce, OwnerSig: sig,
-			})
-		}
-	case TemplateOracleConditional:
-		switch req.Action {
-		case "update_bounds":
-			if req.MinPrice == nil || req.MaxPrice == nil || req.MaxAgeSlots == nil {
-				return nil, errors.New("min_price, max_price, max_age_slots required")
-			}
-			var maxConfBps uint16
-			if req.MaxConfidenceBps != nil {
-				maxConfBps = *req.MaxConfidenceBps
-			}
-			return BuildOracleAdmin(reg, OracleAdminInput{
-				AdminContext: ctx, Action: OracleUpdateBounds,
-				MinPrice: *req.MinPrice, MaxPrice: *req.MaxPrice, MaxAgeSlots: *req.MaxAgeSlots,
-				MaxConfidenceBps: maxConfBps,
-				ExpectedNonce:    req.ExpectedNonce, OwnerSig: sig,
-			})
-		case "pause":
-			return BuildOracleAdmin(reg, OracleAdminInput{
-				AdminContext: ctx, Action: OraclePauseAction,
-				ExpectedNonce: req.ExpectedNonce, OwnerSig: sig,
-			})
-		case "resume":
-			return BuildOracleAdmin(reg, OracleAdminInput{
-				AdminContext: ctx, Action: OracleResumeAction,
-				ExpectedNonce: req.ExpectedNonce, OwnerSig: sig,
-			})
-		}
-	case TemplatePasskeyStepUp:
-		switch req.Action {
-		case "update_policy":
-			if req.ThresholdAmount == nil || req.PasskeyPubkeyB64 == "" {
-				return nil, errors.New("threshold_amount and passkey_pubkey_base64 required")
-			}
-			pkb, derr := base64.StdEncoding.DecodeString(req.PasskeyPubkeyB64)
-			if derr != nil || len(pkb) != 33 {
-				return nil, errors.New("passkey_pubkey_base64 must decode to 33 bytes")
-			}
-			var pk [33]byte
-			copy(pk[:], pkb)
-			return BuildPasskeyAdmin(reg, PasskeyAdminInput{
-				AdminContext: ctx, Action: PasskeyUpdatePolicy,
-				ThresholdAmount: *req.ThresholdAmount, PasskeyPubkey: pk,
-				ExpectedNonce: req.ExpectedNonce, OwnerSig: sig,
-			})
-		case "pause":
-			return BuildPasskeyAdmin(reg, PasskeyAdminInput{
-				AdminContext: ctx, Action: PasskeyPauseAction,
-				ExpectedNonce: req.ExpectedNonce, OwnerSig: sig,
-			})
-		case "resume":
-			return BuildPasskeyAdmin(reg, PasskeyAdminInput{
-				AdminContext: ctx, Action: PasskeyResumeAction,
-				ExpectedNonce: req.ExpectedNonce, OwnerSig: sig,
-			})
-		}
-	case TemplateFHEGated:
-		switch req.Action {
-		case "rotate_authority":
-			if req.NewFHEAuthority == "" {
-				return nil, errors.New("new_fhe_authority required")
-			}
-			fa, ferr := solana.PublicKeyFromBase58(req.NewFHEAuthority)
-			if ferr != nil {
-				return nil, fmt.Errorf("new_fhe_authority: %w", ferr)
-			}
-			return BuildFHEGatedAdmin(reg, FHEGatedAdminInput{
-				AdminContext: ctx, Action: FHEGatedRotateAuthority, NewFHEAuthority: fa,
-				ExpectedNonce: req.ExpectedNonce, OwnerSig: sig,
-			})
-		case "pause":
-			return BuildFHEGatedAdmin(reg, FHEGatedAdminInput{
-				AdminContext: ctx, Action: FHEGatedPauseAction,
-				ExpectedNonce: req.ExpectedNonce, OwnerSig: sig,
-			})
-		case "resume":
-			return BuildFHEGatedAdmin(reg, FHEGatedAdminInput{
-				AdminContext: ctx, Action: FHEGatedResumeAction,
-				ExpectedNonce: req.ExpectedNonce, OwnerSig: sig,
-			})
-		}
-	case TemplateSessionKeys:
-		// Audit H6: session_index required to identify which session.
-		if req.SessionIndex == nil {
-			return nil, errors.New("session_index required for session-keys admin actions (Audit H6)")
-		}
-		switch req.Action {
-		case "create_session":
-			return nil, errors.New("create_session moved to /v1/policies/session-keys/init (Audit C2)")
-		case "revoke":
-			return BuildSessionKeysAdmin(reg, SessionKeysAdminInput{
-				AdminContext: ctx, SessionIndex: *req.SessionIndex,
-				Action:        SessionKeysRevoke,
-				ExpectedNonce: req.ExpectedNonce, OwnerSig: sig,
-			})
-		case "add_allowed_program", "remove_allowed_program":
-			if req.AllowedProgram == "" {
-				return nil, errors.New("allowed_program required")
-			}
-			pid, perr := solana.PublicKeyFromBase58(req.AllowedProgram)
-			if perr != nil {
-				return nil, fmt.Errorf("allowed_program: %w", perr)
-			}
-			action := SessionKeysAddAllowedProgram
-			if req.Action == "remove_allowed_program" {
-				action = SessionKeysRemoveAllowedProgram
-			}
-			return BuildSessionKeysAdmin(reg, SessionKeysAdminInput{
-				AdminContext: ctx, SessionIndex: *req.SessionIndex,
-				Action: action, ProgramID: pid,
-				ExpectedNonce: req.ExpectedNonce, OwnerSig: sig,
-			})
-		case "close_session":
-			if req.Recipient == "" {
-				return nil, errors.New("recipient required")
-			}
-			rcpt, rerr := solana.PublicKeyFromBase58(req.Recipient)
-			if rerr != nil {
-				return nil, fmt.Errorf("recipient: %w", rerr)
-			}
-			return BuildSessionKeysClose(reg, SessionKeysCloseInput{
-				AdminContext: ctx, SessionIndex: *req.SessionIndex,
-				Recipient:     rcpt,
-				ExpectedNonce: req.ExpectedNonce, OwnerSig: sig,
-			})
-		}
-	}
-	return nil, fmt.Errorf("unknown template/action: %s/%s", template, req.Action)
 }
 
 // ── request_signature ──────────────────────────────────────────
@@ -1024,7 +687,6 @@ func (s *Service) requestSignature(w http.ResponseWriter, r *http.Request) {
 		MetaDigest:        meta,
 		UserPubkey:        user,
 		SignatureScheme:   req.SignatureScheme,
-		CurrentTS:         time.Now().Unix(),
 	}
 
 	var ix solana.Instruction
@@ -1099,10 +761,6 @@ func decodeBase58OrBase64Bytes32(s string) ([32]byte, error) {
 	return out, nil
 }
 
-func (s *Service) Simulate(_ context.Context) error {
-	return errors.New("simulate not yet implemented")
-}
-
 func decodeFixed32(s string) ([32]byte, error) {
 	var out [32]byte
 	if s == "" {
@@ -1120,11 +778,9 @@ func decodeFixed32(s string) ([32]byte, error) {
 }
 
 func writeJSON(w http.ResponseWriter, code int, body any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(body)
+	httpx.WriteJSON(w, code, body)
 }
 
 func writeErr(w http.ResponseWriter, code int, errCode, msg string) {
-	writeJSON(w, code, map[string]any{"error": map[string]string{"code": errCode, "message": msg}})
+	httpx.WriteError(w, code, errCode, msg)
 }

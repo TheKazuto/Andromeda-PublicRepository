@@ -90,4 +90,10 @@ type contentBlock struct {
 type toolCallResult struct {
 	Content []contentBlock `json:"content"`
 	IsError bool           `json:"isError,omitempty"`
+	// RefundableError is an internal flag (never serialised) that tells the
+	// MCP handler whether the per-tool quota charge should be refunded. It
+	// is true only for upstream 5xx and genuine technical failures (transport
+	// error, upstream not configured) — a 4xx is the caller's fault and stays
+	// charged, mirroring the REST proxy's refund-on-5xx policy.
+	RefundableError bool `json:"-"`
 }

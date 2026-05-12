@@ -29,26 +29,26 @@ type Metrics struct {
 	HTTPInFlight        prometheus.Gauge
 
 	// Quota & rate-limit — emitted by chargeQuota / applyRateLimitFor.
-	QuotaConsumedTotal  *prometheus.CounterVec // labels: plan, bucket (credits|monthly|overage)
-	QuotaExceededTotal  *prometheus.CounterVec // labels: plan
+	QuotaConsumedTotal    *prometheus.CounterVec // labels: plan, bucket (credits|monthly|overage)
+	QuotaExceededTotal    *prometheus.CounterVec // labels: plan
 	RateLimitBlockedTotal *prometheus.CounterVec // labels: class (read|tx)
 
 	// Upstream — emitted by the proxy handler.
-	UpstreamRequestsTotal *prometheus.CounterVec // labels: upstream, status_class
-	UpstreamLatency       *prometheus.HistogramVec // labels: upstream
-	CircuitBreakerState   *prometheus.GaugeVec   // labels: upstream  (0=closed,1=open,2=half-open)
-	CircuitBreakerTripsTotal *prometheus.CounterVec // labels: upstream
+	UpstreamRequestsTotal    *prometheus.CounterVec   // labels: upstream, status_class
+	UpstreamLatency          *prometheus.HistogramVec // labels: upstream
+	CircuitBreakerState      *prometheus.GaugeVec     // labels: upstream  (0=closed,1=open,2=half-open)
+	CircuitBreakerTripsTotal *prometheus.CounterVec   // labels: upstream
 
 	// Usage recorder backpressure — gauges scraped from the recorder.
-	UsageBufferDepth     prometheus.Gauge
-	UsageBufferDrops     prometheus.Counter
+	UsageBufferDepth prometheus.Gauge
+	UsageBufferDrops prometheus.Counter
 
 	// Worker ticks — diagnostics for slow workers.
 	WorkerTickTotal *prometheus.CounterVec // labels: worker, outcome
 
 	// Webhooks: DLQ depth (gauge sampled periodically) and on-chain
 	// listener drops (counter incremented inline by the rate limiter).
-	WebhookDLQDepth      prometheus.Gauge
+	WebhookDLQDepth       prometheus.Gauge
 	ListenerEventsDropped *prometheus.CounterVec // labels: reason
 }
 
@@ -209,6 +209,9 @@ func StatusClass(status int) string {
 	switch {
 	case status == 0:
 		return "error"
+	case status == 499:
+		// Client closed the connection mid-flight — not the upstream's fault.
+		return "client_closed"
 	case status < 200:
 		return "1xx"
 	case status < 300:

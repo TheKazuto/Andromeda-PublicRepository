@@ -69,7 +69,6 @@ type OracleAdminInput struct {
 	MaxConfidenceBps uint16 // Audit M1: only used by OracleUpdateBounds.
 	ExpectedNonce    uint64
 	OwnerSig         AdminSignature
-	CurrentTS        int64
 }
 
 func BuildOracleAdmin(reg *Registry, in OracleAdminInput) ([]solana.Instruction, error) {
@@ -221,7 +220,6 @@ type PasskeyAdminInput struct {
 	PasskeyPubkey   [33]byte
 	ExpectedNonce   uint64
 	OwnerSig        AdminSignature
-	CurrentTS       int64
 }
 
 func BuildPasskeyAdmin(reg *Registry, in PasskeyAdminInput) ([]solana.Instruction, error) {
@@ -292,14 +290,14 @@ func BuildPasskeyRequestSignature(reg *Registry, in PasskeyRequestSignatureInput
 // signature)` ahead of the main ix. Both ix are returned.
 type PasskeyRequestSignatureStepUpInput struct {
 	RequestSigCommon
-	MessageApprovalBump   uint8
-	CpiAuthorityBump      uint8
-	TxAmount              uint64
-	ExpectedStepUpNonce   uint64
-	PasskeyPubkey         [33]byte // bound on-chain at init
-	WebauthnAuthData      []byte   // ≤64
-	WebauthnClientDataJSON []byte  // ≤192
-	WebauthnSignature     []byte   // 64 bytes (r||s)
+	MessageApprovalBump    uint8
+	CpiAuthorityBump       uint8
+	TxAmount               uint64
+	ExpectedStepUpNonce    uint64
+	PasskeyPubkey          [33]byte // bound on-chain at init
+	WebauthnAuthData       []byte   // ≤64
+	WebauthnClientDataJSON []byte   // ≤192
+	WebauthnSignature      []byte   // 64 bytes (r||s)
 }
 
 func BuildPasskeyRequestSignatureStepUp(reg *Registry, in PasskeyRequestSignatureStepUpInput) ([]solana.Instruction, error) {
@@ -445,8 +443,8 @@ func BuildSessionKeysCreate(reg *Registry, in SessionKeysCreateSessionInput) ([]
 type SessionKeysAdminAction uint8
 
 const (
-	SessionKeysRevoke              SessionKeysAdminAction = 2
-	SessionKeysAddAllowedProgram   SessionKeysAdminAction = 3
+	SessionKeysRevoke               SessionKeysAdminAction = 2
+	SessionKeysAddAllowedProgram    SessionKeysAdminAction = 3
 	SessionKeysRemoveAllowedProgram SessionKeysAdminAction = 4
 )
 
@@ -589,13 +587,13 @@ func BuildSessionKeysCloseExpired(reg *Registry, in SessionKeysCloseExpiredInput
 // one signature per nonce slot.
 type SessionKeysRequestSignatureInput struct {
 	RequestSigCommon
-	SessionIndex            uint32
-	SessionSigner           solana.PublicKey
-	MessageApprovalBump     uint8
-	CpiAuthorityBump        uint8
-	Amount                  uint64
-	DestinationProgram      [32]byte
-	ExpectedSignatureNonce  uint64
+	SessionIndex           uint32
+	SessionSigner          solana.PublicKey
+	MessageApprovalBump    uint8
+	CpiAuthorityBump       uint8
+	Amount                 uint64
+	DestinationProgram     [32]byte
+	ExpectedSignatureNonce uint64
 }
 
 func BuildSessionKeysRequestSignature(reg *Registry, in SessionKeysRequestSignatureInput) (*solana.GenericInstruction, error) {
@@ -700,7 +698,6 @@ type FHEGatedAdminInput struct {
 	NewFHEAuthority solana.PublicKey
 	ExpectedNonce   uint64
 	OwnerSig        AdminSignature
-	CurrentTS       int64
 }
 
 func BuildFHEGatedAdmin(reg *Registry, in FHEGatedAdminInput) ([]solana.Instruction, error) {

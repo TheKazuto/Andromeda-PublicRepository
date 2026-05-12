@@ -206,7 +206,7 @@ func makeProxyHandler(upstreams *upstream.Registry, route routes.Route) ToolHand
 	return func(ctx context.Context, args map[string]any) (toolCallResult, error) {
 		target := upstreams.Get(route.Upstream)
 		if target == nil {
-			return toolCallError("upstream " + route.Upstream + " not registered"), nil
+			return toolCallTechnicalError("upstream " + route.Upstream + " not registered"), nil
 		}
 
 		path := route.TargetPath()
@@ -251,14 +251,16 @@ func makeProxyHandler(upstreams *upstream.Registry, route routes.Route) ToolHand
 
 		res, err := target.Call(ctx, route.Method, path, query, bodyBytes, extraHeaders)
 		if err != nil {
-			return toolCallError("upstream call failed: " + err.Error()), nil
+			// Transport / dial failure — the engine never serviced this. Refund.
+			return toolCallTechnicalError("upstream call failed: " + err.Error()), nil
 		}
 
-		text := formatUpstreamReply(res)
-		isError := res.StatusCode >= 400
 		return toolCallResult{
-			Content: []contentBlock{{Type: "text", Text: text}},
-			IsError: isError,
+			Content: []contentBlock{{Type: "text", Text: formatUpstreamReply(res)}},
+			// A 4xx is the caller's fault → IsError, stays charged.
+			// A 5xx means the engine could not service it → IsError + refund.
+			IsError:         res.StatusCode >= 400,
+			RefundableError: res.StatusCode >= 500,
 		}, nil
 	}
 }
@@ -317,10 +319,23 @@ func formatUpstreamReply(res *upstream.CallResult) string {
 	return fmt.Sprintf("HTTP %d\n%s", res.StatusCode, body)
 }
 
+// toolCallError reports a caller-side error (bad arguments, missing path
+// params, ...). It stays charged — RefundableError is left false.
 func toolCallError(msg string) toolCallResult {
 	return toolCallResult{
 		Content: []contentBlock{{Type: "text", Text: msg}},
 		IsError: true,
+	}
+}
+
+// toolCallTechnicalError reports a gateway/upstream-side failure that the
+// caller is not responsible for (upstream not configured, transport error).
+// The per-tool quota charge is refunded.
+func toolCallTechnicalError(msg string) toolCallResult {
+	return toolCallResult{
+		Content:         []contentBlock{{Type: "text", Text: msg}},
+		IsError:         true,
+		RefundableError: true,
 	}
 }
 

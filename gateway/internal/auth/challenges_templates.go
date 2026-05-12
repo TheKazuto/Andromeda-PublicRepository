@@ -24,11 +24,11 @@ func ownerAdminHash(domain, opTag []byte, dwallet solana.PublicKey, nonce uint64
 // ── allowlist-destinations ─────────────────────────────────────
 
 var (
-	allowlistDomain               = []byte("andromeda::allowlist-destinations::v1")
-	allowlistOpAddDestination     = []byte("add-destination")
-	allowlistOpRemoveDestination  = []byte("remove-destination")
-	allowlistOpPause              = []byte("pause")
-	allowlistOpResume             = []byte("resume")
+	allowlistDomain              = []byte("andromeda::allowlist-destinations::v1")
+	allowlistOpAddDestination    = []byte("add-destination")
+	allowlistOpRemoveDestination = []byte("remove-destination")
+	allowlistOpPause             = []byte("pause")
+	allowlistOpResume            = []byte("resume")
 )
 
 func AllowlistAddDestinationChallenge(dwallet solana.PublicKey, destination [32]byte, nonce uint64, ownerSlot [MemberSlotLen]byte) [32]byte {
@@ -115,11 +115,11 @@ func OracleResumeChallenge(dwallet solana.PublicKey, nonce uint64, ownerSlot [Me
 // ── passkey-step-up ────────────────────────────────────────────
 
 var (
-	passkeyDomain          = []byte("andromeda::passkey-step-up::v1")
-	passkeyOpUpdatePolicy  = []byte("update-policy")
-	passkeyOpPause         = []byte("pause")
-	passkeyOpResume        = []byte("resume")
-	passkeyOpStepUp        = []byte("step-up")
+	passkeyDomain         = []byte("andromeda::passkey-step-up::v1")
+	passkeyOpUpdatePolicy = []byte("update-policy")
+	passkeyOpPause        = []byte("pause")
+	passkeyOpResume       = []byte("resume")
+	passkeyOpStepUp       = []byte("step-up")
 )
 
 func PasskeyUpdatePolicyChallenge(dwallet solana.PublicKey, thresholdAmount uint64, passkeyPubkey [33]byte, nonce uint64, ownerSlot [MemberSlotLen]byte) [32]byte {
@@ -152,12 +152,12 @@ func PasskeyStepUpChallenge(dwallet solana.PublicKey, messageDigest [32]byte, tx
 // ── session-keys ───────────────────────────────────────────────
 
 var (
-	sessionKeysDomain                = []byte("andromeda::session-keys::v1")
-	sessionKeysOpCreateSession       = []byte("create-session")
-	sessionKeysOpRevokeSession       = []byte("revoke-session")
-	sessionKeysOpAddAllowedProgram   = []byte("add-allowed-program")
+	sessionKeysDomain                 = []byte("andromeda::session-keys::v1")
+	sessionKeysOpCreateSession        = []byte("create-session")
+	sessionKeysOpRevokeSession        = []byte("revoke-session")
+	sessionKeysOpAddAllowedProgram    = []byte("add-allowed-program")
 	sessionKeysOpRemoveAllowedProgram = []byte("remove-allowed-program")
-	sessionKeysOpCloseSession        = []byte("close-session")
+	sessionKeysOpCloseSession         = []byte("close-session")
 )
 
 // SessionKeysCreateSessionChallenge — signed with nonce=0 to authorize the

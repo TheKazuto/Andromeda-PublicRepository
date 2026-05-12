@@ -30,8 +30,8 @@ import (
 const txSizeLimit = 1180
 
 type batchReq struct {
-	Requests  []requestSignatureReq `json:"requests"`
-	MaxPerTx  int                   `json:"max_per_tx,omitempty"` // default 8
+	Requests []requestSignatureReq `json:"requests"`
+	MaxPerTx int                   `json:"max_per_tx,omitempty"` // default 8
 }
 
 type batchResp struct {
@@ -241,7 +241,6 @@ func (s *Service) buildRequestSigInstruction(ctx context.Context, req requestSig
 		MetaDigest:        meta,
 		UserPubkey:        user,
 		SignatureScheme:   req.SignatureScheme,
-		CurrentTS:         time.Now().Unix(),
 	}
 	var ix solana.Instruction
 	switch template {

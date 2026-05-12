@@ -14,14 +14,14 @@ import (
 // LE everywhere except `[u8; N]` arrays (raw bytes).
 type ByteWriter struct{ buf bytes.Buffer }
 
-func (w *ByteWriter) U8(v uint8)           { w.buf.WriteByte(v) }
-func (w *ByteWriter) U16(v uint16)         { _ = binary.Write(&w.buf, binary.LittleEndian, v) }
-func (w *ByteWriter) U32(v uint32)         { _ = binary.Write(&w.buf, binary.LittleEndian, v) }
-func (w *ByteWriter) U64(v uint64)         { _ = binary.Write(&w.buf, binary.LittleEndian, v) }
-func (w *ByteWriter) I64(v int64)          { _ = binary.Write(&w.buf, binary.LittleEndian, v) }
-func (w *ByteWriter) Bytes(b []byte)       { w.buf.Write(b) }
-func (w *ByteWriter) Bytes32(b [32]byte)   { w.buf.Write(b[:]) }
-func (w *ByteWriter) Result() []byte       { return w.buf.Bytes() }
+func (w *ByteWriter) U8(v uint8)         { w.buf.WriteByte(v) }
+func (w *ByteWriter) U16(v uint16)       { _ = binary.Write(&w.buf, binary.LittleEndian, v) }
+func (w *ByteWriter) U32(v uint32)       { _ = binary.Write(&w.buf, binary.LittleEndian, v) }
+func (w *ByteWriter) U64(v uint64)       { _ = binary.Write(&w.buf, binary.LittleEndian, v) }
+func (w *ByteWriter) I64(v int64)        { _ = binary.Write(&w.buf, binary.LittleEndian, v) }
+func (w *ByteWriter) Bytes(b []byte)     { w.buf.Write(b) }
+func (w *ByteWriter) Bytes32(b [32]byte) { w.buf.Write(b[:]) }
+func (w *ByteWriter) Result() []byte     { return w.buf.Bytes() }
 
 // VecBytes32 encodes Vec<[u8; 32], MAX>.
 func (w *ByteWriter) VecBytes32(items [][32]byte) {

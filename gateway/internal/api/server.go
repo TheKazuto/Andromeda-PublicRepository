@@ -2,10 +2,9 @@ package api
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
-	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -22,6 +21,7 @@ import (
 	"github.com/shinkalabs/andromeda-gateway/internal/idempotency"
 	"github.com/shinkalabs/andromeda-gateway/internal/mcp"
 	gwmetrics "github.com/shinkalabs/andromeda-gateway/internal/metrics"
+	"github.com/shinkalabs/andromeda-gateway/internal/netsafety"
 	"github.com/shinkalabs/andromeda-gateway/internal/policies"
 	"github.com/shinkalabs/andromeda-gateway/internal/pricing"
 	"github.com/shinkalabs/andromeda-gateway/internal/ratelimit"
@@ -50,6 +50,11 @@ type Server struct {
 	mcpTools         *mcp.ToolRegistry
 	metrics          *gwmetrics.Metrics
 	metricsHandler   http.Handler
+	urlGuard         *netsafety.Validator
+
+	// apiKeyTouched debounces api_keys.last_used_at writes — see
+	// maybeTouchAPIKey. Keyed by api_key id, value is the last touch time.
+	apiKeyTouched sync.Map
 }
 
 type Deps struct {
@@ -67,7 +72,10 @@ type Deps struct {
 	FutureSignStore     *futuresign.Store
 	Metrics             *gwmetrics.Metrics
 	MetricsHandler      http.Handler
-	Logger              *slog.Logger
+	// URLGuard is the SSRF validator used for tenant-supplied webhook /
+	// future-sign callback URLs. nil → a ModeProduction guard.
+	URLGuard *netsafety.Validator
+	Logger   *slog.Logger
 }
 
 func NewServer(d Deps) *Server {
@@ -130,6 +138,11 @@ func NewServer(d Deps) *Server {
 		d.Logger.Info("mcp tool registry ready", "tools", tools.Count())
 	}
 
+	urlGuard := d.URLGuard
+	if urlGuard == nil {
+		urlGuard = netsafety.New(netsafety.ModeProduction)
+	}
+
 	return &Server{
 		cfg:              d.Config,
 		store:            d.Store,
@@ -147,84 +160,9 @@ func NewServer(d Deps) *Server {
 		mcpTools:         tools,
 		metrics:          d.Metrics,
 		metricsHandler:   d.MetricsHandler,
+		urlGuard:         urlGuard,
 	}
 }
-
-// limitPayload caps the request body at `max` bytes. Excess streams
-// fail with 413 Payload Too Large the moment the handler reads past
-// the limit. GET / HEAD are passed through untouched.
-func limitPayload(max int64) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Body != nil && r.Method != http.MethodGet && r.Method != http.MethodHead {
-				r.Body = http.MaxBytesReader(w, r.Body, max)
-			}
-			next.ServeHTTP(w, r)
-		})
-	}
-}
-
-// futureSignAuditBridge adapts audit.Recorder to futuresign.AuditAppender.
-type futureSignAuditBridge struct{ rec *audit.Recorder }
-
-func (b *futureSignAuditBridge) Append(ctx context.Context, ev futuresign.AuditEvent) error {
-	_, err := b.rec.Append(ctx, audit.Event{
-		APIKeyID:     ev.APIKeyID,
-		EventType:    ev.EventType,
-		ResourceType: ev.ResourceType,
-		ResourceID:   ev.ResourceID,
-		Actor:        ev.Actor,
-		Payload:      ev.Payload,
-	})
-	return err
-}
-
-// apiKeyIDFromRequest is the bridge function passed to idempotency: it pulls
-// the authenticated API key id from the request context populated by
-// requireAPIKey. Empty string means the middleware will treat the request
-// as anonymous (idempotency still works, just scoped per route).
-func apiKeyIDFromRequest(r *http.Request) string {
-	a := authFrom(r)
-	if a == nil || a.APIKey == nil {
-		return ""
-	}
-	return a.APIKey.ID
-}
-
-// resolveAPIKeyID is the satellite-package resolver: webhooks and audit need
-// the api_key_id as a uuid.UUID, not a string. Errors when the request was
-// not authenticated.
-func resolveAPIKeyID(r *http.Request) (uuid.UUID, error) {
-	a := authFrom(r)
-	if a == nil || a.APIKey == nil {
-		return uuid.Nil, fmt.Errorf("missing API key in context")
-	}
-	return uuid.Parse(a.APIKey.ID)
-}
-
-// webhookAuditBridge adapts audit.Recorder to webhooks.AuditAppender,
-// translating the webhooks-local event struct to the audit envelope.
-type webhookAuditBridge struct {
-	rec *audit.Recorder
-}
-
-func (b *webhookAuditBridge) Append(ctx context.Context, ev webhooks.AuditEvent) error {
-	_, err := b.rec.Append(ctx, audit.Event{
-		APIKeyID:     ev.APIKeyID,
-		EventType:    ev.EventType,
-		ResourceType: ev.ResourceType,
-		ResourceID:   ev.ResourceID,
-		Actor:        ev.Actor,
-		Payload:      ev.Payload,
-	})
-	return err
-}
-
-// MaxRequestBytes caps incoming request bodies. 25 MiB is generous
-// enough for the largest engine payload we expect (encrypted graphs)
-// while bounding memory cost from malicious clients. Apply via the
-// limitPayload middleware below.
-const MaxRequestBytes int64 = 25 << 20
 
 func (s *Server) Router() http.Handler {
 	r := chi.NewRouter()
@@ -300,6 +238,7 @@ func (s *Server) Router() http.Handler {
 			opts := webhooks.RouteOptions{
 				Store:     s.webhookStore,
 				ResolveID: resolveAPIKeyID,
+				URLGuard:  s.urlGuard,
 			}
 			if s.auditRecorder != nil {
 				opts.Audit = &webhookAuditBridge{rec: s.auditRecorder}
@@ -345,6 +284,7 @@ func (s *Server) Router() http.Handler {
 			fsOpts := futuresign.RouteOptions{
 				Store:     s.futureSignStore,
 				ResolveID: resolveAPIKeyID,
+				URLGuard:  s.urlGuard,
 			}
 			if s.auditRecorder != nil {
 				fsOpts.Audit = &futureSignAuditBridge{rec: s.auditRecorder}
@@ -405,39 +345,4 @@ func (s *Server) registerProxyRoute(r chi.Router, route routes.Route) {
 		s.chargeQuota(route.Key),
 	)
 	chain.Method(route.Method, route.Path, handler)
-}
-
-func trustedRealIP(trustedCIDRs []string) func(http.Handler) http.Handler {
-	trusted := make([]*net.IPNet, 0, len(trustedCIDRs))
-	for _, raw := range trustedCIDRs {
-		if _, cidr, err := net.ParseCIDR(raw); err == nil {
-			trusted = append(trusted, cidr)
-		}
-	}
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if len(trusted) == 0 || !remoteIPTrusted(r.RemoteAddr, trusted) {
-				next.ServeHTTP(w, r)
-				return
-			}
-			middleware.RealIP(next).ServeHTTP(w, r)
-		})
-	}
-}
-
-func remoteIPTrusted(remoteAddr string, trusted []*net.IPNet) bool {
-	host, _, err := net.SplitHostPort(remoteAddr)
-	if err != nil {
-		host = remoteAddr
-	}
-	ip := net.ParseIP(host)
-	if ip == nil {
-		return false
-	}
-	for _, cidr := range trusted {
-		if cidr.Contains(ip) {
-			return true
-		}
-	}
-	return false
 }

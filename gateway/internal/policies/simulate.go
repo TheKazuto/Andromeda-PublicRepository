@@ -43,14 +43,14 @@ type simulateReq struct {
 
 // SimulateResult is the dev-friendly summary returned to the caller.
 type SimulateResult struct {
-	WouldSucceed     bool          `json:"would_succeed"`
-	PolicyError      string        `json:"policy_error,omitempty"`     // populated when policy program fails
-	Boundary         string        `json:"boundary"`                   // "policy", "ika_cpi", "succeeded"
-	EstimatedCU      uint64        `json:"estimated_cu"`               // CUs consumed by our policy program
-	EstimatedCUTotal uint64        `json:"estimated_cu_total"`         // total CUs across the whole tx
-	Logs             []string      `json:"logs"`
-	WouldEmitEvents  []string      `json:"would_emit_events"`
-	Warnings         []string      `json:"warnings,omitempty"`
+	WouldSucceed     bool     `json:"would_succeed"`
+	PolicyError      string   `json:"policy_error,omitempty"` // populated when policy program fails
+	Boundary         string   `json:"boundary"`               // "policy", "ika_cpi", "succeeded"
+	EstimatedCU      uint64   `json:"estimated_cu"`           // CUs consumed by our policy program
+	EstimatedCUTotal uint64   `json:"estimated_cu_total"`     // total CUs across the whole tx
+	Logs             []string `json:"logs"`
+	WouldEmitEvents  []string `json:"would_emit_events"`
+	Warnings         []string `json:"warnings,omitempty"`
 }
 
 func (s *Service) simulate(w http.ResponseWriter, r *http.Request) {
@@ -136,7 +136,6 @@ func (s *Service) simulate(w http.ResponseWriter, r *http.Request) {
 		MetaDigest:        meta,
 		UserPubkey:        user,
 		SignatureScheme:   req.SignatureScheme,
-		CurrentTS:         time.Now().Unix(),
 	}
 
 	var ix solana.Instruction

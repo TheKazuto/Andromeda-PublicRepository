@@ -33,9 +33,9 @@ type Document = map[string]any
 // Generator assembles the document. Call Build() once at request time;
 // the cost is small (sub-millisecond) so we don't bother caching.
 type Generator struct {
-	ServiceName  string
+	ServiceName    string
 	ServiceVersion string
-	BaseURL      string // production URL, e.g. https://gateway.shinkalabs.com
+	BaseURL        string // production URL, e.g. https://gateway.shinkalabs.com
 }
 
 // Build returns the OpenAPI document. If g.BaseURL is empty, the spec
@@ -81,8 +81,8 @@ func (g Generator) securitySchemes() Document {
 			"name": "X-Api-Key",
 		},
 		"BearerAuth": Document{
-			"type":   "http",
-			"scheme": "bearer",
+			"type":        "http",
+			"scheme":      "bearer",
 			"description": "API key passed as Bearer token. Equivalent to X-Api-Key.",
 		},
 		"AdminToken": Document{
@@ -130,11 +130,11 @@ func (g Generator) paths() Document {
 func (g Generator) schemas() Document {
 	return Document{
 		"Error": Document{
-			"type": "object",
+			"type":        "object",
+			"description": "Canonical gateway error envelope — flat {error, code}. Errors forwarded from an engine keep that engine's body; /mcp uses JSON-RPC error objects.",
 			"properties": Document{
-				"error":  Document{"type": "string", "description": "Human-readable error message."},
-				"code":   Document{"type": "string", "description": "Machine-readable error code (e.g. 'quota_exceeded')."},
-				"detail": Document{"type": "string"},
+				"error": Document{"type": "string", "description": "Human-readable error message (safe to log)."},
+				"code":  Document{"type": "string", "description": "Stable snake_case error code (e.g. 'quota_exceeded')."},
 			},
 			"required": []string{"error"},
 		},
@@ -148,10 +148,10 @@ func (g Generator) schemas() Document {
 
 func operationForRoute(r routes.Route) Document {
 	op := Document{
-		"operationId": operationID(r),
-		"summary":     r.Method + " " + r.Path,
-		"description": "Proxied to " + r.Upstream + "-backend. Cost in tokens is set per route — see /v1/pricing.",
-		"tags":        []string{r.Upstream},
+		"operationId":            operationID(r),
+		"summary":                r.Method + " " + r.Path,
+		"description":            "Proxied to " + r.Upstream + "-backend. Cost in tokens is set per route — see /v1/pricing.",
+		"tags":                   []string{r.Upstream},
 		"x-andromeda-rate-class": r.EffectiveRateClass(),
 		"x-andromeda-idempotent": r.Idempotent,
 		"parameters":             pathParameters(r.Path),
@@ -198,11 +198,14 @@ func pathParameters(path string) []Document {
 
 func idempotencyKeyHeader() Document {
 	return Document{
-		"name":        "Idempotency-Key",
-		"in":          "header",
-		"required":    false,
-		"schema":      Document{"type": "string"},
-		"description": "Caller-provided key. Two requests with the same body and key replay the cached response.",
+		"name":     "Idempotency-Key",
+		"in":       "header",
+		"required": false,
+		"schema":   Document{"type": "string", "minLength": 8, "maxLength": 200},
+		"description": "Caller-provided key (8–200 chars). Two requests with the same body and key replay " +
+			"the cached response (`Idempotent-Replay: true`); the same key with a different body returns 422. " +
+			"The body is hashed with a 1 MiB cap — bodies larger than that cannot use this header " +
+			"(`400 body_too_large`).",
 	}
 }
 

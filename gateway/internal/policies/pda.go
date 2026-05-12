@@ -87,8 +87,8 @@ func CPIAuthorityPDA(programID solana.PublicKey) (solana.PublicKey, uint8, error
 // program expects, matching the documented layout in
 // `ika-pre-alpha/docs/src/reference/accounts.md`:
 //
-//   seeds = ["dwallet", chunks_of(curve_u16_le || dwallet_public_key),
-//            "message_approval", scheme_u16_le, message_digest, [meta_digest]]
+//	seeds = ["dwallet", chunks_of(curve_u16_le || dwallet_public_key),
+//	         "message_approval", scheme_u16_le, message_digest, [meta_digest]]
 //
 // `metaDigest` is omitted from the seeds when all 32 bytes are zero (the
 // "no metadata" sentinel).

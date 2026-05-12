@@ -84,9 +84,10 @@ func (e *EnvSigner) PublicKey() ed25519.PublicKey { return e.pub }
 //   - ANDROMEDA_AUDIT_VAULT_KEY_NAME=andromeda-audit
 //
 // Vault setup (one-time, by an operator):
-//   vault secrets enable transit
-//   vault write -f transit/keys/andromeda-audit type=ed25519
-//   vault read -format=json transit/keys/andromeda-audit | jq -r '.data.keys."1".public_key'
+//
+//	vault secrets enable transit
+//	vault write -f transit/keys/andromeda-audit type=ed25519
+//	vault read -format=json transit/keys/andromeda-audit | jq -r '.data.keys."1".public_key'
 //
 // The public_key is base64-encoded raw 32 bytes — copy it into
 // ANDROMEDA_AUDIT_VAULT_PUBKEY_B64 so the gateway boots without a network
@@ -147,8 +148,8 @@ func NewVaultTransitSigner(cfg VaultConfig) (*VaultTransitSigner, error) {
 // `vault:v<n>:<base64sig>`; we strip the prefix and decode.
 func (v *VaultTransitSigner) Sign(ctx context.Context, digest []byte) ([]byte, error) {
 	body, err := json.Marshal(map[string]any{
-		"input":            base64.StdEncoding.EncodeToString(digest),
-		"prehashed":        false,
+		"input":               base64.StdEncoding.EncodeToString(digest),
+		"prehashed":           false,
 		"signature_algorithm": "ed25519",
 	})
 	if err != nil {

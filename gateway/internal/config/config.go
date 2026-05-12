@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -79,6 +80,12 @@ type Config struct {
 	// to the backend service in M4. Gateway only keeps ADMIN_TOKEN as a
 	// shared-secret guard for /metrics. SMTP and Stripe envs likewise
 	// live on the backend (M1/M2).
+
+	// Warnings collects non-fatal config advisories produced by validate().
+	// The logger does not exist yet when Load() runs, so main() flushes
+	// these through slog after the logger is up. validate() itself has no
+	// log side effects.
+	Warnings []string
 }
 
 func Load() *Config {
@@ -139,9 +146,31 @@ func (c *Config) validate() error {
 		if c.EncryptUpstreamURL == "" {
 			return fmt.Errorf("ENCRYPT_UPSTREAM_URL is required in production")
 		}
+		// Rate limit + idempotency are no-ops without Redis. Allowing a prod
+		// deploy to boot without it would silently disable both — refuse.
+		if c.RedisURL == "" {
+			return fmt.Errorf("REDIS_URL is required in production (backs rate limiting and idempotency)")
+		}
+		// Fail-open in production means: Redis down ⇒ unlimited traffic. The
+		// correct posture is fail-closed (return 503). Force operators to be
+		// explicit rather than override silently.
+		if c.RateLimitFailOpen {
+			return fmt.Errorf("RATE_LIMIT_FAIL_OPEN must be false in production — when Redis is unavailable the gateway must reject with 503, not serve unthrottled")
+		}
 	}
 	if c.DefaultRequestCost < 1 {
 		return fmt.Errorf("DEFAULT_REQUEST_COST must be >= 1")
+	}
+	// Validate proxy CIDRs: a malformed entry is fatal in production (the IP
+	// allowlist depends on these) but only a warning in dev.
+	for _, raw := range c.TrustedProxyCIDRs {
+		if _, _, err := net.ParseCIDR(raw); err != nil {
+			if c.Env == "production" {
+				return fmt.Errorf("TRUSTED_PROXY_CIDRS contains an invalid CIDR %q: %w", raw, err)
+			}
+			c.Warnings = append(c.Warnings,
+				fmt.Sprintf("TRUSTED_PROXY_CIDRS entry %q is not a valid CIDR — ignored", raw))
+		}
 	}
 	switch c.AuditSignerKind {
 	case "env", "":
@@ -155,9 +184,10 @@ func (c *Config) validate() error {
 		return fmt.Errorf("ANDROMEDA_AUDIT_SIGNER must be 'env' or 'vault', got %q", c.AuditSignerKind)
 	}
 	if c.Env == "production" && c.AuditSignerKind == "env" {
-		// Don't refuse to boot — we still allow env for now. But surface a
-		// loud warning that operators should migrate. See docs/AUDIT_KMS.md.
-		log.Printf("WARNING: ANDROMEDA_AUDIT_SIGNER=env in production. Migrate to 'vault'.")
+		// Don't refuse to boot — env signing still works. Surface a loud
+		// advisory so operators migrate to Vault. See docs/AUDIT_KMS.md.
+		c.Warnings = append(c.Warnings,
+			"ANDROMEDA_AUDIT_SIGNER=env in production — migrate to 'vault' (see docs/AUDIT_KMS.md)")
 	}
 	return nil
 }

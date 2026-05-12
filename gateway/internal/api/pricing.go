@@ -33,13 +33,13 @@ type publicRoute struct {
 }
 
 type pricingCatalogPayload struct {
-	Service      string        `json:"service"`
-	TokenSymbol  string        `json:"tokenSymbol"`
-	Rate         pricingRate   `json:"rate"`
-	DefaultCost  int           `json:"defaultCostTokens"`
-	GeneratedAt  time.Time     `json:"generatedAt"`
-	Routes       []publicRoute `json:"routes"`
-	TotalRoutes  int           `json:"totalRoutes"`
+	Service     string        `json:"service"`
+	TokenSymbol string        `json:"tokenSymbol"`
+	Rate        pricingRate   `json:"rate"`
+	DefaultCost int           `json:"defaultCostTokens"`
+	GeneratedAt time.Time     `json:"generatedAt"`
+	Routes      []publicRoute `json:"routes"`
+	TotalRoutes int           `json:"totalRoutes"`
 }
 
 type pricingRate struct {

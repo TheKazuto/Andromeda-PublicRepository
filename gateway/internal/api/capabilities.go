@@ -43,8 +43,8 @@ type mcpStatus struct {
 }
 
 type routesSummary struct {
-	Total int `json:"total"`
-	Ika   int `json:"ika"`
+	Total   int `json:"total"`
+	Ika     int `json:"ika"`
 	Encrypt int `json:"encrypt"`
 }
 

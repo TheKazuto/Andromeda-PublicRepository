@@ -11,6 +11,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"github.com/shinkalabs/andromeda-gateway/internal/httpx"
 	"github.com/shinkalabs/andromeda-gateway/internal/netsafety"
 )
 
@@ -138,9 +139,9 @@ func handleCreate(opts RouteOptions) http.HandlerFunc {
 			ResourceID:   t.ID.String(),
 			Actor:        "api_key:" + apiKeyID.String(),
 			Payload: map[string]any{
-				"trigger_type":     string(t.TriggerType),
-				"dwallet_address":  t.DWalletAddress,
-				"expires_at":       t.ExpiresAt.Format("2006-01-02T15:04:05Z"),
+				"trigger_type":    string(t.TriggerType),
+				"dwallet_address": t.DWalletAddress,
+				"expires_at":      t.ExpiresAt.Format("2006-01-02T15:04:05Z"),
 			},
 		})
 		writeJSON(w, http.StatusCreated, t)
@@ -234,11 +235,9 @@ func recordAudit(ctx context.Context, opts RouteOptions, ev AuditEvent) {
 }
 
 func writeJSON(w http.ResponseWriter, code int, body any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(body)
+	httpx.WriteJSON(w, code, body)
 }
 
 func writeError(w http.ResponseWriter, code int, errCode, msg string) {
-	writeJSON(w, code, map[string]any{"error": map[string]string{"code": errCode, "message": msg}})
+	httpx.WriteError(w, code, errCode, msg)
 }

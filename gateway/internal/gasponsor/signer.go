@@ -9,7 +9,6 @@ package gasponsor
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -92,62 +91,4 @@ func (s *Signer) SignAndSend(ctx context.Context, ixs []solana.Instruction) (sol
 		return solana.Signature{}, fmt.Errorf("send tx: %w", err)
 	}
 	return sig, nil
-}
-
-// SignAndSendWithExtraSigners is the variant used when the transaction needs
-// additional signers besides the gas sponsor — e.g. session-keys'
-// `request_signature_via_session` where the session keypair (NOT the user
-// wallet, but a dev-app keypair) co-signs. `extra` keys are looked up by
-// pubkey when assembling signatures; pass them ordered to be defensive.
-func (s *Signer) SignAndSendWithExtraSigners(
-	ctx context.Context,
-	ixs []solana.Instruction,
-	extra []solana.PrivateKey,
-) (solana.Signature, error) {
-	if len(ixs) == 0 {
-		return solana.Signature{}, errors.New("gasponsor.SignAndSendWithExtraSigners: empty instruction list")
-	}
-	bh, err := s.rpc.GetLatestBlockhash(ctx, rpc.CommitmentConfirmed)
-	if err != nil {
-		return solana.Signature{}, fmt.Errorf("get latest blockhash: %w", err)
-	}
-	tx, err := solana.NewTransaction(ixs, bh.Value.Blockhash, solana.TransactionPayer(s.publicKey))
-	if err != nil {
-		return solana.Signature{}, fmt.Errorf("build tx: %w", err)
-	}
-	if _, err := tx.Sign(func(key solana.PublicKey) *solana.PrivateKey {
-		if key.Equals(s.publicKey) {
-			return &s.priv
-		}
-		for i := range extra {
-			if extra[i].PublicKey().Equals(key) {
-				return &extra[i]
-			}
-		}
-		return nil
-	}); err != nil {
-		return solana.Signature{}, fmt.Errorf("sign tx: %w", err)
-	}
-	sig, err := s.rpc.SendTransactionWithOpts(ctx, tx, rpc.TransactionOpts{
-		SkipPreflight:       false,
-		PreflightCommitment: rpc.CommitmentConfirmed,
-	})
-	if err != nil {
-		return solana.Signature{}, fmt.Errorf("send tx: %w", err)
-	}
-	return sig, nil
-}
-
-// DecodeBase64Signature is a small helper for tests.
-func DecodeBase64Signature(s string) (solana.Signature, error) {
-	raw, err := base64.StdEncoding.DecodeString(s)
-	if err != nil {
-		return solana.Signature{}, err
-	}
-	if len(raw) != 64 {
-		return solana.Signature{}, errors.New("signature must be 64 bytes")
-	}
-	var out solana.Signature
-	copy(out[:], raw)
-	return out, nil
 }

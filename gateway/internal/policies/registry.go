@@ -87,9 +87,9 @@ type TemplateMetadata struct {
 
 // Registry maps template name → deployed Solana program id.
 type Registry struct {
-	IkaProgramID    solana.PublicKey
-	IkaCoordinator  solana.PublicKey
-	ProgramIDs      map[string]solana.PublicKey
+	IkaProgramID   solana.PublicKey
+	IkaCoordinator solana.PublicKey
+	ProgramIDs     map[string]solana.PublicKey
 }
 
 // NewRegistry parses ANDROMEDA_TEMPLATE_PROGRAM_IDS_JSON, IKA_PROGRAM_ID and

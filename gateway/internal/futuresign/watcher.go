@@ -61,7 +61,8 @@ type WatcherOptions struct {
 
 // Watcher orchestrates the per-trigger-type loops.
 type Watcher struct {
-	opts WatcherOptions
+	opts       WatcherOptions
+	httpClient *http.Client
 }
 
 // NewWatcher returns a watcher. It is safe to call Start multiple times in
@@ -83,7 +84,17 @@ func NewWatcher(opts WatcherOptions) *Watcher {
 	if opts.URLGuard == nil {
 		opts.URLGuard = netsafety.New(netsafety.ModeProduction)
 	}
-	return &Watcher{opts: opts}
+	return &Watcher{
+		opts: opts,
+		// Tenant-controlled callback URLs: never follow redirects. The
+		// netsafety guard validates the *requested* URL, but a 302 →
+		// http://169.254.169.254/... would bypass it. ErrUseLastResponse
+		// makes Do() return the redirect response untouched.
+		httpClient: &http.Client{
+			Timeout:       10 * time.Second,
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		},
+	}
 }
 
 // Start runs all enabled loops until ctx is cancelled.
@@ -188,7 +199,7 @@ func (w *Watcher) tickExternalWebhook(ctx context.Context) {
 			}
 			continue
 		}
-		shouldFire, err := pollExternalWebhook(ctx, cond)
+		shouldFire, err := w.pollExternalWebhook(ctx, cond)
 		if err != nil {
 			if revertErr := w.opts.Store.MarkFailed(ctx, t.ID, err.Error()); revertErr != nil {
 				w.opts.Logger.Warn("revert external_webhook failed", "err", revertErr)
@@ -209,10 +220,12 @@ func (w *Watcher) tickExternalWebhook(ctx context.Context) {
 // returns 200 with `{"shouldFire": true}` when the trigger is ready.
 //
 // SSRF defense lives in the watcher loop (ValidateDispatch) and at
-// registration time (ValidateRegister); this function trusts that the URL has
-// already been vetted. We still strip the bearer token if the URL ever
-// resolves to a non-HTTPS scheme — bearers must never travel in clear.
-func pollExternalWebhook(ctx context.Context, cond ConditionExternalWebhook) (bool, error) {
+// registration time (ValidateRegister); this function additionally refuses to
+// follow redirects (w.httpClient uses ErrUseLastResponse) so a 3xx cannot
+// bounce the request at a private IP. We strip the bearer token if the URL is
+// not HTTPS — bearers must never travel in clear. A 3xx is treated as
+// "not ready" (callbacks must answer 2xx to fire), never as success.
+func (w *Watcher) pollExternalWebhook(ctx context.Context, cond ConditionExternalWebhook) (bool, error) {
 	if cond.CallbackURL == "" {
 		return false, fmt.Errorf("callbackUrl missing")
 	}
@@ -223,12 +236,15 @@ func pollExternalWebhook(ctx context.Context, cond ConditionExternalWebhook) (bo
 	if cond.BearerToken != "" && strings.HasPrefix(strings.ToLower(cond.CallbackURL), "https://") {
 		req.Header.Set("Authorization", "Bearer "+cond.BearerToken)
 	}
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := w.httpClient.Do(req)
 	if err != nil {
 		return false, fmt.Errorf("callback request: %w", err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		// Redirect — not followed on purpose. The callback isn't ready.
+		return false, nil
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return false, fmt.Errorf("callback non-2xx: %d", resp.StatusCode)
 	}
@@ -320,12 +336,17 @@ type HTTPCompleter struct {
 	Client  *http.Client
 }
 
-// NewHTTPCompleter returns an HTTPCompleter with sane defaults.
+// NewHTTPCompleter returns an HTTPCompleter with sane defaults. The client
+// does not follow redirects — the ika-backend lives on the private network
+// and a redirect from it would be unexpected (and a potential SSRF pivot).
 func NewHTTPCompleter(baseURL, apiKey string) *HTTPCompleter {
 	return &HTTPCompleter{
 		BaseURL: strings.TrimRight(baseURL, "/"),
 		APIKey:  apiKey,
-		Client:  &http.Client{Timeout: 30 * time.Second},
+		Client: &http.Client{
+			Timeout:       30 * time.Second,
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		},
 	}
 }
 

@@ -14,6 +14,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/shinkalabs/andromeda-gateway/internal/httpx"
 )
 
 // Reader exposes paginated read access to the audit log.
@@ -167,13 +169,13 @@ func (rd *Reader) verify(resolve APIKeyResolver) http.HandlerFunc {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"audit_pubkey_b64":      rd.pub,
-			"chain_head_seq":        head.seq,
-			"chain_head_hash_hex":   hexEncode(head.entryHash),
-			"chain_total_entries":   head.total,
-			"signature_algorithm":   "ed25519",
-			"hash_algorithm":        "sha256",
-			"hash_record_format":    "json (rfc 8259) with sorted keys; entry_hash = SHA256(prev_hash || record_json)",
+			"audit_pubkey_b64":    rd.pub,
+			"chain_head_seq":      head.seq,
+			"chain_head_hash_hex": hexEncode(head.entryHash),
+			"chain_total_entries": head.total,
+			"signature_algorithm": "ed25519",
+			"hash_algorithm":      "sha256",
+			"hash_record_format":  "json (rfc 8259) with sorted keys; entry_hash = SHA256(prev_hash || record_json)",
 		})
 	}
 }
@@ -264,13 +266,11 @@ func parseInt(s string, fallback int) int {
 }
 
 func writeJSON(w http.ResponseWriter, code int, body any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(body)
+	httpx.WriteJSON(w, code, body)
 }
 
 func writeErr(w http.ResponseWriter, code int, errCode, msg string) {
-	writeJSON(w, code, map[string]any{"error": map[string]string{"code": errCode, "message": msg}})
+	httpx.WriteError(w, code, errCode, msg)
 }
 
 func hexEncode(b []byte) string {
