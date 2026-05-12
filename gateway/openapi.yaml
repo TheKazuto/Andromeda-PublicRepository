@@ -46,17 +46,23 @@ components:
         (4xx) responses are cached for 24h. Replays return `Idempotent-Replay: true`.
         Different body with the same key returns 422.
 
+        Limitation: the request body is hashed for collision detection with a 1 MiB
+        cap (independent of the 25 MiB overall body limit). Requests with a body
+        larger than 1 MiB cannot use `Idempotency-Key` — they return
+        `400 body_too_large`. (Large encrypted graphs fall in this category; submit
+        them without an idempotency key.)
+
   schemas:
     Error:
       type: object
       required: [error]
+      description: |
+        Canonical gateway error envelope: a flat object with a human-readable
+        `error` message and a stable `snake_case` `code`. Errors forwarded from
+        an engine keep that engine's body; `/mcp` uses JSON-RPC error objects.
       properties:
-        error:
-          type: object
-          required: [code, message]
-          properties:
-            code: { type: string }
-            message: { type: string }
+        error: { type: string, description: "Human-readable message (safe to log)" }
+        code: { type: string, description: "Stable snake_case error code" }
 
     UnsignedTx:
       type: object

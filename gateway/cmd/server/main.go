@@ -22,6 +22,7 @@ import (
 	"github.com/shinkalabs/andromeda-gateway/internal/futuresign"
 	"github.com/shinkalabs/andromeda-gateway/internal/gasponsor"
 	gwmetrics "github.com/shinkalabs/andromeda-gateway/internal/metrics"
+	"github.com/shinkalabs/andromeda-gateway/internal/netsafety"
 	"github.com/shinkalabs/andromeda-gateway/internal/observability"
 	"github.com/shinkalabs/andromeda-gateway/internal/policies"
 	"github.com/shinkalabs/andromeda-gateway/internal/pricing"
@@ -39,6 +40,21 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: parseLevel(cfg.LogLevel),
 	}))
+
+	// Flush non-fatal config advisories now that the logger exists.
+	for _, w := range cfg.Warnings {
+		logger.Warn("config advisory", "detail", w)
+	}
+
+	// SSRF guard for tenant-supplied callback URLs (webhook deliveries,
+	// future-sign external watchers). Production refuses anything but https
+	// to a public IP; development additionally allows http://localhost so
+	// the loopback dev stack works.
+	urlGuardMode := netsafety.ModeProduction
+	if !cfg.IsProduction() {
+		urlGuardMode = netsafety.ModeDevelopment
+	}
+	urlGuard := netsafety.New(urlGuardMode)
 
 	rootCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -140,7 +156,7 @@ func main() {
 
 	// --- Webhook system ---
 	whStore := webhooks.NewStore(db.Pool())
-	whDispatcher := webhooks.NewDispatcher(whStore, logger)
+	whDispatcher := webhooks.NewDispatcher(whStore, logger).WithURLGuard(urlGuard)
 	spawn("webhook-dispatcher", whDispatcher.Run)
 	whPublisher := webhooks.NewPublisher(whStore)
 
@@ -179,6 +195,7 @@ func main() {
 			Ika:       futuresign.NewHTTPCompleter(cfg.IkaUpstreamURL, cfg.InternalAPIKey),
 			Publisher: whPublisher,
 			Logger:    logger,
+			URLGuard:  urlGuard,
 		})
 		fsWatcher.Start(rootCtx)
 		logger.Info("future-sign watcher running",
@@ -238,6 +255,7 @@ func main() {
 		FutureSignStore:     fsStore,
 		Metrics:             metrics,
 		MetricsHandler:      metricsHandler,
+		URLGuard:            urlGuard,
 		Logger:              logger,
 	})
 

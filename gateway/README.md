@@ -109,6 +109,11 @@ bodies are capped at 25 MiB.
 Full machine-readable catalogue of the proxied routes in `internal/routes/routes.go`; everything
 (including the gateway-native endpoints above) is in `/openapi.json`.
 
+**Error envelope.** Every gateway-native error response is `{"error": "<message>", "code": "<snake_case>"}` —
+flat, two string fields, uniform across `/v1/policies/*`, `/v1/webhooks/*`, `/v1/audit/*`,
+`/v1/future-sign/*` and the proxy layer. (Errors *forwarded* from an engine keep that engine's body
+verbatim. The `/mcp` endpoint speaks JSON-RPC and uses its own error object.)
+
 ## MCP server (`/mcp`)
 
 JSON-RPC 2.0 over Streamable HTTP. Tools auto-generated from the same `routes.go` that drives the REST API — every API capability is also an MCP tool.
@@ -186,11 +191,13 @@ service and the gift observer moved to the `backend/` service (architecture spli
 | `INTERNAL_API_KEY` | Shared secret — sent as `X-Api-Key` to ika-backend and `X-Internal-Key` to encrypt-backend. The same value must be set in both engines. |
 | `IKA_UPSTREAM_URL` | Private-network URL of ika-backend. |
 | `ENCRYPT_UPSTREAM_URL` | Private-network URL of encrypt-backend. |
+| `REDIS_URL` | Backs rate limiting **and** idempotency — both are no-ops without it, so production refuses to boot if it is empty. |
+| `RATE_LIMIT_FAIL_OPEN` | Must be `false` in production: when Redis is unreachable the gateway returns `503` rather than serving unthrottled. Production refuses to boot if it is `true`. |
+| `TRUSTED_PROXY_CIDRS` | Behind the Railway edge proxy this **must** contain the proxy's range, otherwise API keys with an `ip_allowlist` are rejected with `ip_allowlist_unsupported`. A malformed CIDR is fatal in production. |
 
 ### Recommended
 | Var | Notes |
 |-----|-------|
-| `REDIS_URL` | Without it, rate limit + idempotency are no-ops (a warning is logged). |
 | `ALLOWED_ORIGINS` | CSV CORS allowlist for the dashboard. Empty = no cross-origin (server-to-server only). |
 | `ANDROMEDA_DASHBOARD_BASE_URL` | Public dashboard URL. Used to build shareable links (e.g. gift-card redeem). Empty → relative paths. |
 
@@ -229,11 +236,11 @@ service and the gift observer moved to the `backend/` service (architecture spli
 ### Tuning
 | Var | Default | Notes |
 |-----|---------|-------|
-| `RATE_LIMIT_FAIL_OPEN` | `true` | When Redis is configured but unreachable: `true` allows requests through, `false` rejects with `503`. |
+| `RATE_LIMIT_FAIL_OPEN` | `true` (dev) | When Redis is unreachable: `true` allows requests through, `false` rejects with `503`. **Must be `false` in production** (see *Required in production*). |
 | `DEFAULT_REQUEST_COST` | `1` | Fallback token cost for route keys not in `request_costs` (must be ≥ 1). |
 | `PRICING_REFRESH_SECONDS` | `60` | Pricer cache refresh interval. |
 | `UPSTREAM_TIMEOUT_SECONDS` | `30` | Default upstream timeout (per-route overrides exist for heavy MPC ops — DKG, sign, quorum finalize: 90–120s). |
-| `TRUSTED_PROXY_CIDRS` | empty | CIDRs of reverse proxies whose `X-Forwarded-For` / `X-Real-IP` may be trusted for API-key IP allowlists. Empty = trust only the socket peer. |
+| `TRUSTED_PROXY_CIDRS` | empty | CIDRs of reverse proxies whose `X-Forwarded-For` / `X-Real-IP` may be trusted for API-key IP allowlists. Empty = trust only the socket peer. **Required behind an edge proxy** (see *Required in production*); a malformed CIDR is fatal in production, a warning in dev. |
 
 ## Run locally
 
@@ -244,3 +251,15 @@ go run ./cmd/server
 ```
 
 Listens on `:8081`.
+
+## Tests
+
+```bash
+go test ./...                              # unit + httptest integration (no external deps)
+go test -tags integration ./internal/store/...   # quota engine vs a real Postgres (needs Docker)
+```
+
+The `integration`-tagged tests in `internal/store` spin up a throwaway Postgres
+via testcontainers, run the embedded migrations, and exercise
+`ConsumeTokensV2` / `RefundTokensV2` / `ComputeBalance` end to end. They are
+excluded from the default build; CI runs them in a separate job (`go-ci.yml`).
