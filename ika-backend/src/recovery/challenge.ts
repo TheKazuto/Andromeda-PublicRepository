@@ -1,11 +1,15 @@
 /**
- * Mirrors `contracts/rules-policy/src/auth/challenge.rs` byte-for-byte.
+ * Mirrors `contracts/auth/src/challenge.rs` byte-for-byte.
  *
  * Every credential — primary OR quorum member — signs the bytes returned by
  * one of these functions. The on-chain handler recomputes the same hash from
  * the same inputs and requires a matching precompile invocation in the
  * transaction. Domain separation + per-operation tags + nonce + member-id
  * binding cover replay across programs / operations / time / members.
+ *
+ * Frozen golden vectors: `src/recovery/__tests__/challenge_vectors.json`
+ * (asserted by `challenge-vectors.test.ts`). Any edit here that changes a
+ * hash must update those vectors AND the Rust mirror in the same commit.
  */
 
 import { createHash } from 'node:crypto'

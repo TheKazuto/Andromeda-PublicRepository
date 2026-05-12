@@ -4,14 +4,17 @@ import { address as toAddress } from '@solana/kit'
 import { fail, ok } from '../../types.js'
 import { sanitizeError } from '../../safeError.js'
 import { getPolicyAdapter } from '../adapters/SolanaAdapter.js'
-import type { AdminAction, MemberSlot } from '../adapters/PolicyAdapter.js'
-import {
-  SCHEME_ED25519,
-  SCHEME_SECP256K1,
-  SCHEME_SECP256R1,
-  SCHEME_WEBAUTHN,
-} from '../../clients/rulesPolicy/index.js'
 import type { AppConfig } from '../../config.js'
+import {
+  adminActionFromInput,
+  adminChallengeSchema,
+  adminSubmitSchema,
+  decodeBase64,
+  decodeBase64Fixed,
+  decodeMemberSlot,
+  deploySchema,
+  initAuthorityHashFieldSchema,
+} from './dto.js'
 
 /**
  * Policy management endpoints. All admin actions are challenge-based + gas
@@ -25,181 +28,6 @@ import type { AppConfig } from '../../config.js'
  *   POST /v1/recovery/policy/apply-pending     ← anyone, after cooldown elapsed
  */
 
-// ── Member-slot DTO ────────────────────────────────────────────
-
-const memberSlotSchema = z.object({
-  scheme: z.number().int().min(0).max(3),
-  identifierBase64: z.string(),
-  label: z.string().max(32).optional(),
-})
-
-function decodeMemberSlot(input: z.infer<typeof memberSlotSchema>): MemberSlot {
-  const expectedLen =
-    input.scheme === SCHEME_ED25519
-      ? 32
-      : input.scheme === SCHEME_SECP256K1
-        ? 20
-        : input.scheme === SCHEME_SECP256R1 || input.scheme === SCHEME_WEBAUTHN
-          ? 33
-          : -1
-  if (expectedLen < 0) throw new Error(`Unsupported scheme ${input.scheme}`)
-  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(input.identifierBase64)) {
-    throw new Error('identifierBase64 must be valid base64')
-  }
-  const identifier = Uint8Array.from(Buffer.from(input.identifierBase64, 'base64'))
-  if (identifier.length !== expectedLen) {
-    throw new Error(
-      `identifier length ${identifier.length} does not match scheme ${input.scheme} (expected ${expectedLen})`,
-    )
-  }
-  return {
-    scheme: input.scheme,
-    identifier,
-    ...(input.label !== undefined ? { label: input.label } : {}),
-  }
-}
-
-function decodeBase64Fixed(input: string, size: number, label: string): Uint8Array {
-  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(input)) {
-    throw new Error(`${label} must be valid base64`)
-  }
-  const buf = Buffer.from(input, 'base64')
-  if (buf.length !== size) throw new Error(`${label} must be ${size} bytes (got ${buf.length})`)
-  return Uint8Array.from(buf)
-}
-
-function decodeBase64(input: string, label: string): Uint8Array {
-  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(input)) {
-    throw new Error(`${label} must be valid base64`)
-  }
-  return Uint8Array.from(Buffer.from(input, 'base64'))
-}
-
-// ── Policy config DTO ──────────────────────────────────────────
-
-const policyConfigSchema = z.object({
-  primary: memberSlotSchema,
-  members: z.array(memberSlotSchema).max(16).default([]),
-  quorumThreshold: z.number().int().min(1).max(16).default(1),
-  dailyLimit: z.coerce.bigint().nullable().default(null),
-  allowedDestinationsBase64: z.array(z.string()).nullable().default(null),
-  cooldownSeconds: z.number().int().min(3600).default(604_800),
-})
-
-// Audit C2 (Opção 4): every deploy carries an init_authority signature
-// that's checked on-chain via precompile. The hash of the slot is part of
-// the policy PDA seed.
-const deploySchema = z.object({
-  dwalletAddress: z.string().min(32),
-  config: policyConfigSchema,
-  initAuthoritySlot: memberSlotSchema,
-  initAuthoritySignatureBase64: z.string(),
-  initAuthorityWebauthnAuthDataBase64: z.string().optional(),
-  initAuthorityWebauthnClientDataJsonBase64: z.string().optional(),
-})
-
-// Audit C2: post-deploy operations need init_authority_hash (32 bytes b64)
-// to derive the policy PDA. Caller looks it up from its DB.
-const initAuthorityHashFieldSchema = z.string()
-
-// ── Admin action DTOs ──────────────────────────────────────────
-
-const adminActionSchema = z.discriminatedUnion('type', [
-  z.object({ type: z.literal('add_member'), member: memberSlotSchema }),
-  z.object({ type: z.literal('remove_member'), member: memberSlotSchema }),
-  z.object({ type: z.literal('add_destination'), destinationBase64: z.string() }),
-  z.object({ type: z.literal('remove_destination'), destinationBase64: z.string() }),
-  z.object({ type: z.literal('revoke') }),
-  z.object({ type: z.literal('set_primary'), newPrimary: memberSlotSchema }),
-  z.object({
-    type: z.literal('set_quorum_threshold_immediate'),
-    newThreshold: z.number().int().min(1).max(16),
-  }),
-  z.object({
-    type: z.literal('set_daily_limit_immediate'),
-    newSome: z.boolean(),
-    newLimit: z.coerce.bigint(),
-  }),
-  z.object({
-    type: z.literal('set_cooldown_immediate'),
-    newCooldownSeconds: z.coerce.bigint(),
-  }),
-  z.object({
-    type: z.literal('propose_quorum_threshold_change'),
-    newThreshold: z.number().int().min(1).max(16),
-  }),
-  z.object({
-    type: z.literal('propose_daily_limit_change'),
-    newSome: z.boolean(),
-    newLimit: z.coerce.bigint(),
-  }),
-  z.object({
-    type: z.literal('propose_cooldown_change'),
-    newCooldownSeconds: z.coerce.bigint(),
-  }),
-])
-
-type AdminActionInput = z.infer<typeof adminActionSchema>
-
-function adminActionFromInput(input: AdminActionInput): AdminAction {
-  switch (input.type) {
-    case 'add_member':
-      return { type: 'add_member', member: decodeMemberSlot(input.member) }
-    case 'remove_member':
-      return { type: 'remove_member', member: decodeMemberSlot(input.member) }
-    case 'add_destination':
-      return {
-        type: 'add_destination',
-        destination: decodeBase64Fixed(input.destinationBase64, 32, 'destination'),
-      }
-    case 'remove_destination':
-      return {
-        type: 'remove_destination',
-        destination: decodeBase64Fixed(input.destinationBase64, 32, 'destination'),
-      }
-    case 'revoke':
-      return { type: 'revoke' }
-    case 'set_primary':
-      return { type: 'set_primary', newPrimary: decodeMemberSlot(input.newPrimary) }
-    case 'set_quorum_threshold_immediate':
-      return { type: 'set_quorum_threshold_immediate', newThreshold: input.newThreshold }
-    case 'set_daily_limit_immediate':
-      return {
-        type: 'set_daily_limit_immediate',
-        newSome: input.newSome,
-        newLimit: input.newLimit,
-      }
-    case 'set_cooldown_immediate':
-      return { type: 'set_cooldown_immediate', newCooldownSeconds: input.newCooldownSeconds }
-    case 'propose_quorum_threshold_change':
-      return { type: 'propose_quorum_threshold_change', newThreshold: input.newThreshold }
-    case 'propose_daily_limit_change':
-      return {
-        type: 'propose_daily_limit_change',
-        newSome: input.newSome,
-        newLimit: input.newLimit,
-      }
-    case 'propose_cooldown_change':
-      return { type: 'propose_cooldown_change', newCooldownSeconds: input.newCooldownSeconds }
-  }
-}
-
-const adminChallengeSchema = z.object({
-  dwalletAddress: z.string().min(32),
-  initAuthorityHashBase64: initAuthorityHashFieldSchema,
-  action: adminActionSchema,
-})
-
-const adminSubmitSchema = z.object({
-  dwalletAddress: z.string().min(32),
-  initAuthorityHashBase64: initAuthorityHashFieldSchema,
-  action: adminActionSchema,
-  primarySignatureBase64: z.string(),
-  expectedNonce: z.coerce.bigint(),
-})
-
-// ── Router ─────────────────────────────────────────────────────
-
 export function buildPolicyRouter(config: AppConfig): Router {
   const router = Router()
 
@@ -208,9 +36,7 @@ export function buildPolicyRouter(config: AppConfig): Router {
       const parsed = deploySchema.parse(req.body)
       const cfg = parsed.config
       if (cfg.cooldownSeconds < config.recovery.minCooldownSeconds) {
-        res
-          .status(400)
-          .json(fail(`Invalid cooldown: minimum ${config.recovery.minCooldownSeconds}s`))
+        res.status(400).json(fail(`Invalid cooldown: minimum ${config.recovery.minCooldownSeconds}s`))
         return
       }
       if (cfg.quorumThreshold > Math.max(1, cfg.members.length)) {
@@ -254,9 +80,7 @@ export function buildPolicyRouter(config: AppConfig): Router {
           quorumThreshold: cfg.quorumThreshold,
           dailyLimit: cfg.dailyLimit,
           allowedDestinations:
-            cfg.allowedDestinationsBase64?.map((d) =>
-              decodeBase64Fixed(d, 32, 'allowed destination'),
-            ) ?? null,
+            cfg.allowedDestinationsBase64?.map((d) => decodeBase64Fixed(d, 32, 'allowed destination')) ?? null,
           cooldownSeconds: cfg.cooldownSeconds,
         },
         initAuthoritySlot: initAuthSlotBytes,
@@ -296,10 +120,7 @@ export function buildPolicyRouter(config: AppConfig): Router {
       }
       const initAuthorityHash = decodeBase64Fixed(hashB64, 32, 'initAuthorityHashBase64')
       const adapter = getPolicyAdapter()
-      const state = await adapter.readStateByHash({
-        dwalletAddress: toAddress(dwallet),
-        initAuthorityHash,
-      })
+      const state = await adapter.readStateByHash({ dwalletAddress: toAddress(dwallet), initAuthorityHash })
       if (!state) {
         res.status(404).json(fail('Policy not found'))
         return
@@ -308,18 +129,11 @@ export function buildPolicyRouter(config: AppConfig): Router {
         ok({
           policyAddress: state.policyAddress,
           dwalletAddress: state.dwalletAddress,
-          primary: {
-            scheme: state.primary.scheme,
-            identifierBase64: Buffer.from(state.primary.identifier).toString('base64'),
-          },
-          members: state.members.map((m) => ({
-            scheme: m.scheme,
-            identifierBase64: Buffer.from(m.identifier).toString('base64'),
-          })),
+          primary: { scheme: state.primary.scheme, identifierBase64: Buffer.from(state.primary.identifier).toString('base64') },
+          members: state.members.map((m) => ({ scheme: m.scheme, identifierBase64: Buffer.from(m.identifier).toString('base64') })),
           quorumThreshold: state.quorumThreshold,
           dailyLimit: state.dailyLimit?.toString() ?? null,
-          allowedDestinationsBase64:
-            state.allowedDestinations?.map((d) => Buffer.from(d).toString('base64')) ?? null,
+          allowedDestinationsBase64: state.allowedDestinations?.map((d) => Buffer.from(d).toString('base64')) ?? null,
           cooldownSeconds: state.cooldownSeconds,
           pendingChange: state.pendingChange
             ? {
@@ -353,11 +167,7 @@ export function buildPolicyRouter(config: AppConfig): Router {
     try {
       const input = adminChallengeSchema.parse(req.body)
       const adapter = getPolicyAdapter()
-      const initAuthorityHash = decodeBase64Fixed(
-        input.initAuthorityHashBase64,
-        32,
-        'initAuthorityHashBase64',
-      )
+      const initAuthorityHash = decodeBase64Fixed(input.initAuthorityHashBase64, 32, 'initAuthorityHashBase64')
       const result = await adapter.prepareAdminAction({
         dwalletAddress: toAddress(input.dwalletAddress),
         initAuthorityHash,
@@ -379,11 +189,7 @@ export function buildPolicyRouter(config: AppConfig): Router {
     try {
       const input = adminSubmitSchema.parse(req.body)
       const adapter = getPolicyAdapter()
-      const initAuthorityHash = decodeBase64Fixed(
-        input.initAuthorityHashBase64,
-        32,
-        'initAuthorityHashBase64',
-      )
+      const initAuthorityHash = decodeBase64Fixed(input.initAuthorityHashBase64, 32, 'initAuthorityHashBase64')
       const result = await adapter.submitAdminAction({
         dwalletAddress: toAddress(input.dwalletAddress),
         initAuthorityHash,
@@ -393,15 +199,11 @@ export function buildPolicyRouter(config: AppConfig): Router {
       })
       res.json(ok({ txSignature: result.txSignature }))
     } catch (err) {
-      // Surface the underlying error message + throw site for debugging.
-      // No PII / no full stack; just enough to diagnose without log dives.
+      // Never echo the raw message or stack back to the caller; `sanitizeError`
+      // returns an allowlist-safe message + trace id and logs the full error
+      // server-side under that trace id.
       const safe = sanitizeError('recovery/policy/admin/submit', err)
-      const detail = err instanceof Error && err.message ? err.message : String(err)
-      const at =
-        err instanceof Error && err.stack
-          ? err.stack.split('\n').slice(1, 4).map((l) => l.trim().replace(/^at\s+/, '')).join(' <- ')
-          : ''
-      res.status(400).json(fail(at ? `${safe.message} — ${detail} | at: ${at}` : `${safe.message} — ${detail}`, safe.traceId))
+      res.status(400).json(fail(safe.message, safe.traceId))
     }
   })
 

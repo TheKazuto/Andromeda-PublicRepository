@@ -51,3 +51,25 @@ export async function consumeChallenge(nonce: string): Promise<ChallengeRow | nu
   })
   return result.rows[0] ?? null
 }
+
+/**
+ * Discovery enumeration: list the Andromeda-managed dWallets whose attached
+ * `rules-policy` has the given primary owner. `mcp_wallet_keys` is owned by the
+ * engine keystore (`engine/ika-client/keystore.ts` + migrations 011-013); this
+ * is a read-only lookup. Only finalized dWallets (DKG completed) are returned.
+ */
+export async function findManagedDwalletsByPrimaryOwner(input: {
+  primaryScheme: number
+  primaryIdentifier: Uint8Array
+}): Promise<string[]> {
+  const { rows } = await query<{ dwallet_address: string }>(
+    `SELECT dwallet_address
+       FROM mcp_wallet_keys
+      WHERE dwallet_address IS NOT NULL
+        AND policy_primary_scheme = $1
+        AND policy_primary_identifier = $2
+      ORDER BY dwallet_address`,
+    [input.primaryScheme, Buffer.from(input.primaryIdentifier)],
+  )
+  return rows.map((r) => r.dwallet_address)
+}

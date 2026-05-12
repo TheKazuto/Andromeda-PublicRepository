@@ -58,7 +58,13 @@ export async function withTransaction<T>(fn: (client: pg.PoolClient) => Promise<
     await client.query('COMMIT')
     return result
   } catch (err) {
-    await client.query('ROLLBACK')
+    // Always re-throw the *original* failure — a ROLLBACK that itself fails
+    // (e.g. the connection dropped) must not mask why the transaction failed.
+    try {
+      await client.query('ROLLBACK')
+    } catch (rollbackErr) {
+      logger.error({ err: rollbackErr }, 'withTransaction: ROLLBACK failed; surfacing the original error')
+    }
     throw err
   } finally {
     client.release()
