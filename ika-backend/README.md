@@ -101,14 +101,14 @@ Alpha 1; the response carries the disclaimer.
 | `POST /v1/dwallet/sign` | `sign_message` | Signs a message using an approval + presign → returns `signatureBase64`. |
 
 ### MPC engine — low-level (prepare → submit)
-- `POST /v1/dwallet/dkg/prepare` — returns the envelope hint
+- `POST /v1/dwallet/dkg/prepare` — `{ curve, userPublicKeyBase58 }` → returns the BCS `SignedRequestData` (base64) to sign, plus `sessionPreimageBase64`, `epoch` and `intendedChainSenderBase58`
 - `POST /v1/dwallet/{dkg,sign,presign,future-sign,re-encrypt-share,make-share-public}/submit`
 - `POST /v1/dwallet/future-sign/complete/submit`
 - `GET  /v1/dwallet/presigns/:userPubkey` — `:userPubkey` is base64
 
 ### Recovery — Discovery (off-chain ownership proof)
 - `POST /v1/recovery/challenge` — emits canonical message + nonce
-- `POST /v1/recovery/resolve` — verifies signature, returns dWallets
+- `POST /v1/recovery/resolve` — verifies the signature; returns the proven wallet plus its dWallets. Auto-enumerates Andromeda-managed dWallets (32-byte ed25519 / 20-byte EVM primary owners); accepts an optional `dwalletAddress` to confirm an external/bare dWallet
 
 Off-chain schemes (separated by curve + message format + address encoding):
 
