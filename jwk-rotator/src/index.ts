@@ -48,6 +48,7 @@ const REGISTRY_PDA_PREFIX = Buffer.from("jwk_registry");
 // Quasar 1-byte instruction discriminators (see contracts/jwk-registry/README.md).
 const IX_INIT_REGISTRY = 0;
 const IX_PROPOSE_JWK = 1;
+const IX_ACTIVATE_JWK = 2;
 const IX_BOOTSTRAP_JWK = 5;
 
 // On-chain account layout of JwkRegistry (after the 1-byte Quasar discriminator).
@@ -62,6 +63,7 @@ const EO_AUDIENCE_HASH = 40;
 const EO_KID_HASH = 72;
 const EO_MODULUS = 104;
 const EO_EXPONENT = 360;
+const EO_PROPOSED_AT = 368;
 const EO_VALID_UNTIL = 384;
 // statuses
 const STATUS_PENDING = 1;
@@ -84,6 +86,12 @@ interface Config {
   programId: PublicKey;
   registrySeed: Buffer; // 32 bytes
   authority: Keypair;
+  // The `AuthorityAction` struct on-chain has authority and payer as SEPARATE
+  // Signer slots — if they alias to the same key the framework rejects with
+  // "instruction tries to borrow reference for an account which is already
+  // borrowed". So propose_jwk / activate_jwk need a distinct payer keypair.
+  // Falls back to `authority` when not configured (will fail with aliasing).
+  payer: Keypair;
   providers: ProviderCfg[];
   pollIntervalSec: number;
   alertWebhookUrl: string | null;
@@ -124,6 +132,39 @@ function loadConfig(): Config {
     throw new Error("authority keypair must be a JSON array of exactly 64 bytes");
   }
   const authority = Keypair.fromSecretKey(Uint8Array.from(secret));
+
+  // Payer keypair — must be DISTINCT from authority (see Config.payer comment).
+  //   - JWK_REGISTRY_PAYER_KEYPAIR_JSON (inline, takes precedence — Railway)
+  //   - JWK_REGISTRY_PAYER_KEYPAIR (file path — local dev)
+  //   - falls back to `authority` and prints a loud warning (propose/activate
+  //     will fail; only useful for read-only / dry-run inspections).
+  let payerSecret: number[] | null = null;
+  const payerInline = process.env.JWK_REGISTRY_PAYER_KEYPAIR_JSON;
+  const payerPath = process.env.JWK_REGISTRY_PAYER_KEYPAIR;
+  if (payerInline && payerInline.trim().length > 0) {
+    try {
+      payerSecret = JSON.parse(payerInline) as number[];
+    } catch (e) {
+      throw new Error(`JWK_REGISTRY_PAYER_KEYPAIR_JSON is not valid JSON: ${(e as Error).message}`);
+    }
+  } else if (payerPath && payerPath.trim().length > 0) {
+    payerSecret = JSON.parse(readFileSync(payerPath, "utf8")) as number[];
+  }
+  let payer: Keypair;
+  if (payerSecret) {
+    if (!Array.isArray(payerSecret) || payerSecret.length !== 64) {
+      throw new Error("payer keypair must be a JSON array of exactly 64 bytes");
+    }
+    payer = Keypair.fromSecretKey(Uint8Array.from(payerSecret));
+    if (payer.publicKey.equals(authority.publicKey)) {
+      throw new Error("JWK_REGISTRY_PAYER_KEYPAIR must be a DIFFERENT pubkey from JWK_AUTHORITY_KEYPAIR — the framework rejects aliased Signer slots.");
+    }
+  } else {
+    console.warn(
+      "[jwk-rotator][WARN] no JWK_REGISTRY_PAYER_KEYPAIR{_JSON} configured — falling back to authority as payer. propose_jwk / activate_jwk WILL FAIL with an aliased-borrow error. Configure a distinct payer keypair before relying on this worker.",
+    );
+    payer = authority;
+  }
   const providers: ProviderCfg[] = [
     {
       name: "google",
@@ -148,6 +189,7 @@ function loadConfig(): Config {
     programId,
     registrySeed,
     authority,
+    payer,
     providers,
     pollIntervalSec: parseInt(env("POLL_INTERVAL_SECONDS", "3600"), 10),
     alertWebhookUrl: process.env.ALERT_WEBHOOK_URL || null,
@@ -251,7 +293,15 @@ interface OnchainEntry {
   issuerHash: Buffer;
   audienceHash: Buffer;
   kidHash: Buffer;
+  modulus: Buffer; // 256 bytes, BE — used to confirm a PENDING entry's modulus still matches the live JWKS before activating
+  proposedAt: bigint;
   validUntil: bigint;
+}
+
+interface RegistryState {
+  timelockSeconds: bigint;
+  gracePeriodSeconds: bigint;
+  entries: OnchainEntry[];
 }
 
 function deriveRegistryPda(programId: PublicKey, seed: Buffer): PublicKey {
@@ -262,13 +312,19 @@ function deriveEventAuthority(programId: PublicKey): PublicKey {
   return PublicKey.findProgramAddressSync([EVENT_AUTHORITY_SEED], programId)[0];
 }
 
-async function readRegistry(conn: Connection, pda: PublicKey): Promise<OnchainEntry[] | null> {
+async function readRegistry(conn: Connection, pda: PublicKey): Promise<RegistryState | null> {
   const acc = await conn.getAccountInfo(pda, "confirmed");
   if (!acc) return null;
   const data = acc.data;
-  // header: disc(1) version(1) entry_count(1) reserved0(6) authority(32) pending_authority(32)
-  //         emergency_revoker(32) pending_emergency_revoker(32) timelock(8) grace(8)
-  //         authority_rotation_ready_at(8) emergency_revoker_rotation_ready_at(8)
+  // header layout (after the 1-byte Quasar account discriminator):
+  //   disc(1) version(1) entry_count(1) reserved0(6)
+  //   authority(32) pending_authority(32) emergency_revoker(32) pending_emergency_revoker(32)
+  //   timelock_seconds(8) grace_period_seconds(8)
+  //   authority_rotation_ready_at(8) emergency_revoker_rotation_ready_at(8)
+  const TIMELOCK_OFFSET = ACCOUNT_DISC_LEN + 1 + 1 + 6 + 32 * 4;
+  const GRACE_OFFSET = TIMELOCK_OFFSET + 8;
+  const timelockSeconds = data.readBigInt64LE(TIMELOCK_OFFSET);
+  const gracePeriodSeconds = data.readBigInt64LE(GRACE_OFFSET);
   const headerLen = ACCOUNT_DISC_LEN + 1 + 1 + 6 + 32 * 4 + 8 * 4;
   const entries: OnchainEntry[] = [];
   for (let i = 0; i < MAX_JWKS; i++) {
@@ -283,14 +339,56 @@ async function readRegistry(conn: Connection, pda: PublicKey): Promise<OnchainEn
       issuerHash: data.subarray(base + EO_ISSUER_HASH, base + EO_ISSUER_HASH + 32),
       audienceHash: data.subarray(base + EO_AUDIENCE_HASH, base + EO_AUDIENCE_HASH + 32),
       kidHash: data.subarray(base + EO_KID_HASH, base + EO_KID_HASH + 32),
+      modulus: data.subarray(base + EO_MODULUS, base + EO_MODULUS + RSA_MODULUS_BYTES),
+      proposedAt: data.readBigInt64LE(base + EO_PROPOSED_AT),
       validUntil: data.readBigInt64LE(base + EO_VALID_UNTIL),
     });
   }
-  return entries;
+  return { timelockSeconds, gracePeriodSeconds, entries };
 }
 
 function tripleEq(e: OnchainEntry, k: ProviderKey): boolean {
   return e.issuerHash.equals(k.issuerHash) && e.audienceHash.equals(k.audienceHash) && e.kidHash.equals(k.kidHash);
+}
+
+/**
+ * `activate_jwk` instruction. AuthorityAction layout — same accounts as
+ * `propose_jwk`. `valid_until_ts` is computed per-provider, see
+ * `computeValidUntilTs`.
+ */
+function activateJwkIx(
+  cfg: Config,
+  registryPda: PublicKey,
+  eventAuthority: PublicKey,
+  e: OnchainEntry,
+  provider: "google" | "apple",
+  gracePeriodSeconds: bigint,
+): TransactionInstruction {
+  const validUntilTs = computeValidUntilTs(provider, gracePeriodSeconds);
+  const data = Buffer.concat([
+    Buffer.from([IX_ACTIVATE_JWK]),
+    cfg.registrySeed, // 32
+    e.issuerHash, // 32
+    e.audienceHash, // 32
+    e.kidHash, // 32
+    (() => {
+      const b = Buffer.alloc(8);
+      b.writeBigInt64LE(validUntilTs, 0);
+      return b;
+    })(),
+  ]);
+  return new TransactionInstruction({
+    programId: cfg.programId,
+    keys: [
+      { pubkey: registryPda, isSigner: false, isWritable: true },
+      { pubkey: cfg.authority.publicKey, isSigner: true, isWritable: false },
+      { pubkey: cfg.payer.publicKey, isSigner: true, isWritable: true },
+      { pubkey: SYSVAR_CLOCK_PUBKEY, isSigner: false, isWritable: false },
+      { pubkey: eventAuthority, isSigner: false, isWritable: false },
+      { pubkey: cfg.programId, isSigner: false, isWritable: false },
+    ],
+    data,
+  });
 }
 
 function proposeJwkIx(cfg: Config, registryPda: PublicKey, eventAuthority: PublicKey, k: ProviderKey): TransactionInstruction {
@@ -308,13 +406,12 @@ function proposeJwkIx(cfg: Config, registryPda: PublicKey, eventAuthority: Publi
       return b;
     })(),
   ]);
-  const auth = cfg.authority.publicKey;
   return new TransactionInstruction({
     programId: cfg.programId,
     keys: [
       { pubkey: registryPda, isSigner: false, isWritable: true },
-      { pubkey: auth, isSigner: true, isWritable: false }, // authority
-      { pubkey: auth, isSigner: true, isWritable: true }, // payer (same key on devnet)
+      { pubkey: cfg.authority.publicKey, isSigner: true, isWritable: false },
+      { pubkey: cfg.payer.publicKey, isSigner: true, isWritable: true },
       { pubkey: SYSVAR_CLOCK_PUBKEY, isSigner: false, isWritable: false },
       { pubkey: eventAuthority, isSigner: false, isWritable: false },
       { pubkey: cfg.programId, isSigner: false, isWritable: false },
@@ -347,11 +444,13 @@ async function alert(cfg: Config, level: AlertLevel, msg: string): Promise<void>
 async function pass(cfg: Config, conn: Connection): Promise<void> {
   const registryPda = deriveRegistryPda(cfg.programId, cfg.registrySeed);
   const eventAuthority = deriveEventAuthority(cfg.programId);
-  const onchain = await readRegistry(conn, registryPda);
-  if (onchain === null) {
+  const registry = await readRegistry(conn, registryPda);
+  if (registry === null) {
     await alert(cfg, "critical", `JwkRegistry account ${registryPda.toBase58()} not found — run init_registry (see RUNBOOK_JWK_ROTATION.md §0)`);
     return;
   }
+  const onchain = registry.entries;
+  const { timelockSeconds, gracePeriodSeconds } = registry;
 
   // 1. gather provider keys
   const providerKeys: ProviderKey[] = [];
@@ -394,7 +493,7 @@ async function pass(cfg: Config, conn: Connection): Promise<void> {
     try {
       const ix = proposeJwkIx(cfg, registryPda, eventAuthority, k);
       const tx = new Transaction().add(ix);
-      const sig = await conn.sendTransaction(tx, [cfg.authority], { skipPreflight: false });
+      const sig = await conn.sendTransaction(tx, [cfg.authority, cfg.payer], { skipPreflight: false });
       await conn.confirmTransaction(sig, "confirmed");
       proposed++;
       await alert(
@@ -409,6 +508,58 @@ async function pass(cfg: Config, conn: Connection): Promise<void> {
       } else {
         await alert(cfg, "warn", `propose_jwk failed for provider=${k.provider} kid=${k.kid}: ${m}`);
       }
+    }
+  }
+
+  // 3.5. auto-activate PENDING entries whose timelock has elapsed AND whose
+  //      modulus still matches the live JWKS for that provider. The
+  //      re-verification is the security wall: even if the authority key were
+  //      compromised and proposed a forged JWK, this loop would refuse to
+  //      activate it because the live JWKS from Google/Apple cannot be
+  //      attacker-controlled.
+  const nowForActivate = BigInt(Math.floor(Date.now() / 1000));
+  for (const e of onchain) {
+    if (e.status !== STATUS_PENDING) continue;
+    if (nowForActivate < e.proposedAt + timelockSeconds) continue; // timelock not elapsed yet
+
+    // Match the PENDING entry to a provider via (issuerHash, audienceHash).
+    const provForEntry = cfg.providers.find(
+      (p) => fetchedProviders.has(p.name) && sha256(p.issuer).equals(e.issuerHash) && sha256(p.audience).equals(e.audienceHash),
+    );
+    if (!provForEntry) continue; // can't verify against a JWKS we didn't fetch — skip this cycle
+
+    // Find the live JWK with matching kid hash AND matching modulus.
+    const liveMatch = providerKeys.find(
+      (k) => k.provider === provForEntry.name && tripleEq(e, k) && e.modulus.equals(k.modulus),
+    );
+    if (!liveMatch) {
+      // PENDING entry exists on-chain but does NOT match anything in the live
+      // JWKS — either the provider rotated away from this kid already, OR an
+      // attacker proposed it. Either way, don't activate. Surface it.
+      await alert(
+        cfg,
+        "warn",
+        `PENDING entry slot=${e.index} (provider=${provForEntry.name}) has no matching kid+modulus in the live JWKS — refusing to auto-activate. Investigate before manual action.`,
+      );
+      continue;
+    }
+
+    try {
+      const ix = activateJwkIx(cfg, registryPda, eventAuthority, e, provForEntry.name, gracePeriodSeconds);
+      const tx = new Transaction().add(ix);
+      const sig = await conn.sendTransaction(tx, [cfg.authority, cfg.payer], { skipPreflight: false });
+      await conn.confirmTransaction(sig, "confirmed");
+      await alert(
+        cfg,
+        "info",
+        `activated PENDING JWK slot=${e.index} provider=${provForEntry.name} modulus_fp=${liveMatch.modulusFp} tx=${sig} (re-verified against live JWKS).`,
+      );
+    } catch (err) {
+      await alert(
+        cfg,
+        "warn",
+        `activate_jwk failed slot=${e.index} provider=${provForEntry.name}: ${(err as Error).message}`,
+      );
     }
   }
 
