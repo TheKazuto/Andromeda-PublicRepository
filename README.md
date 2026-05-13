@@ -10,7 +10,7 @@
   <p>
     <img src="https://img.shields.io/badge/license-Apache--2.0%20OR%20MIT-blue.svg" alt="License" />
     <img src="https://img.shields.io/badge/status-devnet%20pre--alpha-orange.svg" alt="Status" />
-    <img src="https://img.shields.io/badge/Solana%20programs-8-9945ff.svg" alt="Solana programs" />
+    <img src="https://img.shields.io/badge/Solana%20programs-9-9945ff.svg" alt="Solana programs" />
     <img src="https://img.shields.io/badge/MCP-tools%20auto--generated-7c3aed.svg" alt="MCP" />
     <img src="https://img.shields.io/badge/OpenAPI-3.1-6BA539.svg" alt="OpenAPI" />
   </p>
@@ -37,7 +37,7 @@ Andromeda removes all of that. You call an HTTPS endpoint. We run the engines, t
 
 ### Built on Ika + Encrypt
 
-Andromeda doesn't reimplement the cryptography; it wraps it. Ika provides the 2PC-MPC dWallets; Encrypt provides the FHE evaluation; Andromeda provides everything around them: 8 audited Quasar policy programs, the recovery and identity layers, gas sponsorship, MCP, HMAC-signed webhooks, an externally verifiable ed25519 audit log, and OpenAPI 3.1. The hard cryptographic guarantees come from those networks; the developer experience comes from us.
+Andromeda doesn't reimplement the cryptography; it wraps it. Ika provides the 2PC-MPC dWallets; Encrypt provides the FHE evaluation; Andromeda provides everything around them: 9 audited Solana programs (8 policy templates + the OIDC JWK registry), the recovery layer, Login Social, gas sponsorship, MCP, HMAC-signed webhooks, an externally verifiable ed25519 audit log, and OpenAPI 3.1. The hard cryptographic guarantees come from those networks; the developer experience comes from us.
 
 Reference docs: [Ika](https://docs.ika.xyz/) · [Encrypt](https://docs.encrypt.xyz/).
 
@@ -51,7 +51,7 @@ Andromeda is a **B2D (Business-to-Developer)** platform.
 - **Wallet and smart-wallet teams** that need cross-chain recovery and on-chain policy enforcement without writing Rust.
 - **DeFi protocols** that need treasury policies (allowlists, velocity guards, oracle circuit breakers) enforced by Solana programs, not by a centralised backend.
 - **AI agent builders** integrating signing capabilities into LLM workflows via MCP: no SDK, no glue code, just a streamable HTTP endpoint.
-- **Compliance-driven products** that need an externally verifiable audit log, GDPR-ready identity, and KMS-backed signing keys from day one.
+- **Compliance-driven products** that need an externally verifiable audit log and KMS-backed signing keys from day one.
 
 ---
 
@@ -59,7 +59,8 @@ Andromeda is a **B2D (Business-to-Developer)** platform.
 
 Cases that Andromeda specifically unblocks, not generic Web3 use cases.
 
-- **Cross-chain smart wallets.** Same identity drives signing across EVM, Solana, Bitcoin, Cosmos, NEAR and Aptos. The user signs into the app once and the dWallet derived from the OAuth subject is consistent across every client.
+- **Cross-chain smart wallets.** Same identity drives signing across EVM, Solana, Bitcoin, Cosmos, NEAR and Aptos. The user signs into the app once and the same dWallet works on every chain.
+- **Onboarding without a wallet (Login Social).** The user signs in with Google or Apple and gets a cross-chain dWallet immediately — no wallet to install, no seed phrase, no SOL to hold. The same Google/Apple account derives the same dWallet in any app on Andromeda: one identity, one wallet, every chain.
 - **DAO treasuries with on-chain rule enforcement.** A Solana Quasar program (allowlist-destinations + velocity-guard) holds the dWallet authority. The treasury can only interact with whitelisted programs, capped at N signatures per slot window, with no ability for the gateway to bypass the policy.
 - **Trading bots with scoped delegation.** The session-keys template grants a temporary key with on-chain limits on slot expiry, number of uses, amount per transaction, and allowed destination programs. Multiple sessions per dWallet (up to 2^32 concurrent), each with its own monotonic replay nonce.
 - **AI agents that sign transactions.** Every REST route on the gateway is auto-mirrored as an MCP tool. Drop the endpoint into Claude Desktop or Cursor and the agent can call signing, recovery, or policy operations natively.
@@ -70,7 +71,7 @@ Cases that Andromeda specifically unblocks, not generic Web3 use cases.
 
 ## What the platform ships
 
-26 capabilities beyond the core Ika and Encrypt primitives: the surrounding product that you'd otherwise have to build yourself.
+Capabilities beyond the core Ika and Encrypt primitives: the surrounding product that you'd otherwise have to build yourself.
 
 ### Multi-chain core
 - **Any wallet, any chain adapter for Ika on Solana.** Uniform REST surface over 4 cryptographic curves (Ed25519, SECP256K1, SECP256R1, Ristretto).
@@ -88,6 +89,9 @@ Cases that Andromeda specifically unblocks, not generic Web3 use cases.
 - **8 Quasar policy templates.** rules-policy, allowlist-destinations, velocity-guard, time-lock, oracle-conditional, passkey-step-up, fhe-gated, session-keys. All audited, all wallet-agnostic.
 - **Session keys with multi-session.** Up to 2^32 concurrent sessions per dWallet, each with a monotonic replay nonce that binds the message digest, amount, destination program, and signature nonce together.
 
+### Login Social
+- **Sign in with Google or Apple, get a dWallet immediately.** No wallet to install, no seed phrase, no SOL. Identity is verified entirely on-chain (RSA over the `id_token`, zero attestor) — a compromised Andromeda backend still cannot forge anyone's login. The same Google/Apple account derives the same dWallet in any app on Andromeda: one identity, one wallet, every chain.
+
 ### Confidential computing
 - **Confidential Workflows pipeline.** Encrypt FHE evaluation flows into Vault Transit ed25519, then into the Quasar fhe-gated policy, then into the Ika signature. An on-chain authority allowlist plus a non-zero decision-age window are enforced before any signature is released.
 
@@ -96,17 +100,11 @@ Cases that Andromeda specifically unblocks, not generic Web3 use cases.
 - **IDL-aware Solana listener.** Websocket subscription that parses the 6 canonical Andromeda events and 4 Anchor self-CPI events from Ika, fanning out to per-tenant webhooks.
 - **HMAC-signed webhook system.** Replay-protected (5-minute window), retries with backoff, dead-letter queue.
 
-### Optional identity layer
-- **Identity Layer.** OAuth (Google/Apple/Twitter/GitHub) plus email magic link plus passkey-as-identity (WebAuthn PRF). The dWallet address is derived deterministically from the OAuth provider plus subject identifier, so any client doing OAuth on the same account derives the same wallet, and cross-client recovery comes for free.
-- **Anti-enumeration + atomic single-use tokens.** The email-request endpoint always returns 200 (so attackers cannot probe which emails have accounts), and every token is consumed via an atomic single-use SQL update.
-- **PII encryption-at-rest.** AES-256-GCM envelope applied to identity records, account-link records, and email-token rows in Postgres. A DB dump leak does not become a PII leak.
-- **GDPR endpoints.** GET /me/export returns a full JSON dump of the user's identifiable data; DELETE /me cascades a purge across all linked records.
-
 ### API surface
 - **API key management with scopes and IP allowlist.** Granular permissions (read, write, admin, wildcard), CIDR allowlist per key, SHA-256 hashing, async last-used tracking.
 
 ### Developer experience
-- **MCP Server with auto-generated tools.** 60 tools auto-registered from the same route catalogue that drives REST. Drop into Claude Desktop or Cursor with zero glue code.
+- **MCP Server with auto-generated tools.** Every REST route is auto-registered as an MCP tool from the same catalogue. Drop into Claude Desktop or Cursor with zero glue code.
 - **Capabilities endpoint.** Public introspection of what is wired in this deployment (engines, features, MCP transport, route count).
 - **OpenAPI 3.1 + curl + Postman.** Every public endpoint comes with a typed schema and copy-paste examples in Node, Go, Python, Rust.
 - **SDK metadata endpoint.** For any deployed policy, the gateway returns a tarball URL plus an install command for a typed TypeScript client tailored to that policy.
@@ -135,6 +133,7 @@ Cases that Andromeda specifically unblocks, not generic Web3 use cases.
                  │           Gateway (Go)           │
                  │  Auth + Quotas + MCP + Audit +   │
                  │  Idempotency + Webhooks + Batch  │
+                 │  + OAuth broker (Login Social)   │
                  └─────┬────────────────────┬───────┘
                        │ private network    │ private network
                        ▼                    ▼
@@ -148,24 +147,32 @@ Cases that Andromeda specifically unblocks, not generic Web3 use cases.
                 network                   (devnet)
 
      ┌────────────────────────────────────────────────────┐
-     │  Solana devnet: 8 Quasar policy programs           │
-     │  Hold dWallet authority, validate every sig        │
+     │  Solana devnet: 8 policy programs + jwk-registry   │
+     │  Hold dWallet authority, validate every signature  │
      │  via runtime precompiles (zero attestor)           │
      └────────────────────────────────────────────────────┘
+                          ▲
+                          │ propose_jwk (authority)
+                          │
+                 ┌──────────────────┐    ┌────────────────────┐
+                 │   jwk-rotator    │───▶│ Google/Apple JWKS  │
+                 │   (worker)       │    │  (public TLS)      │
+                 └──────────────────┘    └────────────────────┘
 
      Postgres (shared with backend)   |   HashiCorp Vault Transit
      Stripe + SMTP (backend service)  |   Cloudflare Pages (dashboard)
 ```
 
-The product surface is composed of **5 services** plus **8 on-chain Quasar programs**.
+The product surface is composed of **6 services** plus **9 on-chain programs**.
 
 | Service | Stack | Role |
 |---------|-------|------|
 | gateway | Go 1.25, chi, pgx, Redis | Hot path. Auth, quota, rate limit, MCP server, reverse-proxy to engines, audit log. |
-| ika-backend | Node 24, Express 5, @grpc/grpc-js, @solana/kit | MPC engine. gRPC to Ika validator network, recovery layer, identity layer. |
+| ika-backend | Node 24, Express 5, @grpc/grpc-js, @solana/kit | MPC engine. gRPC to Ika validator network, recovery layer, Login Social. |
 | encrypt-backend | Node 22, Hono 4, @encrypt.xyz/pre-alpha-solana-client | FHE engine. 22 Encrypt instructions + high-level wallet primitives. |
 | backend | Go 1.25, chi, pgx, Stripe | Product surface. Auth, customer endpoints, billing, admin console. |
 | dashboard | Next.js 16, React 19, Tailwind 4 | Static export. Customer dashboard + admin console + landing. |
+| jwk-rotator | Node 24, TypeScript, @solana/web3.js | Off-chain watcher. Fetches Google/Apple JWKS, proposes new keys on-chain via the `jwk-registry` authority. Required for Login Social. |
 
 ---
 
@@ -238,11 +245,11 @@ Drop the gateway endpoint into any MCP client (Claude Desktop, Cursor, custom):
 }
 ```
 
-The agent can immediately call any of the 60 auto-generated tools, covering signing, recovery, policy operations, webhooks, audit log queries, and the full Encrypt FHE surface.
+The agent can immediately call any of the auto-generated tools, covering signing, recovery, Login Social, policy operations, webhooks, audit log queries, and the full Encrypt FHE surface.
 
 ### Run locally
 
-The monorepo runs on Postgres + Redis + 5 services. Each service has its own .env.example.
+The monorepo runs on Postgres + Redis + 6 services. Each service has its own .env.example.
 
 ```bash
 git clone https://github.com/TheKazuto/Andromeda-PublicRepository andromeda
@@ -256,12 +263,13 @@ cd andromeda
 ( cd ika-backend     && cp .env.example .env && npm install && npm run dev )
 ( cd encrypt-backend && cp .env.example .env && npm install && npm run dev )
 ( cd dashboard       && cp .env.local.example .env.local && npm install && npm run dev )
+( cd jwk-rotator     && cp .env.example .env && npm install && npm run start )    # worker, optional
 
 # 3. Open the dashboard.
 open http://localhost:3000
 ```
 
-Service ports: backend on 8080, gateway on 8081, ika-backend on 3020, encrypt-backend on 3010, dashboard on 3000.
+Service ports: backend on 8080, gateway on 8081, ika-backend on 3020, encrypt-backend on 3010, dashboard on 3000. `jwk-rotator` is a background worker — no HTTP port.
 
 ### Build
 
@@ -273,6 +281,7 @@ Every service ships a Dockerfile and a Railway config. The dashboard exports to 
 ( cd ika-backend     && npm run build )
 ( cd encrypt-backend && npm run build )
 ( cd dashboard       && npm run build )      # static export to out/
+( cd jwk-rotator     && npm run typecheck )  # tsx-runtime; no build step
 ```
 
 ### Test
@@ -311,6 +320,7 @@ All artefacts live on Solana **devnet** during pre-alpha.
 | passkey-step-up | 7xNwfNHtN11kf5JFNhsQTuciBskmWmZ8XcHSAeNdvorC | Require passkey proof above threshold |
 | fhe-gated | 6NhfKThEydSHH6R7gBm94reo3simopRJmb4nDzkKU7np | Gate signing on confidential FHE evaluation |
 | session-keys | 3Y2QaXiJH3aSiooDnGQsZQhYN72r47mYYbHp9YWyiASm | Multi-session scoped delegation |
+| jwk-registry | 8xL2mrQ2amDpinQMHJPaEELbgEXWRVGn4PQ7kzDm7vNM | On-chain trust root for OIDC RSA-2048 keys (Google/Apple). Login Social. |
 
 ### Omniboard: retail showcase (in development)
 
@@ -324,7 +334,9 @@ All artefacts live on Solana **devnet** during pre-alpha.
 
 - Ika integration runs against the public pre-alpha validator network with a single mock signer. No cryptographic MPC guarantee yet.
 - Encrypt integration runs against the public pre-alpha network. No real FHE confidentiality guarantee yet.
-- All 8 Quasar policy programs were security-audited internally in May 2026 (front-running, time source, replay protection, type confusion, oracle owner check). Pre-mainnet third-party audit pending.
+- All 8 Quasar policy programs were security-audited internally in May 2026 (front-running, time source, replay protection, type confusion, oracle owner check).
+- Login Social (the `jwk-registry` program, the `oidc-verifier` library, and the `rules-policy` `scheme=4` paths) was security-audited separately in May 2026; see `docs/AUDIT_LOGINSOCIAL_2026_05.md`. Two hardening recommendations (F-1, F-2) applied.
+- Pre-mainnet third-party audit pending across the whole on-chain surface.
 
 ---
 
