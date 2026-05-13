@@ -3,15 +3,20 @@
 // fhe-gated policy template (Andromeda Features Roadmap §3).
 //
 // Pipeline:
-//   1. Caller (gateway) supplies (policy_address, request_hash_hex, operation_name,
-//      encrypted_inputs).
+//   1. Caller (gateway) supplies (policy_address, message_digest_hex,
+//      operation_name, encrypted_inputs). `message_digest_hex` is the 32-byte
+//      hash of the user's message — the SAME bytes bound into the on-chain
+//      MessageApproval. The gateway forwards it verbatim.
 //   2. We run the FHE graph via existing /v1/graph routines (caller has
 //      already prepared/submitted the relevant ciphertexts upstream).
-//   3. The result + binding (policy + request_hash + created_slot + authorize)
-//      becomes the canonical EncryptedDecision bytes.
-//   4. We ASK Vault Transit to ed25519-sign those bytes — the private key
-//      never reaches this process. Mirrors the gateway's audit signer pattern
-//      (see `docs/AUDIT_KMS.md`).
+//   3. We compute the canonical 32-byte digest:
+//        sha256("andromeda::fhe-gated::decision::v1" || policy(32)
+//               || message_digest(32) || created_slot(u64 LE) || authorize(u8))
+//      (see decisionCanonicalBytes()).
+//   4. We ASK Vault Transit to ed25519-sign that digest — the private key
+//      never reaches this process. The on-chain `fhe-gated::request_signature`
+//      handler recomputes the same digest and validates it via the Ed25519
+//      precompile invocation in the same transaction.
 
 import { Hono } from 'hono';
 import { z } from 'zod';
@@ -20,6 +25,9 @@ import { address as toAddress, getAddressCodec } from '@solana/kit';
 import { rpc, commitment } from '../solana/connection.js';
 import { logger } from '../lib/logger.js';
 import { loadVaultSignerFromEnv, type VaultSigner } from '../lib/vault.js';
+import { decisionCanonicalBytes } from './decision-canonical.js';
+
+export { decisionCanonicalBytes };
 
 const addressCodec = getAddressCodec();
 
@@ -32,18 +40,22 @@ export const decisionRoutes = new Hono();
 
 const signBody = z.object({
   policy_address: z.string().min(32),
-  request_hash_hex: z.string().regex(/^[0-9a-fA-F]{64}$/, 'expected 64 hex chars'),
+  // 32-byte hash of the user's message that will be approved on-chain. Must
+  // equal `MessageApproval.message_digest` byte-for-byte. The gateway computes
+  // this from the caller's payload and forwards it verbatim. Replaces the
+  // legacy `request_hash_hex` (which was a gateway-side composite hash).
+  message_digest_hex: z.string().regex(/^[0-9a-fA-F]{64}$/, 'expected 64 hex chars'),
   operation_name: z.string().min(1),
   encrypted_inputs: z.array(z.string()).max(16).optional(),
-  // Mock-mode override. Honoured only when FHE_MOCK_MODE=true. The on-chain
-  // fhe-gated program does not yet verify the ed25519 signature (Quasar
-  // pre-alpha gap), so this field is operationally equivalent to a trusted
-  // gateway decision until the syscall lands. Documented as devnet-only.
+  // Mock-mode override. Honoured only when FHE_MOCK_MODE=true. Documented as
+  // devnet-only. Now that the on-chain program DOES verify the ed25519
+  // signature via the Ed25519 precompile, mock-mode still needs a valid
+  // canonical signature — it only short-circuits the FHE evaluation result.
   mock_authorize: z.boolean().optional(),
 });
 
 interface DecisionResponse {
-  request_hash_hex: string;
+  message_digest_hex: string;
   created_slot: number;
   authorize: boolean;
   signature_base64: string;
@@ -152,18 +164,18 @@ decisionRoutes.post('/sign', zValidator('json', signBody), async (c) => {
 
   const createdSlot = await getCurrentSlot();
 
-  // Canonical decision bytes the on-chain program expects:
-  //   policy(32) || request_hash(32) || created_slot(u64 LE) || authorize(u8)
-  // The signature MUST be over EXACTLY these bytes — any drift between the
-  // gateway's request_hash and the encrypt-backend's binding causes rejection
-  // on-chain (FHEError::DecisionRequestHashMismatch).
-  const requestHashBytes = Buffer.from(body.request_hash_hex, 'hex');
-
-  const canonical = Buffer.alloc(32 + 32 + 8 + 1);
-  Buffer.from(policyBytes.buffer, policyBytes.byteOffset, policyBytes.byteLength).copy(canonical, 0);
-  requestHashBytes.copy(canonical, 32);
-  canonical.writeBigUInt64LE(BigInt(createdSlot), 64);
-  canonical.writeUInt8(evaluation.authorize ? 1 : 0, 72);
+  // Canonical 32-byte digest the on-chain Ed25519 precompile verifies. See
+  // decisionCanonicalBytes() above for the exact layout — kept in sync with
+  // contracts/fhe-gated/src/challenges.rs::decision_canonical_bytes and
+  // gateway/internal/auth/challenges_templates.go::FHEGatedDecisionCanonicalBytes
+  // via fixtures/fhe-decision-vectors.json.
+  const messageDigestBytes = new Uint8Array(Buffer.from(body.message_digest_hex, 'hex'));
+  const canonical = decisionCanonicalBytes(
+    policyBytes,
+    messageDigestBytes,
+    BigInt(createdSlot),
+    evaluation.authorize ? 1 : 0,
+  );
 
   const signature = await kmsSignEd25519(canonical);
   if (signature.length !== 64) {
@@ -174,7 +186,7 @@ decisionRoutes.post('/sign', zValidator('json', signBody), async (c) => {
   }
 
   const resp: DecisionResponse = {
-    request_hash_hex: body.request_hash_hex,
+    message_digest_hex: body.message_digest_hex,
     created_slot: createdSlot,
     authorize: evaluation.authorize,
     signature_base64: signature.toString('base64'),
