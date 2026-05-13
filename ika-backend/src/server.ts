@@ -13,6 +13,7 @@ import { buildEngineRouter } from './engine/routes.js'
 import { closeIkaGrpcClient } from './engine/grpc-client.js'
 import { buildIdentityRouter, configureIdentityLayer } from './identity/index.js'
 import { buildRecoveryRouter } from './recovery/index.js'
+import { buildOidcMountRouter } from './oidc/index.js'
 import { startCleanupJob, stopCleanupJob } from './store/cleanup.js'
 import { fail } from './types.js'
 import { sanitizeError } from './safeError.js'
@@ -102,6 +103,14 @@ async function main(): Promise<void> {
   if (config.recovery.enabled) {
     logger.info({ policyEnabled: config.recovery.policyEnabled }, 'Recovery Layer enabled')
     app.use('/v1/recovery', corsMiddleware, await buildRecoveryRouter(config))
+  }
+
+  if (config.oidc.enabled) {
+    logger.info(
+      { google: config.oidc.googleEnabled, apple: config.oidc.appleEnabled },
+      'Login Social (OIDC) enabled',
+    )
+    app.use('/v1/oidc', corsMiddleware, buildOidcMountRouter(config))
   }
 
   app.use((req, res) => {

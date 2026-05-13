@@ -52,6 +52,28 @@ const recoverySchema = z.object({
   version: z.string().default('andromeda-ika-recovery-v1'),
 })
 
+// ── Login Social (`scheme = 4 = OidcJwt`) — see loginsocial.md §9/§17 ──
+//
+// Opt-in via IKA_OIDC_ENABLED. When disabled the surface is identical to the
+// pre-OIDC backend. The on-chain `rules-policy` (`scheme = 4`) + `jwk-registry`
+// remain the source of truth; this config drives the obligatory off-chain
+// pre-validation (`POST /v1/oidc/validate`) and the recovery adapters.
+const oidcSchema = z.object({
+  enabled: z.boolean().default(false),
+  googleEnabled: z.boolean().default(false),
+  googleClientId: z.string().optional(),
+  appleEnabled: z.boolean().default(false),
+  appleClientId: z.string().optional(),
+  /** CSV — mirrors the hardcoded on-chain allowlist (one `aud` global per env). */
+  allowedAudiences: z.array(z.string()).default([]),
+  /** Address of the on-chain `JwkRegistry` account (canonical PDA). */
+  jwkRegistryAddress: z.string().optional(),
+  /** Must equal the contract's `OIDC_VERIFIER_V1`. */
+  verifierVersion: z.number().int().positive().default(1),
+  /** HMAC key for `subjectHash` in logs/metrics — never reuse another secret. */
+  logSubjectHmacSecret: z.string().optional(),
+})
+
 const gasSponsorSchema = z.object({
   keypair: z.string().optional(),
   minBalanceSol: z.number().nonnegative().default(0.5),
@@ -62,8 +84,11 @@ export interface AppConfig {
   base: z.infer<typeof baseSchema>
   identity: z.infer<typeof identitySchema>
   recovery: z.infer<typeof recoverySchema>
+  oidc: z.infer<typeof oidcSchema>
   gasSponsor: z.infer<typeof gasSponsorSchema>
 }
+
+export type OidcConfig = AppConfig['oidc']
 
 class ConfigError extends Error {
   readonly errors: string[]
@@ -161,6 +186,46 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     )
   }
 
+  const oidcRaw = {
+    enabled: truthy(env.IKA_OIDC_ENABLED),
+    googleEnabled: truthy(env.IKA_OIDC_GOOGLE_ENABLED),
+    googleClientId: env.IKA_OIDC_GOOGLE_CLIENT_ID,
+    appleEnabled: truthy(env.IKA_OIDC_APPLE_ENABLED),
+    appleClientId: env.IKA_OIDC_APPLE_CLIENT_ID,
+    allowedAudiences: csv(env.IKA_OIDC_ALLOWED_AUDIENCES),
+    jwkRegistryAddress: env.IKA_OIDC_JWK_REGISTRY_ADDRESS,
+    verifierVersion: env.IKA_OIDC_VERIFIER_VERSION
+      ? Number.parseInt(env.IKA_OIDC_VERIFIER_VERSION, 10)
+      : 1,
+    logSubjectHmacSecret: env.IKA_OIDC_LOG_SUBJECT_HMAC_SECRET,
+  }
+  const oidcParse = oidcSchema.safeParse(oidcRaw)
+  if (!oidcParse.success) {
+    for (const issue of oidcParse.error.issues) {
+      errors.push(`oidc.${issue.path.join('.')}: ${issue.message}`)
+    }
+  } else if (oidcParse.data.enabled) {
+    const o = oidcParse.data
+    if (!o.googleEnabled && !o.appleEnabled) {
+      errors.push('oidc: at least one provider (IKA_OIDC_GOOGLE_ENABLED / IKA_OIDC_APPLE_ENABLED) must be true when IKA_OIDC_ENABLED=true')
+    }
+    if (o.googleEnabled && !o.googleClientId) {
+      errors.push('oidc.googleClientId (IKA_OIDC_GOOGLE_CLIENT_ID): required when IKA_OIDC_GOOGLE_ENABLED=true')
+    }
+    if (o.appleEnabled && !o.appleClientId) {
+      errors.push('oidc.appleClientId (IKA_OIDC_APPLE_CLIENT_ID): required when IKA_OIDC_APPLE_ENABLED=true')
+    }
+    if (o.allowedAudiences.length === 0) {
+      errors.push('oidc.allowedAudiences (IKA_OIDC_ALLOWED_AUDIENCES): required (CSV, must mirror the on-chain allowlist) when IKA_OIDC_ENABLED=true')
+    }
+    if (!o.jwkRegistryAddress) {
+      errors.push('oidc.jwkRegistryAddress (IKA_OIDC_JWK_REGISTRY_ADDRESS): required when IKA_OIDC_ENABLED=true')
+    }
+    if (!o.logSubjectHmacSecret) {
+      errors.push('oidc.logSubjectHmacSecret (IKA_OIDC_LOG_SUBJECT_HMAC_SECRET): required when IKA_OIDC_ENABLED=true')
+    }
+  }
+
   // Prefer the canonical ANDROMEDA_GAS_SPONSOR_KEYPAIR; fall back to the
   // legacy IKA_GAS_SPONSOR_KEYPAIR for one release for back-compat.
   const gasRaw = {
@@ -187,6 +252,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     base: baseParse.data!,
     identity: identityParse.data!,
     recovery: recoveryParse.data!,
+    oidc: oidcParse.data!,
     gasSponsor: gasParse.data!,
   }
 }

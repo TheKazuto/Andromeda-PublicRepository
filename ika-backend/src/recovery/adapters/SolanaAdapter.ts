@@ -154,8 +154,10 @@ class SolanaAdapter implements PolicyAdapter {
 // ── Singleton wiring ───────────────────────────────────────────
 
 let adapter: PolicyAdapter | null = null
+let solanaCtx: SolanaCtx | null = null
 
 export function initSolanaAdapter(opts: SolanaAdapterOptions): PolicyAdapter {
+  solanaCtx = makeSolanaCtx(opts)
   adapter = new SolanaAdapter(opts)
   return adapter
 }
@@ -163,4 +165,14 @@ export function initSolanaAdapter(opts: SolanaAdapterOptions): PolicyAdapter {
 export function getPolicyAdapter(): PolicyAdapter {
   if (!adapter) throw new Error('Policy adapter not initialized')
   return adapter
+}
+
+/**
+ * The resolved Solana context — used by the Login Social (OIDC) recovery flow
+ * module (`solana/oidc.ts`), which is Solana-specific and not part of the
+ * chain-agnostic `PolicyAdapter` interface.
+ */
+export function getSolanaCtx(): SolanaCtx {
+  if (!solanaCtx) throw new Error('Policy adapter not initialized')
+  return solanaCtx
 }

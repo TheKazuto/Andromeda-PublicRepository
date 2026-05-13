@@ -27,10 +27,22 @@ export async function prepareRecoverAsPrimary(
   input: PrimaryChallengeInput,
 ): Promise<PrimaryChallengeOutput> {
   const decoded = await fetchPolicyAccount(ctx, toAddress(input.dwalletAddress), input.initAuthorityHash)
-  const challenge = primaryRecoverChallenge({
-    dwallet: addressBytes(input.dwalletAddress),
+  const dwallet = toAddress(input.dwalletAddress)
+  const messageApproval = await findMessageApprovalPdaHierarchical({
+    ikaProgramId: ctx.ikaProgramId,
+    dwallet,
+    signatureScheme: input.signatureScheme,
     messageDigest: input.messageDigest,
     metadataDigest: input.metadataDigest,
+  })
+  const challenge = primaryRecoverChallenge({
+    dwallet: addressBytes(input.dwalletAddress),
+    messageApproval: addressBytes(messageApproval.address),
+    messageDigest: input.messageDigest,
+    metadataDigest: input.metadataDigest,
+    userPubkey: input.userPubkey,
+    signatureScheme: input.signatureScheme,
+    messageApprovalBump: messageApproval.bump,
     nonce: decoded.nextPrimaryRecoverNonce,
     primarySlot: decoded.primarySlot.raw,
   })
@@ -62,14 +74,6 @@ export async function submitRecoverAsPrimary(
     throw new Error('Primary cannot use WebAuthn scheme')
   }
 
-  const challenge = primaryRecoverChallenge({
-    dwallet: addressBytes(input.dwalletAddress),
-    messageDigest: input.messageDigest,
-    metadataDigest: input.metadataDigest,
-    nonce: decoded.nextPrimaryRecoverNonce,
-    primarySlot: primarySlotData.raw,
-  })
-
   const policyPda = await findRulesPolicyPda(programId, dwallet, input.initAuthorityHash)
   const cpiAuthorityPda = await findCpiAuthorityPda(programId)
   const eventAuthorityPda = await findEventAuthorityPda(programId)
@@ -81,6 +85,18 @@ export async function submitRecoverAsPrimary(
     signatureScheme: input.signatureScheme,
     messageDigest: input.messageDigest,
     metadataDigest: input.metadataDigest,
+  })
+
+  const challenge = primaryRecoverChallenge({
+    dwallet: addressBytes(input.dwalletAddress),
+    messageApproval: addressBytes(messageApproval.address),
+    messageDigest: input.messageDigest,
+    metadataDigest: input.metadataDigest,
+    userPubkey: input.userPubkey,
+    signatureScheme: input.signatureScheme,
+    messageApprovalBump: messageApproval.bump,
+    nonce: decoded.nextPrimaryRecoverNonce,
+    primarySlot: primarySlotData.raw,
   })
 
   const precompileIx = buildCredentialPrecompile(

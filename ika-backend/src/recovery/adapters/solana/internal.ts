@@ -44,6 +44,10 @@ export interface SolanaAdapterOptions {
   ikaCoordinatorAddress: string | undefined
   defaultCooldownSeconds: number
   minCooldownSeconds: number
+  /** Login Social — the on-chain `JwkRegistry` account address (canonical PDA). */
+  oidcJwkRegistryAddress?: string | undefined
+  /** Login Social — must equal the contract's `OIDC_VERIFIER_V1`. */
+  oidcVerifierVersion?: number | undefined
 }
 
 /** Resolved + validated form of {@link SolanaAdapterOptions}, passed to every flow module. */
@@ -54,12 +58,16 @@ export interface SolanaCtx {
   readonly minCooldownSeconds: number
   /** The Ika coordinator account — throws if not configured. */
   coordinator(): Address
+  /** The on-chain `JwkRegistry` account address — throws if Login Social isn't configured. */
+  oidcJwkRegistry(): Address
+  readonly oidcVerifierVersion: number
 }
 
 export function makeSolanaCtx(opts: SolanaAdapterOptions): SolanaCtx {
   const programId = toAddress(opts.programId)
   const ikaProgramId = toAddress(opts.ikaProgramId)
   const coordinatorAddr = opts.ikaCoordinatorAddress ? toAddress(opts.ikaCoordinatorAddress) : null
+  const jwkRegistryAddr = opts.oidcJwkRegistryAddress ? toAddress(opts.oidcJwkRegistryAddress) : null
   return {
     programId,
     ikaProgramId,
@@ -69,6 +77,11 @@ export function makeSolanaCtx(opts: SolanaAdapterOptions): SolanaCtx {
       if (!coordinatorAddr) throw new Error('IKA_COORDINATOR_ADDRESS not configured')
       return coordinatorAddr
     },
+    oidcJwkRegistry() {
+      if (!jwkRegistryAddr) throw new Error('IKA_OIDC_JWK_REGISTRY_ADDRESS not configured')
+      return jwkRegistryAddr
+    },
+    oidcVerifierVersion: opts.oidcVerifierVersion ?? 1,
   }
 }
 

@@ -26,6 +26,11 @@ export const OP_PRIMARY_RECOVER = enc.encode('primary-recover')
 export const OP_QUORUM_SESSION_OPEN = enc.encode('quorum-session-open')
 export const OP_QUORUM_CONTRIBUTE = enc.encode('quorum-contribute')
 
+// OIDC (Login Social) flow tags — both challenges are signed by the user's
+// ephemeral Ed25519 key.
+export const OP_OIDC_SESSION_OPEN = enc.encode('oidc-session-open')
+export const OP_OIDC_PRIMARY_USE = enc.encode('oidc-primary-use')
+
 // Admin flow tags
 export const OP_ADMIN_ADD_MEMBER = enc.encode('admin-add-member')
 export const OP_ADMIN_REMOVE_MEMBER = enc.encode('admin-remove-member')
@@ -51,6 +56,12 @@ function u64Le(v: bigint): Uint8Array {
 function i64Le(v: bigint): Uint8Array {
   const out = new Uint8Array(8)
   new DataView(out.buffer).setBigInt64(0, v, true)
+  return out
+}
+
+function u32Le(v: number): Uint8Array {
+  const out = new Uint8Array(4)
+  new DataView(out.buffer).setUint32(0, v >>> 0, true)
   return out
 }
 
@@ -110,8 +121,12 @@ export function initAuthorityHashFromSlot(slot: Uint8Array): Uint8Array {
 
 export function primaryRecoverChallenge(input: {
   dwallet: Uint8Array // 32 bytes
+  messageApproval: Uint8Array // 32 bytes
   messageDigest: Uint8Array // 32 bytes
   metadataDigest: Uint8Array // 32 bytes
+  userPubkey: Uint8Array // 32 bytes
+  signatureScheme: number
+  messageApprovalBump: number
   nonce: bigint
   primarySlot: Uint8Array // 34 bytes
 }): Uint8Array {
@@ -119,8 +134,12 @@ export function primaryRecoverChallenge(input: {
     DOMAIN,
     OP_PRIMARY_RECOVER,
     input.dwallet,
+    input.messageApproval,
     input.messageDigest,
     input.metadataDigest,
+    input.userPubkey,
+    new Uint8Array([input.signatureScheme & 0xff, (input.signatureScheme >> 8) & 0xff]),
+    u8Bytes(input.messageApprovalBump),
     u64Le(input.nonce),
     input.primarySlot,
   ])
@@ -130,6 +149,9 @@ export function quorumSessionOpenChallenge(input: {
   dwallet: Uint8Array
   messageDigest: Uint8Array
   metadataDigest: Uint8Array
+  userPubkey: Uint8Array
+  signatureScheme: number
+  messageApprovalBump: number
   amount: bigint
   destination: Uint8Array // 32 bytes
   expiresAt: bigint
@@ -142,6 +164,9 @@ export function quorumSessionOpenChallenge(input: {
     input.dwallet,
     input.messageDigest,
     input.metadataDigest,
+    input.userPubkey,
+    new Uint8Array([input.signatureScheme & 0xff, (input.signatureScheme >> 8) & 0xff]),
+    u8Bytes(input.messageApprovalBump),
     u64Le(input.amount),
     input.destination,
     i64Le(input.expiresAt),
@@ -157,72 +182,146 @@ export function quorumContributeChallenge(input: {
   return hashv([DOMAIN, OP_QUORUM_CONTRIBUTE, input.session, input.memberSlot])
 }
 
+// ── OIDC (Login Social) ────────────────────────────────────────
+//
+// Mirrors `contracts/auth/src/challenge.rs::oidc_session_open_challenge` and
+// `::oidc_primary_use_challenge` byte-for-byte. See `loginsocial.md` §6.5.
+
+/**
+ * Signed by the user's ephemeral Ed25519 key to open an `OidcSession`.
+ * `jwtDigest` = sha256(`header.payload`) (the JWS signing input) — binds the
+ * open to that exact JWT. `oidcVerifierVersion` = `OIDC_VERIFIER_V1` (1).
+ */
+export function oidcSessionOpenChallenge(input: {
+  dwallet: Uint8Array // 32 bytes
+  primarySlot: Uint8Array // 34 bytes = [4, addr_seed(32), 0]
+  ephPk: Uint8Array // 32 bytes
+  notAfterUnixTs: bigint
+  jwtDigest: Uint8Array // 32 bytes
+  jwkRegistry: Uint8Array // 32 bytes
+  oidcVerifierVersion: number
+  sessionNonce: bigint
+}): Uint8Array {
+  return hashv([
+    DOMAIN,
+    OP_OIDC_SESSION_OPEN,
+    input.dwallet,
+    input.primarySlot,
+    input.ephPk,
+    u64Le(input.notAfterUnixTs),
+    input.jwtDigest,
+    input.jwkRegistry,
+    u32Le(input.oidcVerifierVersion),
+    u64Le(input.sessionNonce),
+  ])
+}
+
+/**
+ * Signed by the user's ephemeral Ed25519 key for each signature authorized
+ * through an open `OidcSession`. `session` = the `OidcSession` PDA address;
+ * `useNonce` = the session's `next_use_nonce` at the time of use.
+ */
+export function oidcPrimaryUseChallenge(input: {
+  session: Uint8Array // 32 bytes (OidcSession PDA address)
+  dwallet: Uint8Array // 32 bytes
+  messageApproval: Uint8Array // 32 bytes
+  messageDigest: Uint8Array // 32 bytes
+  metadataDigest: Uint8Array // 32 bytes
+  userPubkey: Uint8Array // 32 bytes
+  signatureScheme: number
+  messageApprovalBump: number
+  useNonce: bigint
+  primarySlot: Uint8Array // 34 bytes
+}): Uint8Array {
+  return hashv([
+    DOMAIN,
+    OP_OIDC_PRIMARY_USE,
+    input.session,
+    input.dwallet,
+    input.messageApproval,
+    input.messageDigest,
+    input.metadataDigest,
+    input.userPubkey,
+    new Uint8Array([input.signatureScheme & 0xff, (input.signatureScheme >> 8) & 0xff]),
+    u8Bytes(input.messageApprovalBump),
+    u64Le(input.useNonce),
+    input.primarySlot,
+  ])
+}
+
 // ── Admin ───────────────────────────────────────────────────────
 
 function adminHash(
   opTag: Uint8Array,
   dwallet: Uint8Array,
+  policy: Uint8Array,
   nonce: bigint,
   primarySlot: Uint8Array,
   extras: Uint8Array[],
 ): Uint8Array {
-  return hashv([DOMAIN, opTag, dwallet, u64Le(nonce), primarySlot, ...extras])
+  return hashv([DOMAIN, opTag, dwallet, policy, u64Le(nonce), primarySlot, ...extras])
 }
 
 export function adminAddMemberChallenge(input: {
   dwallet: Uint8Array
+  policy: Uint8Array
   newMemberSlot: Uint8Array
   nonce: bigint
   primarySlot: Uint8Array
 }): Uint8Array {
-  return adminHash(OP_ADMIN_ADD_MEMBER, input.dwallet, input.nonce, input.primarySlot, [
+  return adminHash(OP_ADMIN_ADD_MEMBER, input.dwallet, input.policy, input.nonce, input.primarySlot, [
     input.newMemberSlot,
   ])
 }
 
 export function adminRemoveMemberChallenge(input: {
   dwallet: Uint8Array
+  policy: Uint8Array
   memberSlotToRemove: Uint8Array
   nonce: bigint
   primarySlot: Uint8Array
 }): Uint8Array {
-  return adminHash(OP_ADMIN_REMOVE_MEMBER, input.dwallet, input.nonce, input.primarySlot, [
+  return adminHash(OP_ADMIN_REMOVE_MEMBER, input.dwallet, input.policy, input.nonce, input.primarySlot, [
     input.memberSlotToRemove,
   ])
 }
 
 export function adminAddDestinationChallenge(input: {
   dwallet: Uint8Array
+  policy: Uint8Array
   destination: Uint8Array
   nonce: bigint
   primarySlot: Uint8Array
 }): Uint8Array {
-  return adminHash(OP_ADMIN_ADD_DESTINATION, input.dwallet, input.nonce, input.primarySlot, [
+  return adminHash(OP_ADMIN_ADD_DESTINATION, input.dwallet, input.policy, input.nonce, input.primarySlot, [
     input.destination,
   ])
 }
 
 export function adminRemoveDestinationChallenge(input: {
   dwallet: Uint8Array
+  policy: Uint8Array
   destination: Uint8Array
   nonce: bigint
   primarySlot: Uint8Array
 }): Uint8Array {
-  return adminHash(OP_ADMIN_REMOVE_DESTINATION, input.dwallet, input.nonce, input.primarySlot, [
+  return adminHash(OP_ADMIN_REMOVE_DESTINATION, input.dwallet, input.policy, input.nonce, input.primarySlot, [
     input.destination,
   ])
 }
 
 export function adminRevokeChallenge(input: {
   dwallet: Uint8Array
+  policy: Uint8Array
   nonce: bigint
   primarySlot: Uint8Array
 }): Uint8Array {
-  return adminHash(OP_ADMIN_REVOKE, input.dwallet, input.nonce, input.primarySlot, [])
+  return adminHash(OP_ADMIN_REVOKE, input.dwallet, input.policy, input.nonce, input.primarySlot, [])
 }
 
 export function adminSetPrimaryChallenge(input: {
   dwallet: Uint8Array
+  policy: Uint8Array
   newPrimarySlot: Uint8Array
   nonce: bigint
   currentPrimarySlot: Uint8Array
@@ -230,6 +329,7 @@ export function adminSetPrimaryChallenge(input: {
   return adminHash(
     OP_ADMIN_SET_PRIMARY,
     input.dwallet,
+    input.policy,
     input.nonce,
     input.currentPrimarySlot,
     [input.newPrimarySlot],
@@ -238,6 +338,7 @@ export function adminSetPrimaryChallenge(input: {
 
 export function adminSetQuorumThresholdImmediateChallenge(input: {
   dwallet: Uint8Array
+  policy: Uint8Array
   newThreshold: number
   nonce: bigint
   primarySlot: Uint8Array
@@ -245,6 +346,7 @@ export function adminSetQuorumThresholdImmediateChallenge(input: {
   return adminHash(
     OP_ADMIN_SET_QUORUM_THRESHOLD_IMMEDIATE,
     input.dwallet,
+    input.policy,
     input.nonce,
     input.primarySlot,
     [u8Bytes(input.newThreshold)],
@@ -253,6 +355,7 @@ export function adminSetQuorumThresholdImmediateChallenge(input: {
 
 export function adminSetDailyLimitImmediateChallenge(input: {
   dwallet: Uint8Array
+  policy: Uint8Array
   newSome: boolean
   newLimit: bigint
   nonce: bigint
@@ -261,6 +364,7 @@ export function adminSetDailyLimitImmediateChallenge(input: {
   return adminHash(
     OP_ADMIN_SET_DAILY_LIMIT_IMMEDIATE,
     input.dwallet,
+    input.policy,
     input.nonce,
     input.primarySlot,
     [u8Bytes(input.newSome ? 1 : 0), u64Le(input.newLimit)],
@@ -269,6 +373,7 @@ export function adminSetDailyLimitImmediateChallenge(input: {
 
 export function adminSetCooldownImmediateChallenge(input: {
   dwallet: Uint8Array
+  policy: Uint8Array
   newCooldownSeconds: bigint
   nonce: bigint
   primarySlot: Uint8Array
@@ -276,6 +381,7 @@ export function adminSetCooldownImmediateChallenge(input: {
   return adminHash(
     OP_ADMIN_SET_COOLDOWN_IMMEDIATE,
     input.dwallet,
+    input.policy,
     input.nonce,
     input.primarySlot,
     [u64Le(input.newCooldownSeconds)],
@@ -284,6 +390,7 @@ export function adminSetCooldownImmediateChallenge(input: {
 
 export function adminProposeQuorumThresholdChallenge(input: {
   dwallet: Uint8Array
+  policy: Uint8Array
   newThreshold: number
   nonce: bigint
   primarySlot: Uint8Array
@@ -291,6 +398,7 @@ export function adminProposeQuorumThresholdChallenge(input: {
   return adminHash(
     OP_ADMIN_PROPOSE_QUORUM_THRESHOLD,
     input.dwallet,
+    input.policy,
     input.nonce,
     input.primarySlot,
     [u8Bytes(input.newThreshold)],
@@ -299,6 +407,7 @@ export function adminProposeQuorumThresholdChallenge(input: {
 
 export function adminProposeDailyLimitChallenge(input: {
   dwallet: Uint8Array
+  policy: Uint8Array
   newSome: boolean
   newLimit: bigint
   nonce: bigint
@@ -307,6 +416,7 @@ export function adminProposeDailyLimitChallenge(input: {
   return adminHash(
     OP_ADMIN_PROPOSE_DAILY_LIMIT,
     input.dwallet,
+    input.policy,
     input.nonce,
     input.primarySlot,
     [u8Bytes(input.newSome ? 1 : 0), u64Le(input.newLimit)],
@@ -315,6 +425,7 @@ export function adminProposeDailyLimitChallenge(input: {
 
 export function adminProposeCooldownChallenge(input: {
   dwallet: Uint8Array
+  policy: Uint8Array
   newCooldownSeconds: bigint
   nonce: bigint
   primarySlot: Uint8Array
@@ -322,6 +433,7 @@ export function adminProposeCooldownChallenge(input: {
   return adminHash(
     OP_ADMIN_PROPOSE_COOLDOWN,
     input.dwallet,
+    input.policy,
     input.nonce,
     input.primarySlot,
     [u64Le(input.newCooldownSeconds)],

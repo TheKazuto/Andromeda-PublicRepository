@@ -26,6 +26,8 @@ const challengeSchema = z.object({
   initAuthorityHashBase64: z.string(),
   messageDigestBase64: z.string(),
   metadataDigestBase64: z.string().default(''),
+  userPubkeyBase64: z.string(),
+  signatureScheme: z.number().int().min(0).max(6),
 })
 
 const submitSchema = z.object({
@@ -72,6 +74,8 @@ export function buildPrimaryRouter(): Router {
         initAuthorityHash: decodeBase64ToFixed(input.initAuthorityHashBase64, 32, 'initAuthorityHash'),
         messageDigest: decodeBase64ToFixed(input.messageDigestBase64, 32, 'messageDigest'),
         metadataDigest: decodeBase64ToFixed(input.metadataDigestBase64, 32, 'metadataDigest'),
+        userPubkey: decodeBase64ToFixed(input.userPubkeyBase64, 32, 'userPubkey'),
+        signatureScheme: input.signatureScheme,
       })
       res.json(
         ok({

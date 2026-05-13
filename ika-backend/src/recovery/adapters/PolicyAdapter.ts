@@ -129,6 +129,8 @@ export interface PrimaryChallengeInput extends InitAuthorityHashCarrier {
   dwalletAddress: Address
   messageDigest: Uint8Array
   metadataDigest: Uint8Array
+  userPubkey: Uint8Array
+  signatureScheme: number
 }
 
 export interface PrimaryChallengeOutput {

@@ -6,7 +6,9 @@ import { buildDiscoveryRouter } from './discovery/routes.js'
 import { buildPrimaryRouter } from './primary/routes.js'
 import { buildQuorumRouter } from './quorum/routes.js'
 import { buildPolicyRouter } from './policy/routes.js'
+import { buildOidcRecoveryRouter } from './oidc/routes.js'
 import { initSolanaAdapter } from './adapters/SolanaAdapter.js'
+import { logger } from '../logger.js'
 import type { AppConfig } from '../config.js'
 
 let verifiersLoaded = false
@@ -41,8 +43,21 @@ export async function buildRecoveryRouter(config: AppConfig): Promise<Router> {
       ikaCoordinatorAddress: config.recovery.ikaCoordinatorAddress,
       defaultCooldownSeconds: config.recovery.defaultCooldownSeconds,
       minCooldownSeconds: config.recovery.minCooldownSeconds,
+      oidcJwkRegistryAddress: config.oidc.enabled ? config.oidc.jwkRegistryAddress : undefined,
+      oidcVerifierVersion: config.oidc.enabled ? config.oidc.verifierVersion : undefined,
     })
-    router.use('/primary', buildPrimaryRouter())
+    const primaryRouter = buildPrimaryRouter()
+    // Login Social — mount the OIDC primary-recovery flows under
+    // `/v1/recovery/primary/oidc/*` when enabled (requires the policy program +
+    // gas sponsor, already ensured above).
+    if (config.oidc.enabled) {
+      logger.info(
+        { google: config.oidc.googleEnabled, apple: config.oidc.appleEnabled },
+        'Recovery Layer: Login Social (OIDC) primary flows enabled',
+      )
+      primaryRouter.use('/oidc', buildOidcRecoveryRouter(config))
+    }
+    router.use('/primary', primaryRouter)
     router.use('/quorum', buildQuorumRouter(config))
     router.use('/policy', buildPolicyRouter(config))
   }

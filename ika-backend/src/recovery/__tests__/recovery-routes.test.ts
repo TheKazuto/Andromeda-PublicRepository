@@ -43,7 +43,13 @@ describe('recovery/primary routes', () => {
     adapter.prepareRecoverAsPrimary.mockResolvedValueOnce({ challenge: new Uint8Array(32).fill(3), expectedNonce: 5n, primaryScheme: 0 })
     const res = await request(app)
       .post('/primary/challenge')
-      .send({ dwalletAddress: ADDR, initAuthorityHashBase64: HASH32, messageDigestBase64: DIGEST32 })
+      .send({
+        dwalletAddress: ADDR,
+        initAuthorityHashBase64: HASH32,
+        messageDigestBase64: DIGEST32,
+        userPubkeyBase64: PUBKEY32,
+        signatureScheme: 5,
+      })
     expect(res.status).toBe(200)
     expect(res.body.success).toBe(true)
     expect(res.body.data.expectedNonce).toBe('5')

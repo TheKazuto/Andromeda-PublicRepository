@@ -50,34 +50,35 @@ import { fetchPolicyAccount } from './state.js'
 export function computeAdminChallenge(
   action: AdminAction,
   dwallet: Uint8Array,
+  policy: Uint8Array,
   nonce: bigint,
   primarySlot: Uint8Array,
 ): Uint8Array {
   switch (action.type) {
     case 'add_member':
-      return adminAddMemberChallenge({ dwallet, newMemberSlot: memberSlotToCanonical(action.member), nonce, primarySlot })
+      return adminAddMemberChallenge({ dwallet, policy, newMemberSlot: memberSlotToCanonical(action.member), nonce, primarySlot })
     case 'remove_member':
-      return adminRemoveMemberChallenge({ dwallet, memberSlotToRemove: memberSlotToCanonical(action.member), nonce, primarySlot })
+      return adminRemoveMemberChallenge({ dwallet, policy, memberSlotToRemove: memberSlotToCanonical(action.member), nonce, primarySlot })
     case 'add_destination':
-      return adminAddDestinationChallenge({ dwallet, destination: action.destination, nonce, primarySlot })
+      return adminAddDestinationChallenge({ dwallet, policy, destination: action.destination, nonce, primarySlot })
     case 'remove_destination':
-      return adminRemoveDestinationChallenge({ dwallet, destination: action.destination, nonce, primarySlot })
+      return adminRemoveDestinationChallenge({ dwallet, policy, destination: action.destination, nonce, primarySlot })
     case 'revoke':
-      return adminRevokeChallenge({ dwallet, nonce, primarySlot })
+      return adminRevokeChallenge({ dwallet, policy, nonce, primarySlot })
     case 'set_primary':
-      return adminSetPrimaryChallenge({ dwallet, newPrimarySlot: memberSlotToCanonical(action.newPrimary), nonce, currentPrimarySlot: primarySlot })
+      return adminSetPrimaryChallenge({ dwallet, policy, newPrimarySlot: memberSlotToCanonical(action.newPrimary), nonce, currentPrimarySlot: primarySlot })
     case 'set_quorum_threshold_immediate':
-      return adminSetQuorumThresholdImmediateChallenge({ dwallet, newThreshold: action.newThreshold, nonce, primarySlot })
+      return adminSetQuorumThresholdImmediateChallenge({ dwallet, policy, newThreshold: action.newThreshold, nonce, primarySlot })
     case 'set_daily_limit_immediate':
-      return adminSetDailyLimitImmediateChallenge({ dwallet, newSome: action.newSome, newLimit: action.newLimit, nonce, primarySlot })
+      return adminSetDailyLimitImmediateChallenge({ dwallet, policy, newSome: action.newSome, newLimit: action.newLimit, nonce, primarySlot })
     case 'set_cooldown_immediate':
-      return adminSetCooldownImmediateChallenge({ dwallet, newCooldownSeconds: action.newCooldownSeconds, nonce, primarySlot })
+      return adminSetCooldownImmediateChallenge({ dwallet, policy, newCooldownSeconds: action.newCooldownSeconds, nonce, primarySlot })
     case 'propose_quorum_threshold_change':
-      return adminProposeQuorumThresholdChallenge({ dwallet, newThreshold: action.newThreshold, nonce, primarySlot })
+      return adminProposeQuorumThresholdChallenge({ dwallet, policy, newThreshold: action.newThreshold, nonce, primarySlot })
     case 'propose_daily_limit_change':
-      return adminProposeDailyLimitChallenge({ dwallet, newSome: action.newSome, newLimit: action.newLimit, nonce, primarySlot })
+      return adminProposeDailyLimitChallenge({ dwallet, policy, newSome: action.newSome, newLimit: action.newLimit, nonce, primarySlot })
     case 'propose_cooldown_change':
-      return adminProposeCooldownChallenge({ dwallet, newCooldownSeconds: action.newCooldownSeconds, nonce, primarySlot })
+      return adminProposeCooldownChallenge({ dwallet, policy, newCooldownSeconds: action.newCooldownSeconds, nonce, primarySlot })
   }
 }
 
@@ -125,10 +126,12 @@ function buildAdminMainInstruction(action: AdminAction, base: AdminBaseAccounts,
 
 export async function prepareAdminAction(ctx: SolanaCtx, input: AdminChallengeInput): Promise<AdminChallengeOutput> {
   const dwallet = toAddress(input.dwalletAddress)
+  const policyPda = await findRulesPolicyPda(ctx.programId, dwallet, input.initAuthorityHash)
   const decoded = await fetchPolicyAccount(ctx, dwallet, input.initAuthorityHash)
   const challenge = computeAdminChallenge(
     input.action,
     addressBytes(input.dwalletAddress),
+    addressBytes(policyPda.address),
     decoded.nextAdminNonce,
     decoded.primarySlot.raw,
   )
@@ -140,6 +143,7 @@ export async function submitAdminAction(ctx: SolanaCtx, input: AdminSubmitInput)
   const dwallet = toAddress(input.dwalletAddress)
   const payer = getGasSponsorAddress()
   const decoded = await fetchPolicyAccount(ctx, dwallet, input.initAuthorityHash)
+  const policyPda = await findRulesPolicyPda(programId, dwallet, input.initAuthorityHash)
   if (decoded.nextAdminNonce !== input.expectedNonce) {
     throw new Error(`Admin nonce mismatch: expected ${decoded.nextAdminNonce}, got ${input.expectedNonce}`)
   }
@@ -150,6 +154,7 @@ export async function submitAdminAction(ctx: SolanaCtx, input: AdminSubmitInput)
   const challenge = computeAdminChallenge(
     input.action,
     addressBytes(input.dwalletAddress),
+    addressBytes(policyPda.address),
     decoded.nextAdminNonce,
     decoded.primarySlot.raw,
   )
@@ -159,7 +164,6 @@ export async function submitAdminAction(ctx: SolanaCtx, input: AdminSubmitInput)
     input.primarySignature,
   )
 
-  const policyPda = await findRulesPolicyPda(programId, dwallet, input.initAuthorityHash)
   const baseAccounts: AdminBaseAccounts = {
     programId,
     policyPda: policyPda.address,

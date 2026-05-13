@@ -49,11 +49,15 @@ export async function prepareQuorumSessionOpen(
   const dwallet = toAddress(input.dwalletAddress)
   const decoded = await fetchPolicyAccount(ctx, dwallet, input.initAuthorityHash)
   const sessionPda = await findQuorumSessionPda(programId, dwallet, decoded.nextSessionNonce)
+  const messageApproval = await findMessageApprovalPda(ctx.ikaProgramId, dwallet, input.messageDigest)
   const expiresAt = BigInt(Math.floor(input.expiresAt.getTime() / 1000))
   const challenge = quorumSessionOpenChallenge({
     dwallet: addressBytes(input.dwalletAddress),
     messageDigest: input.messageDigest,
     metadataDigest: input.metadataDigest,
+    userPubkey: input.userPubkey,
+    signatureScheme: input.signatureScheme,
+    messageApprovalBump: messageApproval.bump,
     amount: input.amount,
     destination: input.destination,
     expiresAt,
@@ -93,6 +97,9 @@ export async function submitQuorumSessionOpen(
     dwallet: addressBytes(input.dwalletAddress),
     messageDigest: input.messageDigest,
     metadataDigest: input.metadataDigest,
+    userPubkey: input.userPubkey,
+    signatureScheme: input.signatureScheme,
+    messageApprovalBump: messageApproval.bump,
     amount: input.amount,
     destination: input.destination,
     expiresAt,
