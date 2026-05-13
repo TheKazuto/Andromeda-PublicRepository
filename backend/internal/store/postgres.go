@@ -305,6 +305,56 @@ func (s *PostgresStore) RevokeAllAPIKeysByUser(ctx context.Context, userID strin
 	return nil
 }
 
+// ----- TENANT OAUTH REDIRECTS (Login Social broker allowlist) -----
+
+func (s *PostgresStore) ListTenantOAuthRedirects(ctx context.Context, userID string) ([]*TenantOAuthRedirect, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT user_id, redirect_uri, description, created_at
+		FROM tenant_oauth_redirects WHERE user_id = $1
+		ORDER BY created_at ASC
+	`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("list tenant_oauth_redirects: %w", err)
+	}
+	defer rows.Close()
+	out := []*TenantOAuthRedirect{}
+	for rows.Next() {
+		r := &TenantOAuthRedirect{}
+		if err := rows.Scan(&r.UserID, &r.RedirectURI, &r.Description, &r.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan tenant_oauth_redirect: %w", err)
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+func (s *PostgresStore) AddTenantOAuthRedirect(ctx context.Context, r *TenantOAuthRedirect) error {
+	if r.CreatedAt.IsZero() {
+		r.CreatedAt = time.Now().UTC()
+	}
+	if _, err := s.pool.Exec(ctx, `
+		INSERT INTO tenant_oauth_redirects (user_id, redirect_uri, description, created_at)
+		VALUES ($1, $2, $3, $4)
+	`, r.UserID, r.RedirectURI, r.Description, r.CreatedAt); err != nil {
+		return fmt.Errorf("insert tenant_oauth_redirect: %w", err)
+	}
+	return nil
+}
+
+func (s *PostgresStore) RemoveTenantOAuthRedirect(ctx context.Context, userID, redirectURI string) error {
+	tag, err := s.pool.Exec(ctx, `
+		DELETE FROM tenant_oauth_redirects
+		WHERE user_id = $1 AND redirect_uri = $2
+	`, userID, redirectURI)
+	if err != nil {
+		return fmt.Errorf("delete tenant_oauth_redirect: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // ----- helpers -----
 
 func (s *PostgresStore) queryUser(ctx context.Context, sql string, args ...any) (*User, error) {

@@ -36,6 +36,18 @@ type APIKey struct {
 	RevokedAt      *time.Time `json:"revokedAt,omitempty"`
 }
 
+// TenantOAuthRedirect is a single row in `tenant_oauth_redirects` — a
+// redirect URI registered by the tenant for use with the Login Social OAuth
+// broker (gateway `/v1/oauth/authorize`). The schema lives in the gateway
+// migration `023_tenant_oauth_redirects.sql` (backend + gateway share the
+// same Postgres). Tenant-scoped: never expose another user's rows.
+type TenantOAuthRedirect struct {
+	UserID      string    `json:"-"`
+	RedirectURI string    `json:"redirectUri"`
+	Description string    `json:"description,omitempty"`
+	CreatedAt   time.Time `json:"createdAt"`
+}
+
 // RefreshTokenIssue holds everything needed to persist a freshly-minted
 // refresh token. TokenHash is hex(sha256(raw)); the raw token never reaches
 // the store layer.
@@ -106,6 +118,13 @@ type Store interface {
 	UpdateAPIKey(ctx context.Context, userID, id string, mut APIKeyMutation) (*APIKey, error)
 	RevokeAPIKey(ctx context.Context, userID, id string) error
 	RevokeAllAPIKeysByUser(ctx context.Context, userID string) error
+
+	// Login Social — tenant OAuth redirect URIs (gateway broker allowlist).
+	// Schema lives in the gateway migration 023; backend operates on the
+	// same Postgres. All three methods are tenant-scoped on `userID`.
+	ListTenantOAuthRedirects(ctx context.Context, userID string) ([]*TenantOAuthRedirect, error)
+	AddTenantOAuthRedirect(ctx context.Context, r *TenantOAuthRedirect) error
+	RemoveTenantOAuthRedirect(ctx context.Context, userID, redirectURI string) error
 
 	// Lifecycle
 	Close() error

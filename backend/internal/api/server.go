@@ -141,6 +141,12 @@ func (s *Server) Router() http.Handler {
 			r.Patch("/api-keys/{id}", s.handleUpdateKey)
 			r.Delete("/api-keys/{id}", s.handleRevokeKey)
 
+			// Login Social — tenant manages its OWN redirect URI allowlist
+			// for the gateway OAuth broker. See oauth_redirects.go.
+			r.Get("/oauth/redirects", s.handleListOAuthRedirects)
+			r.Post("/oauth/redirects", s.handleAddOAuthRedirect)
+			r.Delete("/oauth/redirects", s.handleDeleteOAuthRedirect)
+
 			r.Get("/billing", s.handleBilling)
 
 			// Gift redeem (M3) — auth required so the gift attaches

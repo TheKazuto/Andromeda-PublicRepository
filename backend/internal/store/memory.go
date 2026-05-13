@@ -15,6 +15,8 @@ type MemoryStore struct {
 	byEmail   map[string]string
 	byProvSub map[string]string // "google:<subject>" or "github:<subject>" -> userID
 	keys      map[string]*APIKey
+	// Login Social — Tenant OAuth redirect URIs, keyed by user_id.
+	oauthRedirects map[string][]*TenantOAuthRedirect
 
 	// Auth lockout & token tables (in-memory equivalents of the Postgres
 	// schema — only used in dev where DATABASE_URL is unset).
@@ -42,11 +44,12 @@ type memReset struct {
 
 func NewMemory() *MemoryStore {
 	return &MemoryStore{
-		users:        make(map[string]*User),
-		byEmail:      make(map[string]string),
-		byProvSub:    make(map[string]string),
-		keys:         make(map[string]*APIKey),
-		failedLogins: make(map[string]int),
+		users:           make(map[string]*User),
+		byEmail:         make(map[string]string),
+		byProvSub:       make(map[string]string),
+		keys:            make(map[string]*APIKey),
+		oauthRedirects:  make(map[string][]*TenantOAuthRedirect),
+		failedLogins:    make(map[string]int),
 		lockedUntil:  make(map[string]time.Time),
 		refresh:      make(map[string]*memRefresh),
 		refreshHash:  make(map[string]string),
@@ -266,6 +269,48 @@ func (s *MemoryStore) RevokeAllAPIKeysByUser(_ context.Context, userID string) e
 		}
 	}
 	return nil
+}
+
+// ----- TENANT OAUTH REDIRECTS (Login Social broker allowlist) -----
+
+func (s *MemoryStore) ListTenantOAuthRedirects(_ context.Context, userID string) ([]*TenantOAuthRedirect, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	rows := s.oauthRedirects[userID]
+	out := make([]*TenantOAuthRedirect, len(rows))
+	for i, r := range rows {
+		copy := *r
+		out[i] = &copy
+	}
+	return out, nil
+}
+
+func (s *MemoryStore) AddTenantOAuthRedirect(_ context.Context, r *TenantOAuthRedirect) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if r.CreatedAt.IsZero() {
+		r.CreatedAt = time.Now().UTC()
+	}
+	for _, existing := range s.oauthRedirects[r.UserID] {
+		if existing.RedirectURI == r.RedirectURI {
+			return ErrAlreadyExists
+		}
+	}
+	s.oauthRedirects[r.UserID] = append(s.oauthRedirects[r.UserID], r)
+	return nil
+}
+
+func (s *MemoryStore) RemoveTenantOAuthRedirect(_ context.Context, userID, redirectURI string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows := s.oauthRedirects[userID]
+	for i, r := range rows {
+		if r.RedirectURI == redirectURI {
+			s.oauthRedirects[userID] = append(rows[:i], rows[i+1:]...)
+			return nil
+		}
+	}
+	return ErrNotFound
 }
 
 // ----- LOCKOUT (in-memory equivalent of the Postgres schema) -----
