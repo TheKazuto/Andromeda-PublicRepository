@@ -189,7 +189,7 @@ missing required value is aggregated and printed, and the process exits.
 ### Required (always)
 | Var | Notes |
 |-----|-------|
-| `INTERNAL_API_KEY` | Secret for the `X-Api-Key` header on all `/v1/*` routes. |
+| `INTERNAL_API_KEY` | Secret for the `X-Api-Key` header on all `/v1/*` routes. Minimum 32 chars — boot fails fast on shorter values to reject `dev123` / `changeme` misconfigurations. |
 | `DATABASE_URL` | Postgres DSN. |
 | `IKA_GRPC_URL` | Ika validator network gRPC (`https://pre-alpha-dev-1.ika.ika-network.net:443`). |
 | `IKA_PROGRAM_ID` | Ika Solana program ID (`87W54kGYFQ1rgWqMeu4XTPHWXWmXSQCcjm8vCTfiq1oY`). |
