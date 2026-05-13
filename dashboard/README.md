@@ -5,7 +5,7 @@ Next.js dashboard for Andromeda. Static export, deployed to Cloudflare Pages.
 Three surfaces share the codebase:
 
 - **Public** — landing, pricing, gift purchase/redeem, login/signup.
-- **Customer dashboard** (`/dashboard/*`) — API keys, usage, billing, MCP setup, settings, support.
+- **Customer dashboard** (`/dashboard/*`) — API keys, OAuth redirects (Login Social), usage, billing, MCP setup, settings, support.
 - **Admin console** (`/admin/*`) — operator-only, separate JWT + TOTP + RBAC.
 
 Stack: Next.js 16 (App Router, `output: "export"`) · React 19 · TypeScript 6 · Tailwind 4 · lucide-react · wrangler · Cloudflare Pages.
@@ -57,6 +57,7 @@ dashboard/
 |-------|---------|
 | `/dashboard` | Overview |
 | `/dashboard/api-keys` | Create, edit (name + allowed origins), revoke keys |
+| `/dashboard/settings/oauth-redirects` | Tenant-managed redirect URI allowlist for Login Social. Lists / adds / removes URIs the gateway broker accepts at `/v1/oauth/authorize` |
 | `/dashboard/mcp-server` | MCP install config + tool catalog |
 | `/dashboard/usage` | 30-day usage chart |
 | `/dashboard/billing` | Plan + Stripe Portal + overage |

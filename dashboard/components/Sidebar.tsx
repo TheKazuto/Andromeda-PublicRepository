@@ -12,6 +12,7 @@ import {
   Settings,
   LifeBuoy,
   BookOpen,
+  Link2,
 } from "lucide-react";
 
 type Item = { href: string; label: string; Icon: typeof Home };
@@ -19,6 +20,7 @@ type Item = { href: string; label: string; Icon: typeof Home };
 const NAV: Item[] = [
   { href: "/dashboard", label: "Home", Icon: Home },
   { href: "/dashboard/api-keys", label: "API Keys", Icon: KeyRound },
+  { href: "/dashboard/settings/oauth-redirects", label: "OAuth Redirects", Icon: Link2 },
   { href: "/dashboard/mcp-server", label: "MCP Server", Icon: Server },
   { href: "/dashboard/usage", label: "Usage", Icon: Activity },
   { href: "/dashboard/billing", label: "Billing", Icon: CreditCard },

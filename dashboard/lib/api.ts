@@ -265,6 +265,14 @@ export type AuthResp = {
   user: User;
 };
 
+// Login Social — one redirect URI registered by the tenant for the
+// gateway OAuth broker. Backend at GET/POST/DELETE /v1/oauth/redirects.
+export type OAuthRedirect = {
+  redirectUri: string;
+  description?: string;
+  createdAt: string;
+};
+
 export type UsageDay = { date: string; signs: number; reads: number };
 export type Usage = {
   period: string;
