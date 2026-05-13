@@ -17,12 +17,6 @@ describe('config', () => {
     expect(config.recovery.enabled).toBe(false)
   })
 
-  it('rejects identity enabled without jwt secret', () => {
-    expect(() =>
-      loadConfig({ ...baseEnv, IKA_IDENTITY_ENABLED: 'true' } as NodeJS.ProcessEnv),
-    ).toThrow(/jwtSecret/)
-  })
-
   it('rejects policy enabled without program id', () => {
     expect(() =>
       loadConfig({

@@ -11,7 +11,6 @@ import { buildHealthRouter } from './http/healthz.js'
 import { idempotencyMiddleware } from './http/idempotency.js'
 import { buildEngineRouter } from './engine/routes.js'
 import { closeIkaGrpcClient } from './engine/grpc-client.js'
-import { buildIdentityRouter, configureIdentityLayer } from './identity/index.js'
 import { buildRecoveryRouter } from './recovery/index.js'
 import { buildOidcMountRouter } from './oidc/index.js'
 import { startCleanupJob, stopCleanupJob } from './store/cleanup.js'
@@ -82,7 +81,7 @@ async function main(): Promise<void> {
       },
     }),
   )
-  // CORS só em rotas públicas (identity + recovery). Engine é gateway-only.
+  // CORS só em rotas públicas (recovery + oidc). Engine é gateway-only.
   const corsMiddleware = cors({
     origin: config.base.allowedOrigins.length > 0 ? config.base.allowedOrigins : false,
     credentials: true,
@@ -94,11 +93,6 @@ async function main(): Promise<void> {
   app.use('/v1', idempotencyMiddleware())
 
   app.use('/v1/dwallet', buildEngineRouter(config))
-
-  if (config.identity.enabled) {
-    await configureIdentityLayer(config)
-    app.use('/v1/identity', corsMiddleware, buildIdentityRouter(config))
-  }
 
   if (config.recovery.enabled) {
     logger.info({ policyEnabled: config.recovery.policyEnabled }, 'Recovery Layer enabled')
