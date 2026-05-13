@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -32,6 +33,22 @@ type Service struct {
 	SDKBaseURL         string
 	SDKVersionTag      string
 	ConfidentialClient ConfidentialSignClient
+	// Logger is used to record upstream failure details server-side without
+	// leaking them in HTTP responses. Optional; nil → slog.Default().
+	Logger *slog.Logger
+}
+
+// WithLogger wires a structured logger for upstream failures.
+func (s *Service) WithLogger(l *slog.Logger) *Service {
+	s.Logger = l
+	return s
+}
+
+func (s *Service) log() *slog.Logger {
+	if s.Logger != nil {
+		return s.Logger
+	}
+	return slog.Default()
 }
 
 func NewService(reg *Registry, rpcURL string) (*Service, error) {
@@ -411,24 +428,65 @@ func (s *Service) initPolicy(w http.ResponseWriter, r *http.Request) {
 	} else {
 		policyPda, _, _ = PolicyPDA(template, progID, dwallet, initCtx.InitAuthorityHash)
 	}
-	if s.Subscriptions != nil && s.ResolveAPIKeyID != nil {
+
+	// Wait for the init tx to reach `confirmed` BEFORE persisting the
+	// subscription. Persisting on send (pre-confirmation) would route
+	// future on-chain webhooks to a policy address that may never
+	// actually exist on-chain (preflight passes, ledger commit fails).
+	// The timeout is short and informational: if it trips, we still
+	// return the tx_signature so the client can poll independently.
+	confirmCtx, confirmCancel := context.WithTimeout(r.Context(), 12*time.Second)
+	confirmErr := s.GasSponsor.WaitForConfirmation(confirmCtx, sig, rpc.CommitmentConfirmed, 10*time.Second)
+	confirmCancel()
+
+	subscriptionSaved := false
+	if confirmErr == nil && s.Subscriptions != nil && s.ResolveAPIKeyID != nil {
 		if apiKeyID, rerr := s.ResolveAPIKeyID(r); rerr == nil && apiKeyID != uuid.Nil {
 			subCtx, subCancel := context.WithTimeout(r.Context(), 3*time.Second)
-			_ = s.Subscriptions.Subscribe(subCtx, apiKeyID,
-				policyPda.String(), template, progID.String(), dwallet.String())
+			if subErr := s.Subscriptions.Subscribe(subCtx, apiKeyID,
+				policyPda.String(), template, progID.String(), dwallet.String()); subErr == nil {
+				subscriptionSaved = true
+			} else {
+				s.log().Warn("policy subscription persist failed",
+					"policy", policyPda.String(), "err", subErr.Error())
+			}
 			subCancel()
 		}
 	}
+
 	resp := map[string]any{
 		"tx_signature":        sig.String(),
 		"policy_address":      policyPda.String(),
 		"program_id":          progID.String(),
 		"init_authority_hash": base64.StdEncoding.EncodeToString(initCtx.InitAuthorityHash[:]),
+		"confirmation_status": confirmationStatusString(confirmErr),
+		"subscription_saved":  subscriptionSaved,
+	}
+	if confirmErr != nil {
+		// Sanitised: never echo the raw RPC error to the public response.
+		s.log().Warn("policy init confirmation timed out",
+			"policy", policyPda.String(), "tx", sig.String(), "err", confirmErr.Error())
+		resp["confirmation_note"] = "init tx submitted; confirmation timed out — poll the tx_signature to verify"
 	}
 	if req.SessionIndex != nil {
 		resp["session_index"] = *req.SessionIndex
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// confirmationStatusString maps a WaitForConfirmation error into a stable
+// public string. Never include the raw error message in the response.
+func confirmationStatusString(err error) string {
+	if err == nil {
+		return "confirmed"
+	}
+	if errors.Is(err, gasponsor.ErrConfirmationTimeout) {
+		return "pending"
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return "pending"
+	}
+	return "failed"
 }
 
 // ── Admin challenge / submit ───────────────────────────────────

@@ -50,6 +50,17 @@ type Metrics struct {
 	// listener drops (counter incremented inline by the rate limiter).
 	WebhookDLQDepth       prometheus.Gauge
 	ListenerEventsDropped *prometheus.CounterVec // labels: reason
+
+	// WebhookPublishFailures counts every Publish() call that returned an
+	// error before any delivery was enqueued (DB outage, marshal failure,
+	// etc.). Distinct from ListenerEventsDropped, which counts ingress
+	// drops before Publish is even invoked.
+	WebhookPublishFailures *prometheus.CounterVec // labels: event_type
+
+	// WebhookDeliveriesTotal counts dispatcher outcomes per attempt: 2xx,
+	// 4xx, 5xx, network_error, dead_letter. Used together with
+	// `gateway_webhook_dlq_depth` to alert on persistent failures.
+	WebhookDeliveriesTotal *prometheus.CounterVec // labels: outcome
 }
 
 // New builds and registers every collector. Returns the Metrics bundle
@@ -168,6 +179,21 @@ func New() (*Metrics, http.Handler) {
 		Name:      "dlq_depth",
 		Help:      "Webhook deliveries currently in dead_letter status.",
 	})
+	m.WebhookPublishFailures = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "gateway",
+			Subsystem: "webhook",
+			Name:      "publish_failures_total",
+			Help:      "Publish() invocations that failed before any delivery was enqueued, by event_type.",
+		}, []string{"event_type"})
+	m.WebhookDeliveriesTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "gateway",
+			Subsystem: "webhook",
+			Name:      "deliveries_total",
+			Help:      "Delivery attempts by outcome (2xx/4xx/5xx/network_error/dead_letter).",
+		}, []string{"outcome"})
+
 	m.ListenerEventsDropped = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: "gateway",
@@ -192,6 +218,8 @@ func New() (*Metrics, http.Handler) {
 		m.WorkerTickTotal,
 		m.WebhookDLQDepth,
 		m.ListenerEventsDropped,
+		m.WebhookPublishFailures,
+		m.WebhookDeliveriesTotal,
 	)
 
 	handler := promhttp.HandlerFor(reg, promhttp.HandlerOpts{
@@ -202,6 +230,23 @@ func New() (*Metrics, http.Handler) {
 
 // Registry exposes the underlying Prometheus registry for tests.
 func (m *Metrics) Registry() *prometheus.Registry { return m.registry }
+
+// RecordPublishFailure implements webhooks.PublisherMetrics. Keeps the
+// webhooks package free of a direct prometheus dependency.
+func (m *Metrics) RecordPublishFailure(eventType string) {
+	if m == nil || m.WebhookPublishFailures == nil {
+		return
+	}
+	m.WebhookPublishFailures.WithLabelValues(eventType).Inc()
+}
+
+// RecordDeliveryOutcome implements webhooks.DispatcherMetrics.
+func (m *Metrics) RecordDeliveryOutcome(outcome string) {
+	if m == nil || m.WebhookDeliveriesTotal == nil {
+		return
+	}
+	m.WebhookDeliveriesTotal.WithLabelValues(outcome).Inc()
+}
 
 // StatusClass converts an HTTP status into a coarse class label
 // (2xx/3xx/4xx/5xx). 0 → "error" (network failure, no response).

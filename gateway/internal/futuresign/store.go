@@ -190,6 +190,33 @@ func (s *Store) MarkFired(ctx context.Context, id uuid.UUID, signatureHex string
 // hammering the URL (and potentially leaking a bearer token) until expiry.
 const MaxRetryCount = 10
 
+// MarkArmedChecked records a benign "not yet ready" outcome for a claimed
+// trigger and bounces it back to 'armed' WITHOUT incrementing
+// failure_count. Use this for normal polling outcomes that are not real
+// failures:
+//
+//   - slot_time trigger whose target slot hasn't been reached.
+//   - external_webhook returning {shouldFire: false} (or a 3xx the watcher
+//     refuses to follow).
+//
+// Real failures (callback unreachable, bad JSON, SSRF reject, ika completer
+// error) must still go through MarkFailed so the circuit breaker can fire.
+func (s *Store) MarkArmedChecked(ctx context.Context, id uuid.UUID) error {
+	now := time.Now().UTC()
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE future_sign_triggers
+		SET status = 'armed', last_check_at = $1
+		WHERE id = $2 AND status = 'firing'
+	`, now, id)
+	if err != nil {
+		return fmt.Errorf("mark armed checked: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // MarkFailed bumps failure_count and records the error. While failure_count
 // is below MaxRetryCount the trigger goes back to 'armed' so the watcher
 // retries on the next tick. After the threshold is reached the trigger

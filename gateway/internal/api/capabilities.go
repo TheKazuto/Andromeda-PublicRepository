@@ -27,12 +27,38 @@ type engineStatus struct {
 }
 
 type featureFlags struct {
-	Audit       bool `json:"audit"`
-	Webhooks    bool `json:"webhooks"`
-	Policies    bool `json:"policies"`
-	FutureSign  bool `json:"futureSign"`
+	// `audit`/`webhooks`/`policies` reflect: store/recorder/service wired in.
+	Audit    bool `json:"audit"`
+	Webhooks bool `json:"webhooks"`
+	Policies bool `json:"policies"`
+	// `futureSign` is ONLY true when the watcher goroutines are running.
+	// Having the store alone is not enough — without the watcher, armed
+	// triggers never fire.
+	FutureSign bool `json:"futureSign"`
+	// `rateLimit` and `idempotency` are true only when Redis is configured;
+	// without Redis the middleware is a no-op. See `rateLimitMode` and
+	// `redisBackedIdempotency` below for the operational nuance the client
+	// needs to make routing decisions.
 	RateLimit   bool `json:"rateLimit"`
 	Idempotency bool `json:"idempotency"`
+
+	// FutureSignWatcher mirrors `FutureSign` — kept as a separate field so
+	// clients/devs can grep capability JSON for the explicit watcher state.
+	FutureSignWatcher bool `json:"futureSignWatcher"`
+
+	// RedisBackedIdempotency is true ONLY when both Redis is configured AND
+	// the idempotency middleware is the real (Redis-backed) implementation.
+	// When false the gateway accepts the `Idempotency-Key` header but does
+	// not actually deduplicate — callers must not rely on it.
+	RedisBackedIdempotency bool `json:"redisBackedIdempotency"`
+
+	// RateLimitMode is one of "disabled" | "fail_open" | "fail_closed":
+	//   - "disabled":    Redis unconfigured; every request is admitted.
+	//   - "fail_open":   Redis configured; on Redis outage the limiter
+	//                    admits requests (default).
+	//   - "fail_closed": Redis configured; on Redis outage the limiter
+	//                    REJECTS requests.
+	RateLimitMode string `json:"rateLimitMode"`
 }
 
 type mcpStatus struct {
@@ -59,6 +85,18 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, _ *http.Request) {
 		}
 	}
 
+	redisConfigured := s.cfg.RedisURL != ""
+	watcherRunning := s.futureSignWatcherRunning
+
+	rateLimitMode := "disabled"
+	if redisConfigured {
+		if s.cfg.RateLimitFailOpen {
+			rateLimitMode = "fail_open"
+		} else {
+			rateLimitMode = "fail_closed"
+		}
+	}
+
 	payload := capabilitiesPayload{
 		Service: "andromeda-gateway",
 		Version: "0.1.0",
@@ -72,12 +110,15 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, _ *http.Request) {
 			},
 		},
 		Features: featureFlags{
-			Audit:       s.auditRecorder != nil,
-			Webhooks:    s.webhookStore != nil,
-			Policies:    s.policyService != nil,
-			FutureSign:  s.futureSignStore != nil,
-			RateLimit:   s.cfg.RedisURL != "",
-			Idempotency: s.idempotencyChain != nil,
+			Audit:                  s.auditRecorder != nil,
+			Webhooks:               s.webhookStore != nil,
+			Policies:               s.policyService != nil,
+			FutureSign:             s.futureSignStore != nil && watcherRunning,
+			RateLimit:              redisConfigured,
+			Idempotency:            redisConfigured,
+			FutureSignWatcher:      watcherRunning,
+			RedisBackedIdempotency: redisConfigured && s.idempotencyChain != nil,
+			RateLimitMode:          rateLimitMode,
 		},
 		MCP: mcpStatus{
 			Enabled:   s.mcpTools != nil,

@@ -141,9 +141,12 @@ func (w *Watcher) tickSlotTime(ctx context.Context) {
 			continue
 		}
 		if currentSlot < cond.TriggerAtSlot {
-			// Not due yet — bounce back to armed.
-			if err := w.opts.Store.MarkFailed(ctx, t.ID, "slot not yet reached"); err != nil {
-				w.opts.Logger.Warn("revert to armed failed", "err", err)
+			// Not due yet — bounce back to armed WITHOUT counting it as a
+			// failure. Counting normal polling as failure would burn
+			// failure_count and promote valid triggers to terminal `failed`
+			// long before expires_at.
+			if err := w.opts.Store.MarkArmedChecked(ctx, t.ID); err != nil {
+				w.opts.Logger.Warn("revert to armed (not yet due) failed", "err", err)
 			}
 			continue
 		}
@@ -193,22 +196,28 @@ func (w *Watcher) tickExternalWebhook(ctx context.Context) {
 		}
 		// Re-validate the callback URL at dispatch time so DNS rebinding
 		// (registration → fire) cannot redirect the gateway at a private IP.
+		// SSRF rejection IS a real failure — never bypass the circuit breaker
+		// for a URL the tenant pointed at private infrastructure.
 		if err := w.opts.URLGuard.ValidateDispatch(ctx, cond.CallbackURL); err != nil {
 			if revertErr := w.opts.Store.MarkFailed(ctx, t.ID, "callbackUrl rejected by url guard"); revertErr != nil {
 				w.opts.Logger.Warn("revert external_webhook (url guard) failed", "err", revertErr)
 			}
 			continue
 		}
-		shouldFire, err := w.pollExternalWebhook(ctx, cond)
+		shouldFire, ready, err := w.pollExternalWebhook(ctx, cond)
 		if err != nil {
+			// Real failure — bad JSON, callback unreachable, non-2xx
+			// response. Counts toward the circuit breaker.
 			if revertErr := w.opts.Store.MarkFailed(ctx, t.ID, err.Error()); revertErr != nil {
 				w.opts.Logger.Warn("revert external_webhook failed", "err", revertErr)
 			}
 			continue
 		}
-		if !shouldFire {
-			if err := w.opts.Store.MarkFailed(ctx, t.ID, "external_webhook not yet ready"); err != nil {
-				w.opts.Logger.Warn("revert external_webhook failed", "err", err)
+		if !ready || !shouldFire {
+			// Healthy "not yet" signal (3xx redirect or shouldFire=false).
+			// Bounce back to armed without burning failure_count.
+			if err := w.opts.Store.MarkArmedChecked(ctx, t.ID); err != nil {
+				w.opts.Logger.Warn("revert external_webhook (not ready) failed", "err", err)
 			}
 			continue
 		}
@@ -219,46 +228,54 @@ func (w *Watcher) tickExternalWebhook(ctx context.Context) {
 // pollExternalWebhook posts an empty body to the dev's callback URL. The dev
 // returns 200 with `{"shouldFire": true}` when the trigger is ready.
 //
+// Return contract:
+//   - (shouldFire, ready=true, nil):  callback answered 2xx + JSON decoded.
+//   - (false, ready=false, nil):      callback answered 3xx (treated as a
+//                                     benign "not ready" — bounce to armed
+//                                     without burning failure_count).
+//   - (_, _, err):                    real failure — bad JSON, non-2xx
+//                                     (excluding 3xx), unreachable, missing
+//                                     URL. Counts toward the circuit breaker.
+//
 // SSRF defense lives in the watcher loop (ValidateDispatch) and at
 // registration time (ValidateRegister); this function additionally refuses to
 // follow redirects (w.httpClient uses ErrUseLastResponse) so a 3xx cannot
-// bounce the request at a private IP. We strip the bearer token if the URL is
-// not HTTPS — bearers must never travel in clear. A 3xx is treated as
-// "not ready" (callbacks must answer 2xx to fire), never as success.
-func (w *Watcher) pollExternalWebhook(ctx context.Context, cond ConditionExternalWebhook) (bool, error) {
+// bounce the request at a private IP. Bearer tokens are stripped if the URL
+// is not HTTPS — bearers must never travel in clear.
+func (w *Watcher) pollExternalWebhook(ctx context.Context, cond ConditionExternalWebhook) (shouldFire bool, ready bool, err error) {
 	if cond.CallbackURL == "" {
-		return false, fmt.Errorf("callbackUrl missing")
+		return false, false, fmt.Errorf("callbackUrl missing")
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, cond.CallbackURL, nil)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	if cond.BearerToken != "" && strings.HasPrefix(strings.ToLower(cond.CallbackURL), "https://") {
 		req.Header.Set("Authorization", "Bearer "+cond.BearerToken)
 	}
 	resp, err := w.httpClient.Do(req)
 	if err != nil {
-		return false, fmt.Errorf("callback request: %w", err)
+		return false, false, fmt.Errorf("callback request: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
-		// Redirect — not followed on purpose. The callback isn't ready.
-		return false, nil
+		// Redirect — not followed on purpose. Benign "not ready".
+		return false, false, nil
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return false, fmt.Errorf("callback non-2xx: %d", resp.StatusCode)
+		return false, false, fmt.Errorf("callback non-2xx: %d", resp.StatusCode)
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	if err != nil {
-		return false, fmt.Errorf("read callback: %w", err)
+		return false, false, fmt.Errorf("read callback: %w", err)
 	}
 	var parsed struct {
 		ShouldFire bool `json:"shouldFire"`
 	}
 	if err := json.Unmarshal(body, &parsed); err != nil {
-		return false, fmt.Errorf("decode callback: %w", err)
+		return false, false, fmt.Errorf("decode callback: %w", err)
 	}
-	return parsed.ShouldFire, nil
+	return parsed.ShouldFire, true, nil
 }
 
 // ----- expiry loop -----

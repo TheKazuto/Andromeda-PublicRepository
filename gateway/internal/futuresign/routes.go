@@ -90,18 +90,13 @@ func handleCreate(opts RouteOptions) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "invalid_webhook_url", "webhookUrl is not allowed by security policy")
 			return
 		}
-		// External-webhook triggers also embed a callbackUrl inside `condition`.
-		// Vet it here so the watcher never polls a private-range / loopback IP.
-		if req.TriggerType == TriggerTypeExternalWebhook {
-			var cond ConditionExternalWebhook
-			if err := json.Unmarshal(req.Condition, &cond); err == nil &&
-				strings.TrimSpace(cond.CallbackURL) != "" {
-				if err := opts.urlGuard().ValidateRegister(r.Context(), cond.CallbackURL); err != nil {
-					writeError(w, http.StatusBadRequest, "invalid_callback_url",
-						"condition.callbackUrl is not allowed by security policy")
-					return
-				}
-			}
+		// Per-trigger-type condition validation. Catches malformed/empty
+		// conditions at create time so the watcher never tries to poll them
+		// later. Also re-runs the SSRF guard on external_webhook.callbackUrl
+		// (mirrors the webhookUrl check above).
+		if err := validateCondition(r.Context(), req.TriggerType, req.Condition, opts.urlGuard()); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_condition", err.Error())
+			return
 		}
 		// Defense-in-depth: ensure the dWalletAddress in the embedded
 		// completePayload matches the trigger's declared dwalletAddress so a

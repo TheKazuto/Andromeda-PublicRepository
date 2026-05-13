@@ -25,6 +25,10 @@ type checkStatus struct {
 	LatencyMs int    `json:"latencyMs,omitempty"`
 	Error     string `json:"error,omitempty"`
 	Skipped   bool   `json:"skipped,omitempty"`
+	// Detail is a tiny structured payload some checks attach (e.g. gas
+	// sponsor balance). Kept generic so callers can surface specifics
+	// without bloating checkStatus per probe.
+	Detail map[string]any `json:"detail,omitempty"`
 }
 
 type readyResponse struct {
@@ -72,6 +76,11 @@ func (s *Server) handleHealthReadiness(w http.ResponseWriter, r *http.Request) {
 	// even if the engines are temporarily down).
 	checks["ika_upstream"] = pingUpstream(ctx, s, "ika")
 	checks["encrypt_upstream"] = pingUpstream(ctx, s, "encrypt")
+
+	// Gas sponsor balance — non-critical (gateway still serves read-only
+	// flows when depleted), but surfaced so ops can refill before tenants
+	// hit "insufficient lamports" mid-flow.
+	checks["gas_sponsor"] = checkGasSponsor(ctx, s)
 
 	resp := readyResponse{
 		OK:          !criticalFailed,
@@ -131,6 +140,32 @@ func pingUpstream(ctx context.Context, s *Server, name string) checkStatus {
 			LatencyMs: int(time.Since(start).Milliseconds())}
 	}
 	return checkStatus{OK: true, LatencyMs: int(time.Since(start).Milliseconds())}
+}
+
+func checkGasSponsor(ctx context.Context, s *Server) checkStatus {
+	if s.policyService == nil || s.policyService.GasSponsor == nil {
+		return checkStatus{OK: true, Skipped: true}
+	}
+	start := time.Now()
+	probeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	healthy, bal, err := s.policyService.GasSponsor.Healthy(probeCtx)
+	latency := int(time.Since(start).Milliseconds())
+	if err != nil {
+		// Network error talking to Solana RPC — surface as not-ok but do
+		// NOT leak the underlying RPC URL/host in the message.
+		return checkStatus{OK: false, Error: "balance probe failed", LatencyMs: latency}
+	}
+	detail := map[string]any{
+		"balance_lamports": bal,
+	}
+	if !healthy {
+		return checkStatus{
+			OK: false, LatencyMs: latency, Detail: detail,
+			Error: "gas sponsor balance below minimum",
+		}
+	}
+	return checkStatus{OK: true, LatencyMs: latency, Detail: detail}
 }
 
 func httpStatusText(code int) string {

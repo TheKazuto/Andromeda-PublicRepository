@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/rpc"
@@ -61,6 +62,33 @@ func (s *Signer) PublicKey() solana.PublicKey {
 	return s.publicKey
 }
 
+// MinHealthyBalanceLamports is the soft floor the gas sponsor must keep to
+// stay healthy. 0.05 SOL covers ~10000 vote-priced txs on devnet. When the
+// balance drops below this, Healthy() returns false so /readyz can surface
+// the depletion before tenants hit "insufficient lamports" mid-flow.
+const MinHealthyBalanceLamports = 50_000_000 // 0.05 SOL
+
+// Balance returns the current lamport balance for the sponsor pubkey.
+func (s *Signer) Balance(ctx context.Context) (uint64, error) {
+	res, err := s.rpc.GetBalance(ctx, s.publicKey, rpc.CommitmentConfirmed)
+	if err != nil {
+		return 0, fmt.Errorf("gasponsor balance: %w", err)
+	}
+	return res.Value, nil
+}
+
+// Healthy reports whether the gas sponsor has enough lamports to keep
+// serving (`balance >= MinHealthyBalanceLamports`). Callers use this from
+// the readiness probe and metrics scraper. Network failure is treated as
+// "unknown" (returns false, error) — the caller decides whether to alert.
+func (s *Signer) Healthy(ctx context.Context) (bool, uint64, error) {
+	bal, err := s.Balance(ctx)
+	if err != nil {
+		return false, 0, err
+	}
+	return bal >= MinHealthyBalanceLamports, bal, nil
+}
+
 // SignAndSend builds a v0 Solana transaction with the gas sponsor as fee
 // payer, signs it, sends it via RPC, and returns `(txSignature, error)`.
 func (s *Signer) SignAndSend(ctx context.Context, ixs []solana.Instruction) (solana.Signature, error) {
@@ -91,4 +119,54 @@ func (s *Signer) SignAndSend(ctx context.Context, ixs []solana.Instruction) (sol
 		return solana.Signature{}, fmt.Errorf("send tx: %w", err)
 	}
 	return sig, nil
+}
+
+// ErrConfirmationTimeout signals that WaitForConfirmation gave up before the
+// transaction reached the requested commitment. The tx may still confirm
+// later — callers decide whether to treat it as a hard failure.
+var ErrConfirmationTimeout = errors.New("transaction confirmation timed out")
+
+// WaitForConfirmation polls GetSignatureStatuses until `sig` reaches
+// `commitment` (confirmed or finalized) or `timeout` elapses. Callers use
+// this between SignAndSend and any persistence step that should only happen
+// after the transaction is durable (e.g. policy_subscriptions). Returns
+// ErrConfirmationTimeout if the deadline trips.
+//
+// commitment must be rpc.CommitmentConfirmed or rpc.CommitmentFinalized.
+// Other values are coerced to CommitmentConfirmed.
+func (s *Signer) WaitForConfirmation(ctx context.Context, sig solana.Signature, commitment rpc.CommitmentType, timeout time.Duration) error {
+	if commitment != rpc.CommitmentConfirmed && commitment != rpc.CommitmentFinalized {
+		commitment = rpc.CommitmentConfirmed
+	}
+	deadline := time.Now().Add(timeout)
+	tick := time.NewTicker(400 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-tick.C:
+		}
+		res, err := s.rpc.GetSignatureStatuses(ctx, true, sig)
+		if err == nil && res != nil && len(res.Value) > 0 && res.Value[0] != nil {
+			st := res.Value[0]
+			if st.Err != nil {
+				return fmt.Errorf("transaction failed on-chain: %v", st.Err)
+			}
+			switch commitment {
+			case rpc.CommitmentFinalized:
+				if st.ConfirmationStatus == rpc.ConfirmationStatusFinalized {
+					return nil
+				}
+			default:
+				if st.ConfirmationStatus == rpc.ConfirmationStatusConfirmed ||
+					st.ConfirmationStatus == rpc.ConfirmationStatusFinalized {
+					return nil
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			return ErrConfirmationTimeout
+		}
+	}
 }

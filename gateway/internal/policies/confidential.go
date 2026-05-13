@@ -3,7 +3,6 @@ package policies
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
@@ -22,11 +21,16 @@ import (
 // `encrypt-backend` (FHE evaluation) + Ika (signing) under a single REST
 // endpoint. The dev provides the policy + dwallet + message; the gateway:
 //
-//   1. Asks encrypt-backend to evaluate the FHE graph and produce a signed
-//      `EncryptedDecision` (ed25519 over [policy || message_digest ||
-//      created_slot || authorize], signed inside the KMS).
-//   2. Builds the fhe-gated::request_signature ix with the decision bytes
-//      embedded.
+//   1. Forwards `message_digest` verbatim to encrypt-backend, which evaluates
+//      the FHE graph and produces an `EncryptedDecision` signed by Vault
+//      Transit `andromeda-fhe` over the canonical 32-byte digest:
+//        sha256(domain || policy || message_digest || slot || authorize).
+//   2. Builds the fhe-gated::request_signature ix bundle (Ed25519 precompile
+//      + main ix) using `FHEGatedDecisionCanonicalBytes` — which recomputes
+//      the SAME digest from (policy, message_digest, slot, authorize). Any
+//      drift between the gateway/contract/encrypt-backend digest layouts
+//      breaks the precompile, so the three sides are pinned to
+//      `fixtures/fhe-decision-vectors.json` via CI.
 //   3. Returns the unsigned tx for the dev to sign locally, just like every
 //      other request_signature endpoint — preserving custody-free.
 //
@@ -40,12 +44,14 @@ type ConfidentialSignClient interface {
 }
 
 // DecisionRequest mirrors the body the encrypt-backend `decision/sign` route
-// accepts.
+// accepts. `MessageDigestHex` is the 32-byte hash of the user's message —
+// the SAME bytes bound into the on-chain MessageApproval. Forwarded verbatim
+// so the encrypt-backend can reconstruct the canonical decision digest.
 type DecisionRequest struct {
-	PolicyAddress   string   `json:"policy_address"`
-	RequestHashHex  string   `json:"request_hash_hex"`
-	OperationName   string   `json:"operation_name"`
-	EncryptedInputs []string `json:"encrypted_inputs"` // ciphertext refs
+	PolicyAddress    string   `json:"policy_address"`
+	MessageDigestHex string   `json:"message_digest_hex"`
+	OperationName    string   `json:"operation_name"`
+	EncryptedInputs  []string `json:"encrypted_inputs"` // ciphertext refs
 	// MockAuthorize is forwarded to encrypt-backend; honoured only when
 	// FHE_MOCK_MODE=true on that side. Devnet/test paths only — production
 	// must leave it unset and rely on real FHE evaluation once the Encrypt
@@ -53,14 +59,15 @@ type DecisionRequest struct {
 	MockAuthorize *bool `json:"mock_authorize,omitempty"`
 }
 
-// DecisionResponse is what the encrypt-backend returns: the canonical
-// `EncryptedDecision` bytes split into the parts the on-chain program needs.
+// DecisionResponse is what the encrypt-backend returns. The signature is an
+// Ed25519 over `decisionCanonicalBytes(policy, message_digest, slot, auth)`
+// — verified on-chain via the Ed25519 precompile we attach in the same tx.
 type DecisionResponse struct {
-	RequestHashHex  string `json:"request_hash_hex"`
-	CreatedSlot     uint64 `json:"created_slot"`
-	Authorize       bool   `json:"authorize"`
-	SignatureB64    string `json:"signature_base64"`     // ed25519 over canonical decision bytes
-	FHEAuthorityB64 string `json:"fhe_authority_base64"` // pubkey for client-side verification
+	MessageDigestHex string `json:"message_digest_hex"`
+	CreatedSlot      uint64 `json:"created_slot"`
+	Authorize        bool   `json:"authorize"`
+	SignatureB64     string `json:"signature_base64"`     // ed25519 over canonical decision digest
+	FHEAuthorityB64  string `json:"fhe_authority_base64"` // pubkey for client-side verification
 }
 
 // HTTPConfidentialClient is the production implementation that POSTs to the
@@ -103,7 +110,11 @@ func (c *HTTPConfidentialClient) SignDecision(ctx context.Context, req DecisionR
 	defer resp.Body.Close()
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("decision/sign non-2xx: %d body=%s", resp.StatusCode, string(respBody))
+		// Do NOT embed the raw upstream body in the returned error — the
+		// caller logs the full detail server-side via slog. Returning the
+		// body would surface internal hostnames / KMS error messages to
+		// the public API consumer.
+		return nil, fmt.Errorf("decision/sign upstream non-2xx: status=%d", resp.StatusCode)
 	}
 	var parsed DecisionResponse
 	if err := json.Unmarshal(respBody, &parsed); err != nil {
@@ -135,18 +146,6 @@ type confidentialSignReq struct {
 	// Audit M4: required FHE authority pubkey — the on-chain program now
 	// validates this against the hardcoded `ALLOWED_FHE_AUTHORITIES`.
 	FHEAuthorityAddress string `json:"fhe_authority_address"`
-}
-
-// canonicalRequestHash binds the policy + message in a stable hash that both
-// the gateway and the encrypt-backend agree on. The on-chain fhe-gated
-// program accepts only decisions that were minted for THIS specific message,
-// preventing decision-replay across messages.
-func canonicalRequestHash(policy solana.PublicKey, messageDigest []byte) []byte {
-	h := sha256.New()
-	h.Write(policy.Bytes())
-	h.Write(messageDigest)
-	out := h.Sum(nil)
-	return out
 }
 
 // confidentialSign is the handler for POST /v1/confidential/sign — the §3
@@ -210,26 +209,40 @@ func (s *Service) confidentialSign(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Compute the canonical request hash and ask the encrypt-backend to sign
-	// an EncryptedDecision over it.
-	requestHash := canonicalRequestHash(policyPub, msg[:])
-
+	// Forward the message_digest verbatim to encrypt-backend. It will compute
+	// the canonical decision digest:
+	//   sha256(domain || policy || message_digest || slot || authorize)
+	// and ask Vault Transit to ed25519-sign exactly those bytes. The on-chain
+	// fhe-gated program recomputes the same digest from the MessageApproval
+	// bytes, so any drift breaks the Ed25519 precompile.
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 	decision, err := s.ConfidentialClient.SignDecision(ctx, DecisionRequest{
-		PolicyAddress:   policyPub.String(),
-		RequestHashHex:  hex.EncodeToString(requestHash),
-		OperationName:   req.OperationName,
-		EncryptedInputs: req.EncryptedInputs,
-		MockAuthorize:   req.MockAuthorize,
+		PolicyAddress:    policyPub.String(),
+		MessageDigestHex: hex.EncodeToString(msg[:]),
+		OperationName:    req.OperationName,
+		EncryptedInputs:  req.EncryptedInputs,
+		MockAuthorize:    req.MockAuthorize,
 	})
 	if err != nil {
-		writeErr(w, http.StatusBadGateway, "fhe_decision_failed", err.Error())
+		// Upstream errors may include raw response bodies, status codes
+		// (e.g. 502 from Vault), and internal hostnames. Log the full
+		// detail server-side; return a stable, sanitised code to the
+		// caller. requestId from the chi middleware lets ops correlate.
+		s.log().Warn("confidential decision upstream failed",
+			"err", err.Error(),
+			"policy", policyPub.String(),
+			"operation", req.OperationName,
+		)
+		writeErr(w, http.StatusBadGateway, "fhe_decision_failed",
+			"FHE decision signing failed upstream")
 		return
 	}
 	if decision == nil || decision.SignatureB64 == "" {
+		s.log().Warn("confidential decision returned empty signature",
+			"policy", policyPub.String())
 		writeErr(w, http.StatusBadGateway, "fhe_decision_invalid",
-			"encrypt-backend returned an empty decision — confirm KMS configuration")
+			"FHE decision returned an empty signature")
 		return
 	}
 	if !decision.Authorize {

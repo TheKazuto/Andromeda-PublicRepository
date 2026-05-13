@@ -116,8 +116,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			refund.Refund(r.Context())
 		}
 		if err != nil {
+			// Log the full upstream error server-side; return a stable,
+			// sanitised code to the MCP client. The handler error may
+			// contain raw upstream bodies, internal hostnames, or Vault
+			// status codes — never echo those across the trust boundary.
 			h.logger.Error("mcp tool error", "tool", p.Name, "err", err)
-			writeError(w, http.StatusInternalServerError, req.ID, rpcInternalError, err.Error())
+			writeError(w, http.StatusInternalServerError, req.ID,
+				rpcInternalError, "tool_execution_failed")
 			return
 		}
 		writeResult(w, req.ID, res)

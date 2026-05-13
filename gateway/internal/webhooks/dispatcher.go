@@ -24,6 +24,13 @@ const (
 	dispatcherTick     = 5 * time.Second
 )
 
+// DispatcherMetrics is the minimum metrics surface the dispatcher uses.
+// Lets us record `deliveries_total{outcome=...}` without depending on the
+// gateway metrics package directly. Nil-safe via the recordOutcome helper.
+type DispatcherMetrics interface {
+	RecordDeliveryOutcome(outcome string)
+}
+
 // Dispatcher pulls pending deliveries from the store, POSTs them with HMAC
 // signatures, and reschedules with exponential backoff on failure.
 type Dispatcher struct {
@@ -31,6 +38,7 @@ type Dispatcher struct {
 	httpClient *http.Client
 	logger     *slog.Logger
 	urlGuard   *netsafety.Validator
+	metrics    DispatcherMetrics
 
 	maxAttempts int
 	maxBackoff  time.Duration
@@ -60,6 +68,33 @@ func (d *Dispatcher) WithURLGuard(g *netsafety.Validator) *Dispatcher {
 		d.urlGuard = g
 	}
 	return d
+}
+
+// WithMetrics wires the metrics recorder. Returning *Dispatcher keeps the
+// fluent main.go wiring style.
+func (d *Dispatcher) WithMetrics(m DispatcherMetrics) *Dispatcher {
+	d.metrics = m
+	return d
+}
+
+func (d *Dispatcher) recordOutcome(outcome string) {
+	if d.metrics != nil {
+		d.metrics.RecordDeliveryOutcome(outcome)
+	}
+}
+
+// statusOutcome maps an HTTP status code to a coarse `outcome` label.
+func statusOutcome(code int) string {
+	switch {
+	case code >= 200 && code < 300:
+		return "2xx"
+	case code >= 400 && code < 500:
+		return "4xx"
+	case code >= 500 && code < 600:
+		return "5xx"
+	default:
+		return "other"
+	}
 }
 
 // Run blocks until ctx is cancelled, ticking every `dispatcherTick`.
@@ -95,15 +130,26 @@ func (d *Dispatcher) deliver(ctx context.Context, dlv *Delivery) {
 		d.logger.Warn("endpoint lookup failed", "delivery_id", dlv.ID, "err", err)
 		_ = d.store.MarkFailed(ctx, dlv.ID, 0, fmt.Sprintf("endpoint lookup: %v", err),
 			time.Now().Add(d.backoff(dlv.Attempts)), d.exhausted(dlv.Attempts))
+		if d.exhausted(dlv.Attempts) {
+			d.recordOutcome("dead_letter")
+		} else {
+			d.recordOutcome("network_error")
+		}
 		return
 	}
 	if !endpoint.Active {
 		_ = d.store.MarkFailed(ctx, dlv.ID, 0, "endpoint inactive", time.Now().Add(d.maxBackoff), true)
+		d.recordOutcome("dead_letter")
 		return
 	}
 	if err := d.urlGuard.ValidateDispatch(ctx, endpoint.URL); err != nil {
 		_ = d.store.MarkFailed(ctx, dlv.ID, 0, "endpoint URL rejected by url guard",
 			time.Now().Add(d.backoff(dlv.Attempts)), d.exhausted(dlv.Attempts))
+		if d.exhausted(dlv.Attempts) {
+			d.recordOutcome("dead_letter")
+		} else {
+			d.recordOutcome("network_error")
+		}
 		return
 	}
 
@@ -117,6 +163,11 @@ func (d *Dispatcher) deliver(ctx context.Context, dlv *Delivery) {
 	if err != nil {
 		_ = d.store.MarkFailed(ctx, dlv.ID, 0, err.Error(),
 			time.Now().Add(d.backoff(dlv.Attempts)), d.exhausted(dlv.Attempts))
+		if d.exhausted(dlv.Attempts) {
+			d.recordOutcome("dead_letter")
+		} else {
+			d.recordOutcome("network_error")
+		}
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -130,6 +181,11 @@ func (d *Dispatcher) deliver(ctx context.Context, dlv *Delivery) {
 	if err != nil {
 		_ = d.store.MarkFailed(ctx, dlv.ID, 0, err.Error(),
 			time.Now().Add(d.backoff(dlv.Attempts)), d.exhausted(dlv.Attempts))
+		if d.exhausted(dlv.Attempts) {
+			d.recordOutcome("dead_letter")
+		} else {
+			d.recordOutcome("network_error")
+		}
 		return
 	}
 	defer resp.Body.Close()
@@ -138,10 +194,16 @@ func (d *Dispatcher) deliver(ctx context.Context, dlv *Delivery) {
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		_ = d.store.MarkDelivered(ctx, dlv.ID, resp.StatusCode, body)
+		d.recordOutcome("2xx")
 		return
 	}
 	_ = d.store.MarkFailed(ctx, dlv.ID, resp.StatusCode, body,
 		time.Now().Add(d.backoff(dlv.Attempts)), d.exhausted(dlv.Attempts))
+	if d.exhausted(dlv.Attempts) {
+		d.recordOutcome("dead_letter")
+	} else {
+		d.recordOutcome(statusOutcome(resp.StatusCode))
+	}
 }
 
 func (d *Dispatcher) backoff(attempts int) time.Duration {

@@ -46,8 +46,9 @@ type Server struct {
 	auditReader      *audit.Reader
 	webhookStore     *webhooks.Store
 	policyService    *policies.Service
-	futureSignStore  *futuresign.Store
-	mcpTools         *mcp.ToolRegistry
+	futureSignStore          *futuresign.Store
+	futureSignWatcherRunning bool
+	mcpTools                 *mcp.ToolRegistry
 	metrics          *gwmetrics.Metrics
 	metricsHandler   http.Handler
 	urlGuard         *netsafety.Validator
@@ -73,7 +74,12 @@ type Deps struct {
 	PolicyService       *policies.Service
 	PolicySubscriptions *policies.SubscriptionsStore
 	FutureSignStore     *futuresign.Store
-	Metrics             *gwmetrics.Metrics
+	// FutureSignWatcherRunning signals that the in-process watcher goroutines
+	// (slot_time + external_webhook loops) have been started. Capabilities
+	// only reports `futureSign: true` when BOTH the store is wired AND this
+	// flag is set — otherwise armed triggers would sit forever.
+	FutureSignWatcherRunning bool
+	Metrics                  *gwmetrics.Metrics
 	MetricsHandler      http.Handler
 	// URLGuard is the SSRF validator used for tenant-supplied webhook /
 	// future-sign callback URLs. nil → a ModeProduction guard.
@@ -159,8 +165,9 @@ func NewServer(d Deps) *Server {
 		auditReader:      reader,
 		webhookStore:     d.WebhookStore,
 		policyService:    d.PolicyService,
-		futureSignStore:  d.FutureSignStore,
-		mcpTools:         tools,
+		futureSignStore:          d.FutureSignStore,
+		futureSignWatcherRunning: d.FutureSignWatcherRunning,
+		mcpTools:                 tools,
 		metrics:          d.Metrics,
 		metricsHandler:   d.MetricsHandler,
 		urlGuard:         urlGuard,
@@ -186,7 +193,7 @@ func (s *Server) Router() http.Handler {
 		r.Use(cors.Handler(cors.Options{
 			AllowedOrigins:   s.cfg.AllowedOrigins,
 			AllowedMethods:   []string{"GET", "POST", "PATCH", "DELETE", "OPTIONS"},
-			AllowedHeaders:   []string{"Authorization", "Content-Type", "X-Api-Key"},
+			AllowedHeaders:   []string{"Authorization", "Content-Type", "X-Api-Key", "Idempotency-Key"},
 			AllowCredentials: false,
 			MaxAge:           300,
 		}))
