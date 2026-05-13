@@ -1,13 +1,13 @@
 # andromeda-backend
 
-Product-side service of Andromeda. Handles signup/login, API key management, billing (Stripe), gift cards, customer endpoints (`/v1/me/*`) and the admin console (`/admin/*`).
+Product-side service of Andromeda. Handles signup/login, API key management, billing (Stripe), gift cards, customer endpoints (`/v1/me/*`), tenant configuration for Login Social (`/v1/oauth/redirects`), and the admin console (`/admin/*`).
 
 Stack: Go 1.25 · chi · pgx · JWT · bcrypt · Stripe · OAuth (Google/GitHub) · TOTP · Railway.
 
 ## Communicates with
 
 - **`dashboard/`** — consumes every customer route (`/v1/auth/*`, `/v1/me/*`, `/v1/api-keys`, `/v1/billing/*`, `/v1/gifts/*`) and the admin console (`/admin/*`).
-- **`gateway/`** — shares the same Postgres pool. Schema is owned by the gateway; the backend reads/writes through the same DB.
+- **`gateway/`** — shares the same Postgres pool. Schema is owned by the gateway; the backend reads/writes through the same DB. The `tenant_oauth_redirects` table (Login Social) is one such shared table: backend manages CRUD for tenants, gateway reads it at `/v1/oauth/authorize` time.
 - **Stripe** — Checkout, Customer Portal, metered overage, webhooks.
 - **SMTP provider** — password reset and notification emails.
 
@@ -57,6 +57,9 @@ backend/
 | POST   | `/v1/api-keys` | Bearer | Create API key (raw key shown once). Accepts optional `allowedOrigins` |
 | PATCH  | `/v1/api-keys/{id}` | Bearer | Update name and/or `allowedOrigins` |
 | DELETE | `/v1/api-keys/{id}` | Bearer | Revoke API key |
+| GET    | `/v1/oauth/redirects` | Bearer | List the tenant's OAuth redirect URIs (Login Social broker allowlist) |
+| POST   | `/v1/oauth/redirects` | Bearer | Add a redirect URI (HTTPS-only in prod, max 20 per tenant). Consumed by the gateway broker at `/v1/oauth/authorize` |
+| DELETE | `/v1/oauth/redirects?redirectUri=<uri>` | Bearer | Remove a redirect URI |
 | GET    | `/v1/pricing/plans` | — | Public plan catalogue |
 | GET    | `/v1/gifts/preview/{token}` | — | Preview gift card |
 | POST   | `/v1/gifts/redeem` | Bearer | Redeem gift card |
