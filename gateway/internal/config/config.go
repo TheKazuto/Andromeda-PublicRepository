@@ -76,6 +76,12 @@ type Config struct {
 	// responsible for prefixing.
 	DashboardBaseURL string
 
+	// OAuthBroker — Login Social broker (loginsocial.md §5.4 item 1).
+	// Disabled by default; when enabled the gateway mounts the
+	// /v1/oauth/{authorize,callback,token-exchange} routes that intermediate
+	// Google/Apple OAuth and return short-lived id_tokens to tenant apps.
+	OAuthBroker OAuthBrokerConfig
+
 	// Admin envs (ADMIN_JWT_SECRET, ANDROMEDA_BOOTSTRAP_ADMIN_*) moved
 	// to the backend service in M4. Gateway only keeps ADMIN_TOKEN as a
 	// shared-secret guard for /metrics. SMTP and Stripe envs likewise
@@ -86,6 +92,48 @@ type Config struct {
 	// these through slog after the logger is up. validate() itself has no
 	// log side effects.
 	Warnings []string
+}
+
+// OAuthBrokerConfig holds the Login Social OAuth broker settings. See
+// loginsocial.md §5.4 item 1 + §6.2: the broker hosts the Andromeda OAuth
+// client (one client_id per environment), intermediates the handshake with
+// Google/Apple using `scope=openid` only, and returns the resulting id_token
+// to the tenant app via Authorization Code + PKCE.
+type OAuthBrokerConfig struct {
+	// Enabled gates the whole feature. When false the broker routes are
+	// not mounted and the gateway boots without checking the rest of this
+	// struct.
+	Enabled bool
+
+	// BaseURL is the publicly reachable URL of the broker (used to build
+	// the OAuth redirect_uri sent to Google/Apple — must match the URI
+	// registered in the providers' consoles). Example:
+	// https://gateway.andromeda.shinka.dev
+	BaseURL string
+
+	// StateHMACSecret signs the short-lived OAuth state cookie. Must be
+	// at least 32 bytes (base64 or raw). Rotating this invalidates all
+	// in-flight handshakes (the cookie TTL is 10 minutes).
+	StateHMACSecret string
+
+	// CodeTTLSeconds is how long a short_code returned to the tenant app
+	// is valid for the POST /v1/oauth/token-exchange call. Default 60s.
+	// Must be >= 30 and <= 300.
+	CodeTTLSeconds int
+
+	// GoogleEnabled toggles the Google provider. When true, the two
+	// GoogleClient{ID,Secret} fields are required.
+	GoogleEnabled bool
+	GoogleClientID     string
+	GoogleClientSecret string
+
+	// AppleEnabled toggles the Apple provider. When true, the Apple
+	// service id + signing key fields below are all required.
+	AppleEnabled    bool
+	AppleServiceID  string // a.k.a. client_id
+	AppleTeamID     string // 10-char team identifier from Apple Developer
+	AppleKeyID      string // 10-char key identifier from Apple Developer
+	ApplePrivateKey string // ES256 PEM (PKCS#8). Used to sign the client_secret JWT.
 }
 
 func Load() *Config {
@@ -121,6 +169,20 @@ func Load() *Config {
 		SDKBaseURL:             strings.TrimRight(getenv("ANDROMEDA_SDK_BASE_URL", ""), "/"),
 		SDKVersionTag:          getenv("ANDROMEDA_SDK_VERSION_TAG", "sdk-v0.1.0"),
 		DashboardBaseURL:       strings.TrimRight(getenv("ANDROMEDA_DASHBOARD_BASE_URL", ""), "/"),
+		OAuthBroker: OAuthBrokerConfig{
+			Enabled:            getenvBool("OAUTH_BROKER_ENABLED", false),
+			BaseURL:            strings.TrimRight(getenv("OAUTH_BROKER_BASE_URL", ""), "/"),
+			StateHMACSecret:    getenv("OAUTH_BROKER_STATE_HMAC_SECRET", ""),
+			CodeTTLSeconds:     getenvInt("OAUTH_BROKER_CODE_TTL_SECONDS", 60),
+			GoogleEnabled:      getenvBool("OAUTH_BROKER_GOOGLE_ENABLED", false),
+			GoogleClientID:     getenv("OAUTH_BROKER_GOOGLE_CLIENT_ID", ""),
+			GoogleClientSecret: getenv("OAUTH_BROKER_GOOGLE_CLIENT_SECRET", ""),
+			AppleEnabled:       getenvBool("OAUTH_BROKER_APPLE_ENABLED", false),
+			AppleServiceID:     getenv("OAUTH_BROKER_APPLE_SERVICE_ID", ""),
+			AppleTeamID:        getenv("OAUTH_BROKER_APPLE_TEAM_ID", ""),
+			AppleKeyID:         getenv("OAUTH_BROKER_APPLE_KEY_ID", ""),
+			ApplePrivateKey:    getenv("OAUTH_BROKER_APPLE_PRIVATE_KEY", ""),
+		},
 	}
 
 	if err := cfg.validate(); err != nil {
@@ -188,6 +250,49 @@ func (c *Config) validate() error {
 		// advisory so operators migrate to Vault. See docs/AUDIT_KMS.md.
 		c.Warnings = append(c.Warnings,
 			"ANDROMEDA_AUDIT_SIGNER=env in production — migrate to 'vault' (see docs/AUDIT_KMS.md)")
+	}
+	if err := c.validateOAuthBroker(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (c *Config) validateOAuthBroker() error {
+	b := &c.OAuthBroker
+	if !b.Enabled {
+		return nil
+	}
+	if b.BaseURL == "" {
+		return fmt.Errorf("OAUTH_BROKER_BASE_URL is required when OAUTH_BROKER_ENABLED=true")
+	}
+	if !strings.HasPrefix(b.BaseURL, "https://") && c.Env == "production" {
+		return fmt.Errorf("OAUTH_BROKER_BASE_URL must be https:// in production (got %q)", b.BaseURL)
+	}
+	if len(b.StateHMACSecret) < 32 {
+		return fmt.Errorf("OAUTH_BROKER_STATE_HMAC_SECRET must be at least 32 bytes when OAUTH_BROKER_ENABLED=true")
+	}
+	if b.CodeTTLSeconds < 30 || b.CodeTTLSeconds > 300 {
+		return fmt.Errorf("OAUTH_BROKER_CODE_TTL_SECONDS must be in [30, 300] (got %d)", b.CodeTTLSeconds)
+	}
+	if !b.GoogleEnabled && !b.AppleEnabled {
+		return fmt.Errorf("OAUTH_BROKER_ENABLED=true requires at least one provider (OAUTH_BROKER_GOOGLE_ENABLED or OAUTH_BROKER_APPLE_ENABLED)")
+	}
+	if b.GoogleEnabled {
+		if b.GoogleClientID == "" || b.GoogleClientSecret == "" {
+			return fmt.Errorf("OAUTH_BROKER_GOOGLE_ENABLED=true requires OAUTH_BROKER_GOOGLE_CLIENT_ID and OAUTH_BROKER_GOOGLE_CLIENT_SECRET")
+		}
+	}
+	if b.AppleEnabled {
+		if b.AppleServiceID == "" || b.AppleTeamID == "" || b.AppleKeyID == "" || b.ApplePrivateKey == "" {
+			return fmt.Errorf("OAUTH_BROKER_APPLE_ENABLED=true requires OAUTH_BROKER_APPLE_{SERVICE_ID,TEAM_ID,KEY_ID,PRIVATE_KEY}")
+		}
+		if len(b.AppleTeamID) != 10 || len(b.AppleKeyID) != 10 {
+			c.Warnings = append(c.Warnings,
+				"OAUTH_BROKER_APPLE_{TEAM_ID,KEY_ID} are typically 10 characters — double-check the values")
+		}
+	}
+	if c.RedisURL == "" {
+		return fmt.Errorf("OAUTH_BROKER_ENABLED=true requires REDIS_URL (the short-lived code↔id_token store needs Redis)")
 	}
 	return nil
 }

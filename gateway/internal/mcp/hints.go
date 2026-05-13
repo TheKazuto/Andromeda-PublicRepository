@@ -298,6 +298,105 @@ var routeHints = map[string]routeHint{
 		}, "dwalletAddress", "initAuthorityHashBase64"),
 	},
 
+	// --- Login Social (OIDC primary recovery; scheme = 4) ---
+	// Flow: stage the provider id_token → open a short-lived OidcSession bound
+	// to an ephemeral Ed25519 key the user holds → authorize each signature with
+	// that key → close on expiry. Andromeda pays all gas. The user's wallet is
+	// never a Solana signer; they only sign the 32-byte challenges off-chain.
+	// Pre-validate the id_token with ika.oidc.validate before staging.
+	"ika.oidc.nonce": {
+		Description: "Login Social step 0: given the user's ephemeral Ed25519 public key, the server picks `not_after` (default ≈ 9 min — short enough to fit inside an Apple id_token's life even after the OAuth round-trip) and `nonce_randomness`, and returns the canonical `oidc_nonce` to use as the OAuth `nonce` (scope=openid). The client never needs to know the byte layout. You may optionally pass `notAfterUnixTs` to override the default (must be in (now, now+3600]). Returns {oidcNonce (43-char base64url), notAfterUnixTs, nonceRandomnessBase64} — keep `notAfterUnixTs` and `nonceRandomnessBase64`, they're needed by the open step. (REST: POST /v1/oidc/nonce → ika-backend.)",
+		BodyRequired: true,
+		BodySchema: obj(map[string]any{
+			"ephPkBase64":    str("Base64 of the user's ephemeral Ed25519 public key (32 bytes), generated on-device (e.g. WebCrypto). The matching private key stays on the device and signs the session challenges later."),
+			"notAfterUnixTs": map[string]any{"type": "integer", "minimum": 0, "description": "Optional override (unix seconds, in (now, now+3600]). Omit to let the server pick a safe default."},
+		}, "ephPkBase64"),
+	},
+	"ika.oidc.validate": {
+		Description: "Login Social step 1: server-side pre-validation of an OIDC `id_token` (Google/Apple), against the provider JWKS. Run this BEFORE ika.recovery.primary.oidc.stage so you don't spend gas on a bad token. Checks signature, issuer, audience (the Andromeda auth-broker client_id), exp/iat/nbf, alg=RS256, kid, sub, and that `nonce` is a 43-char base64url string. Returns {valid, provider, addrSeed, issuerHash, audienceHash, subjectHash, expiresAt} (all base64) — never the raw sub or JWT. (REST: POST /v1/oidc/validate → ika-backend.)",
+		BodyRequired: true,
+		BodySchema: obj(map[string]any{
+			"idToken": map[string]any{"type": "string", "minLength": 1, "maxLength": 4096, "description": "The provider `id_token` (a compact RS256 JWT, ≤ 4096 chars) obtained from Google/Apple with `scope=openid` and `nonce` = the `oidcNonce` returned by ika.oidc.nonce."},
+		}, "idToken"),
+	},
+	"ika.recovery.primary.oidc.stage": {
+		Description: "Login Social step 1: stage a verified `id_token` into a temporary on-chain PDA so the (larger) `open` step can verify it on-chain without exceeding the tx-size limit. Gas-sponsored. Validate the token first with ika.oidc.validate. Returns {txSignature, stagingAddress, stagingNonce}. Only works for a dWallet whose policy primary is an OIDC identity `[4, addr_seed, 0]`. (REST: POST /v1/recovery/primary/oidc/stage → ika-backend.)",
+		BodyRequired: true,
+		BodySchema: obj(map[string]any{
+			"dwalletAddress":          str("Base58 address of the dWallet."),
+			"initAuthorityHashBase64": str("32-byte base64 hash from ika.dwallet.create / ika.recovery.policy.deploy — required to derive the policy PDA."),
+			"idToken":                 map[string]any{"type": "string", "minLength": 1, "maxLength": 4096, "description": "The provider `id_token` (compact RS256 JWT, ≤ 4096 chars). Re-validated server-side before any gas is spent."},
+		}, "dwalletAddress", "initAuthorityHashBase64", "idToken"),
+	},
+	"ika.recovery.primary.oidc.open.challenge": {
+		Description: "Login Social step 2a (read-only): given the staged JWT and the ephemeral key parameters, returns the 32-byte `oidc-session-open` challenge the EPHEMERAL Ed25519 key must sign, plus {expectedSessionNonce, sessionAddress, jwkRegistryAddress, jwkRegistryBump, oidcVerifierVersion, addrSeedBase64, jwtExpiresAt}. (REST: POST /v1/recovery/primary/oidc/open/challenge → ika-backend.)",
+		BodyRequired: true,
+		BodySchema: obj(map[string]any{
+			"dwalletAddress":          str("Base58 address of the dWallet."),
+			"initAuthorityHashBase64": str("32-byte base64 hash from ika.dwallet.create / ika.recovery.policy.deploy."),
+			"stagingAddress":          str("Base58 address of the OidcJwtStaging PDA returned by ika.recovery.primary.oidc.stage."),
+			"ephPkBase64":             str("Base64 of the user's ephemeral Ed25519 public key (32 bytes) — the same one whose corresponding `nonce` was in the id_token."),
+			"notAfterUnixTs":          map[string]any{"type": "integer", "minimum": 0, "description": "The `not_after` (unix seconds) the client chose when deriving `oidc_nonce`; must be ≤ the JWT's `exp`."},
+			"nonceRandomnessBase64":   str("Base64 of the 32 random bytes used to derive `oidc_nonce`."),
+		}, "dwalletAddress", "initAuthorityHashBase64", "stagingAddress", "ephPkBase64", "notAfterUnixTs", "nonceRandomnessBase64"),
+	},
+	"ika.recovery.primary.oidc.open": {
+		Description: "Login Social step 2b: submit the ephemeral key's signature over the `oidc-session-open` challenge. Andromeda re-validates the staged JWT, builds the Solana tx `[Ed25519 precompile (eph_pk, challenge)] + oidc_session_open` (which verifies the RSA signature + claims + JWK registry on-chain), signs it as gas sponsor, and submits — the staging PDA is consumed (rent refunded). Returns {txSignature, sessionAddress}. The session expires at `min(not_after, min(jwt.exp, now + 600s))`. (REST: POST /v1/recovery/primary/oidc/open → ika-backend.)",
+		BodyRequired: true,
+		BodySchema: obj(map[string]any{
+			"dwalletAddress":          str("Base58 address of the dWallet."),
+			"initAuthorityHashBase64": str("32-byte base64 hash (same as the challenge call)."),
+			"stagingAddress":          str("Base58 address of the OidcJwtStaging PDA."),
+			"ephPkBase64":             str("Base64 of the ephemeral Ed25519 public key (32 bytes)."),
+			"notAfterUnixTs":          map[string]any{"type": "integer", "minimum": 0, "description": "Same `not_after` used to derive `oidc_nonce`."},
+			"nonceRandomnessBase64":   str("Base64 of the 32-byte nonce randomness."),
+			"ephSignatureBase64":      str("Base64 Ed25519 signature (64 bytes) by the ephemeral key over the `challengeBase64` from ika.recovery.primary.oidc.open.challenge."),
+			"expectedSessionNonce":    map[string]any{"type": "integer", "minimum": 0, "description": "The `expectedSessionNonce` returned by the challenge call."},
+		}, "dwalletAddress", "initAuthorityHashBase64", "stagingAddress", "ephPkBase64", "notAfterUnixTs", "nonceRandomnessBase64", "ephSignatureBase64", "expectedSessionNonce"),
+	},
+	"ika.recovery.primary.oidc.use.challenge": {
+		Description: "Login Social step 3a (read-only): for an open OidcSession, returns the 32-byte `oidc-primary-use` challenge the ephemeral key must sign to authorize one signature, plus {expectedUseNonce, sessionExpiresAt}. (REST: POST /v1/recovery/primary/oidc/use/challenge → ika-backend.)",
+		BodyRequired: true,
+		BodySchema: obj(map[string]any{
+			"dwalletAddress":          str("Base58 address of the dWallet."),
+			"initAuthorityHashBase64": str("32-byte base64 hash from ika.dwallet.create / ika.recovery.policy.deploy."),
+			"sessionAddress":          str("Base58 address of the OidcSession PDA from ika.recovery.primary.oidc.open."),
+			"messageDigestBase64":     str("Base64 of the 32-byte message digest to authorize."),
+			"metadataDigestBase64":    str("Base64 of the 32-byte metadata digest; omit/empty = 32 zero bytes."),
+		}, "dwalletAddress", "initAuthorityHashBase64", "sessionAddress", "messageDigestBase64"),
+	},
+	"ika.recovery.primary.oidc.use.submit": {
+		Description: "Login Social step 3b: submit the ephemeral key's signature over the `oidc-primary-use` challenge. Andromeda builds `[Ed25519 precompile (eph_pk, challenge)] + recover_as_primary_oidc_session` (which re-checks the session, the policy primary, the JWK status, and CPIs Ika `approve_message`), signs as gas sponsor, submits. Returns {txSignature, messageApprovalAddress}. Repeat with fresh challenges until the session expires. (REST: POST /v1/recovery/primary/oidc/use/submit → ika-backend.)",
+		BodyRequired: true,
+		BodySchema: obj(map[string]any{
+			"dwalletAddress":          str("Base58 address of the dWallet."),
+			"initAuthorityHashBase64": str("32-byte base64 hash (same as the challenge call)."),
+			"sessionAddress":          str("Base58 address of the OidcSession PDA."),
+			"messageDigestBase64":     str("Base64 of the 32-byte message digest (same as the challenge call)."),
+			"metadataDigestBase64":    str("Base64 of the 32-byte metadata digest; omit/empty = 32 zero bytes."),
+			"userPubkeyBase64":        str("Base64 of the dWallet's 32-byte public key (passed to Ika `approve_message`)."),
+			"signatureScheme":         map[string]any{"type": "integer", "minimum": 0, "maximum": 6, "description": "Signature scheme for the MessageApproval (0..6). For Solana use 5 (EddsaSha512)."},
+			"ephSignatureBase64":      str("Base64 Ed25519 signature (64 bytes) by the ephemeral key over the `challengeBase64` from ika.recovery.primary.oidc.use.challenge."),
+			"expectedUseNonce":        map[string]any{"type": "integer", "minimum": 0, "description": "The `expectedUseNonce` returned by the challenge call."},
+		}, "dwalletAddress", "initAuthorityHashBase64", "sessionAddress", "messageDigestBase64", "userPubkeyBase64", "signatureScheme", "ephSignatureBase64", "expectedUseNonce"),
+	},
+	"ika.recovery.primary.oidc.close": {
+		Description:  "Login Social cleanup: close an expired OidcSession, refunding its rent (to the gas sponsor that funded it). Only callable once the session is past its expiry. Returns {txSignature}. (REST: POST /v1/recovery/primary/oidc/close → ika-backend.)",
+		BodyRequired: true,
+		BodySchema: obj(map[string]any{
+			"dwalletAddress":          str("Base58 address of the dWallet."),
+			"initAuthorityHashBase64": str("32-byte base64 hash from ika.dwallet.create / ika.recovery.policy.deploy."),
+			"sessionAddress":          str("Base58 address of the OidcSession PDA to close."),
+		}, "dwalletAddress", "initAuthorityHashBase64", "sessionAddress"),
+	},
+	"ika.recovery.primary.oidc.staging.close": {
+		Description:  "Login Social cleanup: close an abandoned OidcJwtStaging PDA (one that was staged but never opened), after a short TTL (~15 min), refunding its rent. The happy path closes it automatically during `open`. Returns {txSignature}. (REST: POST /v1/recovery/primary/oidc/staging/close → ika-backend.)",
+		BodyRequired: true,
+		BodySchema: obj(map[string]any{
+			"stagingAddress": str("Base58 address of the OidcJwtStaging PDA to close."),
+		}, "stagingAddress"),
+	},
+
 	// --- low-level DKG: steer agents toward the high-level tool ---
 	"ika.dkg.prepare": {
 		Description: "LOW-LEVEL. Build the unsigned DKG (distributed key generation) transaction for a caller who will run the Ika client side themselves and sign client-side. Most callers should use ika.dwallet.create instead — it runs the whole flow gas-sponsored with just a passphrase. (REST: POST /v1/dwallet/dkg/prepare → ika-backend, custody-free proxy.)",

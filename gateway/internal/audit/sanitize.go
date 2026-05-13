@@ -64,6 +64,22 @@ var perEventAllowlist = map[string]map[string]struct{}{
 	EventRecoveryQuorumUsed:    keys("dwallet_address", "policy_id", "tx_signature", "session_address", "members_used"),
 	EventRecoveryPolicyChanged: keys("dwallet_address", "policy_id", "operation"),
 
+	// Login Social — OIDC primary recovery. Hashes only, never the raw sub/JWT.
+	EventRecoveryOidcStaged: keys("dwallet_address", "policy_id", "tx_signature", "staging_address"),
+	EventRecoveryOidcOpened: keys("dwallet_address", "policy_id", "tx_signature", "session_address", "provider", "issuer_hash", "audience_hash", "subject_hash"),
+	EventRecoveryOidcUsed:   keys("dwallet_address", "policy_id", "tx_signature", "session_address"),
+	EventRecoveryOidcClosed: keys("dwallet_address", "policy_id", "tx_signature", "session_address"),
+	EventOidcTokenValidated: keys("provider", "issuer_hash", "audience_hash", "subject_hash", "outcome"),
+	EventOidcTokenRejected:  keys("provider", "outcome"),
+
+	// OAuth broker (loginsocial.md §5.4). Payloads never carry the id_token,
+	// the raw sub, or the redirect_uri (which could leak the tenant's
+	// app structure to an audit reader).
+	EventOauthHandshakeStarted:   keys("provider", "outcome"),
+	EventOauthHandshakeCompleted: keys("provider", "outcome"),
+	EventOauthHandshakeRejected:  keys("provider", "outcome", "reason"),
+	EventOauthTokenExchanged:     keys("provider", "outcome", "reason"),
+
 	EventFutureSignArmed:  keys("trigger_type", "dwallet_address", "expires_at"),
 	EventFutureSignFired:  keys("trigger_type", "dwallet_address", "tx_signature"),
 	EventFutureSignExpire: keys("trigger_type", "dwallet_address"),

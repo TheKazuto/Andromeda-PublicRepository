@@ -51,6 +51,9 @@ type Server struct {
 	metrics          *gwmetrics.Metrics
 	metricsHandler   http.Handler
 	urlGuard         *netsafety.Validator
+	// rdb is the shared *redis.Client (nil when REDIS_URL is empty). The
+	// OAuth broker requires it; other features no-op without it.
+	rdb *redis.Client
 
 	// apiKeyTouched debounces api_keys.last_used_at writes — see
 	// maybeTouchAPIKey. Keyed by api_key id, value is the last touch time.
@@ -161,6 +164,7 @@ func NewServer(d Deps) *Server {
 		metrics:          d.Metrics,
 		metricsHandler:   d.MetricsHandler,
 		urlGuard:         urlGuard,
+		rdb:              d.Redis,
 	}
 }
 
@@ -218,6 +222,13 @@ func (s *Server) Router() http.Handler {
 	// ----- Billing moved to backend (M1 of architecture split). -----
 	// Dashboard hits backend/v1/billing/* directly. The Stripe webhook
 	// lives at backend/v1/billing/stripe/webhook now.
+
+	// ----- Login Social OAuth broker (loginsocial.md §5.4) -----
+	// Mounts /v1/oauth/{authorize,callback,token-exchange} when
+	// OAUTH_BROKER_ENABLED=true. No-op otherwise.
+	if err := s.mountOAuthBroker(r); err != nil {
+		s.logger.Error("oauth broker not mounted", "err", err)
+	}
 
 	// ----- Public proxied API -----
 	for _, route := range routes.All {
@@ -334,6 +345,12 @@ func (s *Server) Router() http.Handler {
 func (s *Server) registerProxyRoute(r chi.Router, route routes.Route) {
 	handler := s.proxyHandler(route)
 	chain := r.With(s.requireAPIKey).With(s.requireScope(route.RequiredScope()))
+	if route.MaxBodyBytes > 0 {
+		// Tighter-than-global body cap (OIDC routes carry a ≤ 4 KiB JWT;
+		// an 8 KiB cap blocks payload DoS). Runs before idempotency, which
+		// reads the body to hash it.
+		chain = chain.With(limitPayload(route.MaxBodyBytes))
+	}
 	if route.Idempotent {
 		// Idempotency runs after auth so we can scope the key per api_key,
 		// but before quota so cached replays don't double-charge tokens.
