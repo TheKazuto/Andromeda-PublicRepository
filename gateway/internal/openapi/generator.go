@@ -95,7 +95,7 @@ func (g Generator) securitySchemes() Document {
 
 func (g Generator) tags() []Document {
 	return []Document{
-		{"name": "ika", "description": "MPC engine: dWallet creation, signing, recovery, identity."},
+		{"name": "ika", "description": "MPC engine: dWallet creation, signing, recovery, Login Social (OIDC)."},
 		{"name": "encrypt", "description": "FHE engine: ciphertexts, graph execution, decrypt, NEK."},
 		{"name": "pricing", "description": "Public pricing — plans, route costs, estimator."},
 		{"name": "me", "description": "Authenticated user — balance and usage."},

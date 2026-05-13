@@ -24,7 +24,7 @@ const (
 	// ciphertext/read). Cheap, can sustain high RPS.
 	RateClassRead = "read"
 	// RateClassTx — T2-T5 cost: prepares, submits, signing, recovery,
-	// future-sign, identity. The MPC engines are sensitive here.
+	// future-sign. The MPC engines are sensitive here.
 	RateClassTx = "tx"
 )
 
@@ -141,10 +141,6 @@ var All = []Route{
 	{Method: "POST", Path: "/v1/oidc/nonce", Upstream: UpstreamIka, Key: "ika.oidc.nonce", RateClass: RateClassRead, MaxBodyBytes: 1 << 10},
 	// Login Social — obligatory server-side `id_token` pre-validation (JWKS) before staging.
 	{Method: "POST", Path: "/v1/oidc/validate", Upstream: UpstreamIka, Key: "ika.oidc.validate", Idempotent: true, RateClass: RateClassRead, MaxBodyBytes: 8 << 10},
-
-	// Identity (opt-in email magic-link)
-	{Method: "POST", Path: "/v1/identity/email/request", Upstream: UpstreamIka, Key: "ika.identity.email.request", Idempotent: true, RateClass: RateClassTx},
-	{Method: "POST", Path: "/v1/identity/email/verify", Upstream: UpstreamIka, Key: "ika.identity.email.verify", Idempotent: true, RateClass: RateClassTx},
 
 	// --- encrypt-backend (FHE engine) ---
 	// Private transactions

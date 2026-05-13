@@ -13,7 +13,7 @@ const (
 	// status, recovery challenge/preview, ciphertext read, NEK current.
 	ScopeRead = "read"
 	// ScopeWrite grants access to T2-T5 (tx-class) routes: prepares,
-	// submits, signing, recovery quórum/policy mutations, identity.
+	// submits, signing, recovery quórum/policy mutations.
 	ScopeWrite = "write"
 	// ScopeAdmin gates feature-management endpoints: webhooks, audit
 	// log, policy templates, future-sign triggers. The customer needs
