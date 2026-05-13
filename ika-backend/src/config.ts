@@ -23,7 +23,10 @@ const baseSchema = z.object({
   ikaProgramId: z.string().min(32),
   solanaRpcUrl: z.string().url(),
   solanaCommitment: z.enum(['processed', 'confirmed', 'finalized']).default('confirmed'),
-  serviceApiKey: z.string().min(1, 'INTERNAL_API_KEY is required'),
+  // INTERNAL_API_KEY gates traffic from the gateway → ika-backend (private
+  // network). 32 char minimum mirrors encrypt-backend and rejects
+  // "dev123"/"changeme"-style misconfigurations at boot.
+  serviceApiKey: z.string().min(32, 'INTERNAL_API_KEY must be at least 32 chars'),
   adminApiKey: z.string().optional(),
   allowedOrigins: z.array(z.string()).default([]),
 })
