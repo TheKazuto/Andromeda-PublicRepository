@@ -24,10 +24,18 @@ export const RULES_POLICY_INSTRUCTION_DISCRIMINATOR = {
   proposeDailyLimitChange: 17,
   proposeCooldownChange: 18,
   applyPendingChange: 19,
+  // Login Social (`scheme = 4 = OidcJwt`) — see loginsocial.md §7.4.
+  oidcJwtStage: 20,
+  oidcSessionOpen: 21,
+  recoverAsPrimaryOidcSession: 22,
+  oidcSessionClose: 23,
+  oidcJwtStagingClose: 24,
 } as const
 
 export const RULES_POLICY_ACCOUNT_DISCRIMINATOR = 1
 export const QUORUM_SESSION_ACCOUNT_DISCRIMINATOR = 2
+export const OIDC_SESSION_ACCOUNT_DISCRIMINATOR = 3
+export const OIDC_JWT_STAGING_ACCOUNT_DISCRIMINATOR = 4
 
 export const PENDING_CHANGE_KIND_NONE = 0
 export const PENDING_CHANGE_KIND_QUORUM = 1
@@ -36,8 +44,30 @@ export const PENDING_CHANGE_KIND_COOLDOWN = 3
 
 export const RULES_POLICY_PDA_SEED = new TextEncoder().encode('rules_policy')
 export const QUORUM_SESSION_PDA_SEED = new TextEncoder().encode('quorum_session')
+export const OIDC_JWT_STAGING_PDA_SEED = new TextEncoder().encode('oidc_jwt_staging')
+export const OIDC_SESSION_PDA_SEED = new TextEncoder().encode('oidc_session')
 export const CPI_AUTHORITY_PDA_SEED = new TextEncoder().encode('__ika_cpi_authority')
 export const EVENT_AUTHORITY_PDA_SEED = new TextEncoder().encode('__event_authority')
+
+// ── Login Social — OIDC (`scheme = 4 = OidcJwt`) ─────────────────
+//
+// Mirrors the "Login Social constants" block in `contracts/rules-policy/src/lib.rs`
+// and `contracts/jwk-registry`. See loginsocial.md §6–§8.
+
+/** `andromeda_oidc_verifier::OIDC_VERIFIER_V1` — on-chain verifier format version. */
+export const OIDC_VERIFIER_V1 = 1
+/** `contracts/rules-policy::SESSION_TTL_SECONDS`. */
+export const OIDC_SESSION_TTL_SECONDS = 600
+/** `contracts/rules-policy::STAGING_TTL_SECONDS`. */
+export const OIDC_STAGING_TTL_SECONDS = 15 * 60
+/** Hard cap on a staged JWT (`OidcJwtStaging.jwt_bytes` / `oidc_verifier::MAX_JWT_LEN`). */
+export const MAX_JWT_LEN = 4096
+/** `andromeda_jwk_registry` program id (must own the `jwk_registry` account). */
+export const JWK_REGISTRY_PROGRAM_ID = '8xL2mrQ2amDpinQMHJPaEELbgEXWRVGn4PQ7kzDm7vNM'
+/** PDA seed prefix of the canonical `JwkRegistry` account. */
+export const JWK_REGISTRY_PDA_SEED = new TextEncoder().encode('jwk_registry')
+/** The canonical registry uses the all-zero `registry_seed`. */
+export const CANONICAL_JWK_REGISTRY_SEED = new Uint8Array(32)
 
 export const RULES_POLICY_ERROR = {
   INVALID_THRESHOLD: 6000,
@@ -62,12 +92,21 @@ export const RULES_POLICY_ERROR = {
   ALREADY_CONTRIBUTED: 6019,
   INVALID_FLAG: 6020,
   COOLDOWN_TOO_LONG: 6021,
+  // Login Social (`scheme = 4 = OidcJwt`)
+  INVALID_JWK_REGISTRY: 6022,
+  INVALID_JWT: 6023,
+  JWK_NOT_ACTIVE: 6024,
+  OIDC_VERIFY_FAILED: 6025,
+  OIDC_VERIFIER_VERSION_MISMATCH: 6026,
+  NOT_OIDC_PRIMARY: 6027,
+  STAGING_NOT_EXPIRED: 6028,
 } as const
 
 export const RULES_POLICY_EVENT_DISCRIMINATOR = {
   PolicyDeployed: 0,
   SignatureRequested: 1,
   SignatureApproved: 2,
+  OidcSessionOpened: 3,
 } as const
 
 // ── Member-slot schemes (mirror auth/mod.rs) ─────────────────────
@@ -76,8 +115,13 @@ export const SCHEME_ED25519 = 0
 export const SCHEME_SECP256K1 = 1
 export const SCHEME_SECP256R1 = 2
 export const SCHEME_WEBAUTHN = 3
+/** `scheme = 4 = OidcJwt` — identifier = 32-byte `addr_seed` (Login Social).
+ *  Only valid as a `RulesPolicy` *primary* slot. */
+export const SCHEME_OIDC_JWT = 4
 
 export const MEMBER_SLOT_LEN = 34
+/** `addr_seed = sha256("andromeda::oidc::addr::v1" || lp(iss) || lp(aud) || lp(sub))`. */
+export const OIDC_ADDR_SEED_LEN = 32
 
 export const MAX_MEMBERS = 16
 export const MAX_DESTINATIONS = 16
@@ -98,9 +142,19 @@ export function idLenForScheme(scheme: number): number {
       return 33
     case SCHEME_WEBAUTHN:
       return 33
+    case SCHEME_OIDC_JWT:
+      return OIDC_ADDR_SEED_LEN
     default:
       throw new Error(`Unsupported scheme: ${scheme}`)
   }
+}
+
+/** Builds the canonical OIDC primary slot `[4, addr_seed(32), 0]`. */
+export function buildOidcPrimarySlot(addrSeed: Uint8Array): Uint8Array {
+  if (addrSeed.length !== OIDC_ADDR_SEED_LEN) {
+    throw new Error(`addr_seed must be ${OIDC_ADDR_SEED_LEN} bytes, got ${addrSeed.length}`)
+  }
+  return buildMemberSlot(SCHEME_OIDC_JWT, addrSeed)
 }
 
 /**

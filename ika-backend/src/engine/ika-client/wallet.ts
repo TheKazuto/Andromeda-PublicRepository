@@ -395,6 +395,8 @@ export async function approveAsOwner(opts: {
     initAuthorityHash: meta.policy.initAuthorityHash,
     messageDigest,
     metadataDigest,
+    userPubkey: meta.signerPubkey,
+    signatureScheme: opts.signatureScheme,
   })
 
   const k = await unwrapWalletKey({ ownerRef: opts.ownerRef, dwalletAddress: opts.dwalletAddress, passphrase: opts.passphrase })

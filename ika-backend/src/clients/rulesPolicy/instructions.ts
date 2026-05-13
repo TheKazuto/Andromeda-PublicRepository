@@ -18,6 +18,7 @@
 import { AccountRole, type Address, type Instruction } from '@solana/kit'
 import { ByteWriter } from './codecs.js'
 import {
+  MAX_JWT_LEN,
   MAX_MEMBERS,
   MEMBER_SLOT_LEN,
   RULES_POLICY_INSTRUCTION_DISCRIMINATOR,
@@ -575,6 +576,222 @@ export function buildApplyPendingChangeInstruction(input: {
   return ix(input.programId, w.toUint8Array(), [
     { address: input.dwallet, role: AccountRole.READONLY },
     { address: input.policyPda, role: AccountRole.WRITABLE },
+    { address: SYSVAR_CLOCK_ADDRESS, role: AccountRole.READONLY },
+  ])
+}
+
+// ════════════════════════════════════════════════════════════════
+// Login Social — `scheme = 4 = OidcJwt` (disc 20..=24)
+//
+// Mirrors `contracts/rules-policy/src/lib.rs` (Fase 3b). See loginsocial.md
+// §7.4. A dWallet with an OIDC primary recovers only via these instructions —
+// the challenge-based flows (`recover_as_primary`, quorum, admin) reject
+// scheme 4.
+// ════════════════════════════════════════════════════════════════
+
+// ── 20. oidc_jwt_stage ─────────────────────────────────────────
+//
+// Wire layout: `[disc(1)][init_authority_hash(32)][jwt_len(u16 LE)][jwt_bytes]`
+// — Quasar `#[max(4096, pfx = 2)] jwt_bytes: &[u8]` desugars to a 2-byte LE
+// length prefix in the compact-instruction header followed by the bytes.
+
+export function buildOidcJwtStageInstruction(input: {
+  programId: Address
+  policyPda: Address
+  dwallet: Address
+  stagingPda: Address
+  payer: Address
+  initAuthorityHash: Uint8Array
+  /** The compact JWT `header.payload.signature` (ASCII), 1..=MAX_JWT_LEN bytes. */
+  jwt: Uint8Array
+}): Instruction {
+  assertHash(input.initAuthorityHash)
+  if (input.jwt.length === 0 || input.jwt.length > MAX_JWT_LEN) {
+    throw new Error(`jwt must be 1..=${MAX_JWT_LEN} bytes (got ${input.jwt.length})`)
+  }
+
+  const w = new ByteWriter()
+  w.writeU8(RULES_POLICY_INSTRUCTION_DISCRIMINATOR.oidcJwtStage)
+  w.writeBytes(input.initAuthorityHash)
+  w.writeU16LE(input.jwt.length)
+  w.writeBytes(input.jwt)
+
+  return ix(input.programId, w.toUint8Array(), [
+    { address: input.dwallet, role: AccountRole.READONLY },
+    { address: input.policyPda, role: AccountRole.WRITABLE },
+    { address: input.stagingPda, role: AccountRole.WRITABLE },
+    { address: input.payer, role: AccountRole.WRITABLE_SIGNER },
+    { address: SYSVAR_CLOCK_ADDRESS, role: AccountRole.READONLY },
+    { address: SYSVAR_RENT_ADDRESS, role: AccountRole.READONLY },
+    { address: SYSTEM_PROGRAM_ADDRESS, role: AccountRole.READONLY },
+  ])
+}
+
+// ── 21. oidc_session_open ──────────────────────────────────────
+
+export function buildOidcSessionOpenInstruction(input: {
+  programId: Address
+  policyPda: Address
+  dwallet: Address
+  stagingPda: Address
+  jwkRegistry: Address
+  sessionPda: Address
+  /** Receives the staging account's rent refund — must equal `staging.payer_for_close`. */
+  stagingPayer: Address
+  payer: Address
+  eventAuthorityPda: Address
+  initAuthorityHash: Uint8Array
+  ephPk: Uint8Array
+  notAfterUnixTs: bigint
+  nonceRandomness: Uint8Array
+  oidcVerifierVersion: number
+  /** Bump of the canonical `JwkRegistry` PDA (`[b"jwk_registry", [0u8;32]]`). */
+  jwkRegistryBump: number
+  issuerHash: Uint8Array
+  audienceHash: Uint8Array
+  kidHash: Uint8Array
+  /**
+   * Policy's `next_oidc_session_nonce` observed by the client off-chain (the
+   * same value baked into the signed `oidc_session_open_challenge`). The
+   * program rejects with `InvalidNonce` if the on-chain value has advanced —
+   * see audit F-1 (`docs/AUDIT_LOGINSOCIAL_2026_05.md`, 2026-05-13).
+   */
+  expectedSessionNonce: bigint
+}): Instruction {
+  assertHash(input.initAuthorityHash)
+  assertLen(input.ephPk, 32, 'eph_pk')
+  assertLen(input.nonceRandomness, 32, 'nonce_randomness')
+  assertLen(input.issuerHash, 32, 'issuer_hash')
+  assertLen(input.audienceHash, 32, 'audience_hash')
+  assertLen(input.kidHash, 32, 'kid_hash')
+
+  const w = new ByteWriter()
+  w.writeU8(RULES_POLICY_INSTRUCTION_DISCRIMINATOR.oidcSessionOpen)
+  w.writeBytes(input.initAuthorityHash)
+  w.writeBytes(input.ephPk)
+  w.writeU64LE(input.notAfterUnixTs)
+  w.writeBytes(input.nonceRandomness)
+  w.writeU32LE(input.oidcVerifierVersion)
+  w.writeU8(input.jwkRegistryBump)
+  w.writeBytes(input.issuerHash)
+  w.writeBytes(input.audienceHash)
+  w.writeBytes(input.kidHash)
+  w.writeU64LE(input.expectedSessionNonce)
+
+  return ix(input.programId, w.toUint8Array(), [
+    { address: input.dwallet, role: AccountRole.READONLY },
+    { address: input.policyPda, role: AccountRole.WRITABLE },
+    { address: input.stagingPda, role: AccountRole.WRITABLE },
+    { address: input.jwkRegistry, role: AccountRole.READONLY },
+    { address: input.sessionPda, role: AccountRole.WRITABLE },
+    { address: input.stagingPayer, role: AccountRole.WRITABLE },
+    { address: input.payer, role: AccountRole.WRITABLE_SIGNER },
+    { address: SYSVAR_INSTRUCTIONS_ADDRESS, role: AccountRole.READONLY },
+    { address: SYSVAR_CLOCK_ADDRESS, role: AccountRole.READONLY },
+    { address: SYSVAR_RENT_ADDRESS, role: AccountRole.READONLY },
+    { address: SYSTEM_PROGRAM_ADDRESS, role: AccountRole.READONLY },
+    { address: input.eventAuthorityPda, role: AccountRole.READONLY },
+    { address: input.programId, role: AccountRole.READONLY },
+  ])
+}
+
+// ── 22. recover_as_primary_oidc_session ────────────────────────
+
+export function buildRecoverAsPrimaryOidcSessionInstruction(input: {
+  programId: Address
+  policyPda: Address
+  dwallet: Address
+  sessionPda: Address
+  jwkRegistry: Address
+  coordinator: Address
+  messageApproval: Address
+  payer: Address
+  cpiAuthorityPda: Address
+  ikaProgramId: Address
+  eventAuthorityPda: Address
+  initAuthorityHash: Uint8Array
+  messageDigest: Uint8Array
+  metadataDigest: Uint8Array
+  userPubkey: Uint8Array
+  signatureScheme: number
+  messageApprovalBump: number
+  cpiAuthorityBump: number
+  expectedUseNonce: bigint
+}): Instruction {
+  assertHash(input.initAuthorityHash)
+  assertLen(input.messageDigest, 32, 'message_digest')
+  assertLen(input.metadataDigest, 32, 'metadata_digest')
+  assertLen(input.userPubkey, 32, 'user_pubkey')
+
+  const w = new ByteWriter()
+  w.writeU8(RULES_POLICY_INSTRUCTION_DISCRIMINATOR.recoverAsPrimaryOidcSession)
+  w.writeBytes(input.initAuthorityHash)
+  w.writeBytes(input.messageDigest)
+  w.writeBytes(input.metadataDigest)
+  w.writeBytes(input.userPubkey)
+  w.writeU16LE(input.signatureScheme)
+  w.writeU8(input.messageApprovalBump)
+  w.writeU8(input.cpiAuthorityBump)
+  w.writeU64LE(input.expectedUseNonce)
+
+  // NOTE: no separate `caller_program` slot — the contract reuses `program`
+  // as the Ika CPI caller (see buildRecoverAsPrimaryInstruction).
+  return ix(input.programId, w.toUint8Array(), [
+    { address: input.dwallet, role: AccountRole.READONLY },
+    { address: input.policyPda, role: AccountRole.READONLY },
+    { address: input.sessionPda, role: AccountRole.WRITABLE },
+    { address: input.jwkRegistry, role: AccountRole.READONLY },
+    { address: input.coordinator, role: AccountRole.READONLY },
+    { address: input.messageApproval, role: AccountRole.WRITABLE },
+    { address: input.payer, role: AccountRole.WRITABLE_SIGNER },
+    { address: input.cpiAuthorityPda, role: AccountRole.READONLY },
+    { address: input.ikaProgramId, role: AccountRole.READONLY },
+    { address: SYSVAR_INSTRUCTIONS_ADDRESS, role: AccountRole.READONLY },
+    { address: SYSVAR_CLOCK_ADDRESS, role: AccountRole.READONLY },
+    { address: SYSTEM_PROGRAM_ADDRESS, role: AccountRole.READONLY },
+    { address: input.eventAuthorityPda, role: AccountRole.READONLY },
+    { address: input.programId, role: AccountRole.READONLY },
+  ])
+}
+
+// ── 23. oidc_session_close ─────────────────────────────────────
+
+export function buildOidcSessionCloseInstruction(input: {
+  programId: Address
+  policyPda: Address
+  dwallet: Address
+  sessionPda: Address
+  rentDestination: Address
+  initAuthorityHash: Uint8Array
+}): Instruction {
+  assertHash(input.initAuthorityHash)
+
+  const w = new ByteWriter()
+  w.writeU8(RULES_POLICY_INSTRUCTION_DISCRIMINATOR.oidcSessionClose)
+  w.writeBytes(input.initAuthorityHash)
+
+  return ix(input.programId, w.toUint8Array(), [
+    { address: input.dwallet, role: AccountRole.READONLY },
+    { address: input.policyPda, role: AccountRole.READONLY },
+    { address: input.sessionPda, role: AccountRole.WRITABLE },
+    { address: input.rentDestination, role: AccountRole.WRITABLE },
+    { address: SYSVAR_CLOCK_ADDRESS, role: AccountRole.READONLY },
+  ])
+}
+
+// ── 24. oidc_jwt_staging_close ─────────────────────────────────
+
+export function buildOidcJwtStagingCloseInstruction(input: {
+  programId: Address
+  stagingPda: Address
+  rentDestination: Address
+}): Instruction {
+  const w = new ByteWriter()
+  w.writeU8(RULES_POLICY_INSTRUCTION_DISCRIMINATOR.oidcJwtStagingClose)
+
+  return ix(input.programId, w.toUint8Array(), [
+    { address: input.stagingPda, role: AccountRole.WRITABLE },
+    { address: input.rentDestination, role: AccountRole.WRITABLE },
     { address: SYSVAR_CLOCK_ADDRESS, role: AccountRole.READONLY },
   ])
 }

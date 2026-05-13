@@ -1,7 +1,12 @@
 import { getProgramDerivedAddress, getAddressEncoder, type Address } from '@solana/kit'
 import {
+  CANONICAL_JWK_REGISTRY_SEED,
   CPI_AUTHORITY_PDA_SEED,
   EVENT_AUTHORITY_PDA_SEED,
+  JWK_REGISTRY_PDA_SEED,
+  JWK_REGISTRY_PROGRAM_ID,
+  OIDC_JWT_STAGING_PDA_SEED,
+  OIDC_SESSION_PDA_SEED,
   QUORUM_SESSION_PDA_SEED,
   RULES_POLICY_PDA_SEED,
 } from './program.js'
@@ -31,6 +36,12 @@ const policyPdaCache = new Map<string, PdaResult>()
 
 const SESSION_PDA_CACHE_CAP = 4096
 const sessionPdaCache = new Map<string, PdaResult>()
+
+// Login Social PDA caches.
+const OIDC_PDA_CACHE_CAP = 4096
+const oidcStagingPdaCache = new Map<string, PdaResult>()
+const oidcSessionPdaCache = new Map<string, PdaResult>()
+const jwkRegistryPdaCache = new Map<string, PdaResult>()
 
 function bytesHex(bytes: Uint8Array): string {
   let s = ''
@@ -133,6 +144,89 @@ export async function findQuorumSessionPda(
   })
   const result: PdaResult = { address, bump }
   lruSet(sessionPdaCache, SESSION_PDA_CACHE_CAP, key, result)
+  return result
+}
+
+// ── Login Social PDAs ──────────────────────────────────────────
+
+function le8(v: bigint): Uint8Array {
+  const b = new Uint8Array(8)
+  new DataView(b.buffer).setBigUint64(0, v, true)
+  return b
+}
+
+/**
+ * PDA: OidcJwtStaging account.
+ * seeds = [b"oidc_jwt_staging", policy, dwallet, staging_nonce_le_u64]
+ */
+export async function findOidcJwtStagingPda(
+  programId: Address,
+  policy: Address,
+  dwallet: Address,
+  stagingNonce: bigint,
+): Promise<PdaResult> {
+  const key = `${programId}:${policy}:${dwallet}:${stagingNonce.toString()}`
+  const cached = lruGet(oidcStagingPdaCache, key)
+  if (cached) return cached
+  const [address, bump] = await getProgramDerivedAddress({
+    programAddress: programId,
+    seeds: [
+      OIDC_JWT_STAGING_PDA_SEED,
+      addrEncoder.encode(policy),
+      addrEncoder.encode(dwallet),
+      le8(stagingNonce),
+    ],
+  })
+  const result: PdaResult = { address, bump }
+  lruSet(oidcStagingPdaCache, OIDC_PDA_CACHE_CAP, key, result)
+  return result
+}
+
+/**
+ * PDA: OidcSession account.
+ * seeds = [b"oidc_session", policy, dwallet, session_nonce_le_u64]
+ */
+export async function findOidcSessionPda(
+  programId: Address,
+  policy: Address,
+  dwallet: Address,
+  sessionNonce: bigint,
+): Promise<PdaResult> {
+  const key = `${programId}:${policy}:${dwallet}:${sessionNonce.toString()}`
+  const cached = lruGet(oidcSessionPdaCache, key)
+  if (cached) return cached
+  const [address, bump] = await getProgramDerivedAddress({
+    programAddress: programId,
+    seeds: [
+      OIDC_SESSION_PDA_SEED,
+      addrEncoder.encode(policy),
+      addrEncoder.encode(dwallet),
+      le8(sessionNonce),
+    ],
+  })
+  const result: PdaResult = { address, bump }
+  lruSet(oidcSessionPdaCache, OIDC_PDA_CACHE_CAP, key, result)
+  return result
+}
+
+/**
+ * PDA: the canonical `JwkRegistry` account on the `andromeda_jwk_registry`
+ * program. seeds = [b"jwk_registry", [0u8; 32]].
+ *
+ * `bump` is what `oidc_session_open` needs as its `jwk_registry_bump` arg.
+ * `jwkRegistryProgramId` defaults to the well-known program id.
+ */
+export async function findJwkRegistryPda(
+  jwkRegistryProgramId: Address = JWK_REGISTRY_PROGRAM_ID as Address,
+): Promise<PdaResult> {
+  const cached = jwkRegistryPdaCache.get(jwkRegistryProgramId)
+  if (cached) return cached
+  const [address, bump] = await getProgramDerivedAddress({
+    programAddress: jwkRegistryProgramId,
+    seeds: [JWK_REGISTRY_PDA_SEED, CANONICAL_JWK_REGISTRY_SEED],
+  })
+  const result: PdaResult = { address, bump }
+  jwkRegistryPdaCache.set(jwkRegistryProgramId, result)
   return result
 }
 
@@ -275,4 +369,7 @@ export function _resetPdaCaches(): void {
   eventAuthorityCache.clear()
   policyPdaCache.clear()
   sessionPdaCache.clear()
+  oidcStagingPdaCache.clear()
+  oidcSessionPdaCache.clear()
+  jwkRegistryPdaCache.clear()
 }
