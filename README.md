@@ -60,7 +60,7 @@ Andromeda is a **B2D (Business-to-Developer)** platform.
 Cases that Andromeda specifically unblocks, not generic Web3 use cases.
 
 - **Cross-chain smart wallets.** Same identity drives signing across EVM, Solana, Bitcoin, Cosmos, NEAR and Aptos. The user signs into the app once and the same dWallet works on every chain.
-- **Onboarding without a wallet (Login Social).** The user signs in with Google or Apple and gets a cross-chain dWallet immediately — no wallet to install, no seed phrase, no SOL to hold. The same Google/Apple account derives the same dWallet in any app on Andromeda: one identity, one wallet, every chain.
+- **Onboarding without a wallet (Login Social).** The user signs in with Google or Apple and gets a cross-chain dWallet immediately, with no wallet to install, no seed phrase, no SOL to hold. The same Google/Apple account derives the same dWallet in any app on Andromeda: one identity, one wallet, every chain.
 - **DAO treasuries with on-chain rule enforcement.** A Solana Quasar program (allowlist-destinations + velocity-guard) holds the dWallet authority. The treasury can only interact with whitelisted programs, capped at N signatures per slot window, with no ability for the gateway to bypass the policy.
 - **Trading bots with scoped delegation.** The session-keys template grants a temporary key with on-chain limits on slot expiry, number of uses, amount per transaction, and allowed destination programs. Multiple sessions per dWallet (up to 2^32 concurrent), each with its own monotonic replay nonce.
 - **AI agents that sign transactions.** Every REST route on the gateway is auto-mirrored as an MCP tool. Drop the endpoint into Claude Desktop or Cursor and the agent can call signing, recovery, or policy operations natively.
@@ -90,7 +90,7 @@ Capabilities beyond the core Ika and Encrypt primitives: the surrounding product
 - **Session keys with multi-session.** Up to 2^32 concurrent sessions per dWallet, each with a monotonic replay nonce that binds the message digest, amount, destination program, and signature nonce together.
 
 ### Login Social
-- **Sign in with Google or Apple, get a dWallet immediately.** No wallet to install, no seed phrase, no SOL. Identity is verified entirely on-chain (RSA over the `id_token`, zero attestor) — a compromised Andromeda backend still cannot forge anyone's login. The same Google/Apple account derives the same dWallet in any app on Andromeda: one identity, one wallet, every chain.
+- **Sign in with Google or Apple, get a dWallet immediately.** No wallet to install, no seed phrase, no SOL. Identity is verified entirely on-chain (RSA over the `id_token`, zero attestor). A compromised Andromeda backend still cannot forge anyone's login. The same Google/Apple account derives the same dWallet in any app on Andromeda: one identity, one wallet, every chain.
 
 ### Confidential computing
 - **Confidential Workflows pipeline.** Encrypt FHE evaluation flows into Vault Transit ed25519, then into the Quasar fhe-gated policy, then into the Ika signature. An on-chain authority allowlist plus a non-zero decision-age window are enforced before any signature is released.
@@ -269,7 +269,7 @@ cd andromeda
 open http://localhost:3000
 ```
 
-Service ports: backend on 8080, gateway on 8081, ika-backend on 3020, encrypt-backend on 3010, dashboard on 3000. `jwk-rotator` is a background worker — no HTTP port.
+Service ports: backend on 8080, gateway on 8081, ika-backend on 3020, encrypt-backend on 3010, dashboard on 3000. `jwk-rotator` is a background worker, with no HTTP port.
 
 ### Build
 
