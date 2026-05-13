@@ -65,7 +65,7 @@ gateway/
 | GET | `/health` | Liveness |
 | GET | `/health/ready` | Readiness (DB + Redis + upstream + DLQ) |
 | GET | `/openapi.json` | OpenAPI 3.1 spec |
-| GET | `/capabilities` | Public feature matrix |
+| GET | `/capabilities` | Public feature matrix — includes `features.futureSignWatcher`, `features.redisBackedIdempotency`, and `features.rateLimitMode` (`"disabled"` / `"fail_open"` / `"fail_closed"`) so clients can tell which gateway-native features are actually operational, not just wired |
 | GET | `/v1/pricing` | Token cost per route |
 | POST | `/v1/pricing/estimate` | Estimate cost for a workload |
 | GET | `/metrics` | Prometheus, `X-Admin-Token`-gated |
@@ -142,7 +142,7 @@ Each tool advertises an input schema and behaviour annotations:
 - **Auth**: same `X-Api-Key` as REST.
 - **Charging**: per-tool token cost mirrors the matching REST route (e.g. `mcp.tool=ika.sign.submit` → 50 tokens).
 - **Refund on tool error**: same path as REST 5xx refund.
-- **Idempotency**: `Idempotency-Key` header at HTTP layer (single body match).
+- **Idempotency**: `Idempotency-Key` header at HTTP layer (single body match). Included in the CORS `AllowedHeaders`, so browser clients can use it on cross-origin calls.
 
 Clients connect with any MCP-compatible client (Claude Desktop, Cursor, custom). Setup config is shown in the dashboard at `/dashboard/mcp-server`.
 
