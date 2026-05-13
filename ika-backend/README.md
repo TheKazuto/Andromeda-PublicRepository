@@ -48,15 +48,17 @@ ika-backend/
 │   │   ├── policies/               # Read on-chain policy account state
 │   │   └── rulesPolicy/            # Codecs + instructions + program PDA
 │   ├── identity/                   # Opt-in: OAuth, email, passkey, linking, sessions, audit, PII-at-rest
+│   ├── oidc/                       # Opt-in (Login Social): /v1/oidc/{nonce,validate} + JWT derivations
 │   ├── recovery/
 │   │   ├── verifiers/              # 7 off-chain schemes
 │   │   ├── discovery/              # Off-chain ownership proof
 │   │   ├── primary/                # Single-tx flow
 │   │   ├── quorum/                 # PDA staging multi-tx
 │   │   ├── policy/                 # Admin actions
-│   │   ├── adapters/               # PolicyAdapter, SolanaAdapter
+│   │   ├── oidc/                   # Opt-in (Login Social): /v1/recovery/primary/oidc/*
+│   │   ├── adapters/               # PolicyAdapter, SolanaAdapter (incl. solana/oidc.ts flow module)
 │   │   ├── message.ts              # Canonical discovery message
-│   │   └── challenge.ts            # Byte-for-byte mirror of auth/challenge.rs
+│   │   └── challenge.ts            # Byte-for-byte mirror of auth/challenge.rs (incl. OP_OIDC_*)
 │   ├── store/                      # Postgres pool + migrations + cleanup job
 │   └── __tests__/
 ├── proto/                          # Ika .proto files (populate from upstream — boot fails without them)
@@ -77,6 +79,7 @@ ika-backend/
 | Identity | `IKA_IDENTITY_ENABLED` | `/v1/identity/*` |
 | Recovery (discovery) | `IKA_RECOVERY_ENABLED` | `/v1/recovery/{challenge,resolve}` |
 | Recovery (policy) | `IKA_RECOVERY_POLICY_ENABLED` | `/v1/recovery/{primary,quorum,policy}/*` |
+| Login Social (OIDC) | `IKA_OIDC_ENABLED` (requires policy layer + `jwk-registry` deployed) | `/v1/oidc/{nonce,validate}` + `/v1/recovery/primary/oidc/*` |
 
 ## Endpoints
 
@@ -134,6 +137,7 @@ On-chain schemes (validated via Solana precompile, **zero attestor**):
 | Secp256k1 | 20 B (eth_address) | EVM, Bitcoin, Cosmos secp256k1, Substrate ECDSA |
 | Secp256r1 | 33 B (compressed) | Raw passkey |
 | WebAuthn | 33 B (compressed) | Passkey with on-chain `clientDataJSON` validation |
+| OidcJwt (scheme=4) | `[4, addr_seed(32), 0]` | Google / Apple `id_token` via the on-chain `oidc-verifier` (RSA-2048 + JWK registry) — auth path is JWT + ephemeral Ed25519 (NOT a signature over a 32-byte challenge); see Login Social section below |
 
 #### Primary (single-tx)
 - `POST /v1/recovery/primary/challenge`
@@ -155,6 +159,24 @@ On-chain schemes (validated via Solana precompile, **zero attestor**):
 - `POST /v1/recovery/policy/admin/challenge` — challenge for any of the 12 admin actions
 - `POST /v1/recovery/policy/admin/submit`
 - `POST /v1/recovery/policy/apply-pending`
+
+### Recovery — Login Social (OIDC primary, scheme=4)
+
+`IKA_OIDC_ENABLED=true` mounts the OIDC routes. Identity is verified entirely on-chain (RSA-2048 over the provider's `id_token`, JWK registry, ephemeral Ed25519 binding — **zero attestor**). The OAuth handshake itself is brokered by `gateway/`'s `/v1/oauth/*` routes; this backend handles validation + the gas-sponsored recovery flow. Full spec in `loginsocial.md`.
+
+| Route | Purpose |
+|-------|---------|
+| `POST /v1/oidc/nonce` | Given an ephemeral Ed25519 pubkey, returns the canonical `oidc_nonce` to use as the OAuth `nonce`. The client doesn't need to know the byte layout. |
+| `POST /v1/oidc/validate` | Off-chain pre-check of an `id_token` (provider JWKS + claims + `nonce` shape). Returns derived hashes only — never the raw `sub` / JWT. |
+| `POST /v1/recovery/primary/oidc/stage` | Stages the `id_token` into an on-chain `OidcJwtStaging` PDA. |
+| `POST /v1/recovery/primary/oidc/open/challenge` | Returns the `oidc-session-open` challenge for the ephemeral key to sign. |
+| `POST /v1/recovery/primary/oidc/open` | Verifies JWT + RSA + claims + ephemeral signature; creates the short-lived `OidcSession` (≤ 600 s). |
+| `POST /v1/recovery/primary/oidc/use/challenge` | Per-use challenge bound to the session + the message about to be approved. |
+| `POST /v1/recovery/primary/oidc/use/submit` | Authorises one Ika `approve_message` through the open session. |
+| `POST /v1/recovery/primary/oidc/close` | Closes an expired session (rent refund). |
+| `POST /v1/recovery/primary/oidc/staging/close` | Reclaims an abandoned staging account. |
+
+The trust root for the JWKs lives in a separate on-chain `jwk-registry` program. The off-chain `jwk-rotator` worker (see [`jwk-rotator/README.md`](../jwk-rotator/README.md)) keeps it in sync with the provider JWKS.
 
 ### Identity (opt-in)
 
@@ -248,6 +270,22 @@ When `IKA_RECOVERY_POLICY_ENABLED=true`, the boot **refuses to start** unless `I
 | `IKA_GAS_SPONSOR_MIN_BALANCE_SOL` | `0.5` | Warn threshold for the sponsor balance. |
 | `IKA_RECOVERY_MAX_GAS_PER_OP_LAMPORTS` | `20000000` | Per-op gas ceiling. |
 
+### Login Social — OIDC primary (opt-in — `IKA_OIDC_ENABLED=true`)
+
+Mounts `/v1/oidc/{nonce,validate}` + `/v1/recovery/primary/oidc/*`. Requires the policy recovery layer to also be on (`IKA_RECOVERY_POLICY_ENABLED=true`) and the `jwk-registry` program to be deployed + bootstrapped. Boot refuses to start if any required value is missing or if no provider is enabled. Full spec in `loginsocial.md` §6 / §9.
+
+| Var | Default | Notes |
+|-----|---------|-------|
+| `IKA_OIDC_ENABLED` | `false` | Master flag. Requires `IKA_RECOVERY_POLICY_ENABLED=true`. |
+| `IKA_OIDC_GOOGLE_ENABLED` | `false` | Accept Google `id_token`s (`iss=https://accounts.google.com`). |
+| `IKA_OIDC_GOOGLE_CLIENT_ID` | _(none)_ | The auth-broker's Google OAuth client_id. Required when Google is enabled. |
+| `IKA_OIDC_APPLE_ENABLED` | `false` | Accept Apple `id_token`s (`iss=https://appleid.apple.com`). |
+| `IKA_OIDC_APPLE_CLIENT_ID` | _(none)_ | Apple Services ID. Required when Apple is enabled. |
+| `IKA_OIDC_ALLOWED_AUDIENCES` | _(none)_ | CSV of allowed `aud` claims. Must mirror the on-chain `OIDC_ALLOWED_AUDIENCES` constant in `rules-policy`. Required when enabled. |
+| `IKA_OIDC_JWK_REGISTRY_ADDRESS` | _(none)_ | Address of the on-chain `JwkRegistry` account (canonical PDA of the `jwk-registry` program). Required when enabled. |
+| `IKA_OIDC_VERIFIER_VERSION` | `1` | Must equal the on-chain `OIDC_VERIFIER_V1`. Bumps with any wire-format change. |
+| `IKA_OIDC_LOG_SUBJECT_HMAC_SECRET` | _(none)_ | HMAC key (≥32 bytes, hex) for hashing `sub` in logs/metrics. **Required when enabled.** Generate with `openssl rand -hex 32`. Rotation invalidates historical correlation only — no operational impact. Never reuse another secret. |
+
 ## Setup
 
 ```bash
@@ -281,4 +319,4 @@ npm run dev          # tsx watch src/server.ts
 
 Supported curves: Ed25519 (Solana, NEAR, Aptos, Cosmos Ed25519), SECP256K1 (EVM, Bitcoin, Cosmos secp256k1), SECP256R1 (P-256, WebAuthn), Ristretto (Substrate/Polkadot).
 
-Full Recovery spec in `docs/RECOVERY.md`. Status in `docs/STATUS.md`. Roadmap in `PLAN.md`.
+Full Recovery spec in `docs/RECOVERY.md`. Status in `docs/STATUS.md`. Roadmap in `PLAN.md`. Login Social plan + crypto spec in `loginsocial.md`; pre-deploy audit report in `docs/AUDIT_LOGINSOCIAL_2026_05.md`.
