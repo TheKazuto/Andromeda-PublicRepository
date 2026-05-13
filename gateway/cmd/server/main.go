@@ -156,9 +156,11 @@ func main() {
 
 	// --- Webhook system ---
 	whStore := webhooks.NewStore(db.Pool())
-	whDispatcher := webhooks.NewDispatcher(whStore, logger).WithURLGuard(urlGuard)
+	whDispatcher := webhooks.NewDispatcher(whStore, logger).
+		WithURLGuard(urlGuard).
+		WithMetrics(metrics)
 	spawn("webhook-dispatcher", whDispatcher.Run)
-	whPublisher := webhooks.NewPublisher(whStore)
+	whPublisher := webhooks.NewPublisher(whStore).WithMetrics(metrics)
 
 	// Notification workers (mailer, quota, pricing) and the gift
 	// purchase observer moved to backend (M2 of architecture split).
@@ -189,6 +191,7 @@ func main() {
 
 	// --- Future-Sign trigger watcher (Sprint 4 — off-chain) ---
 	fsStore := futuresign.NewStore(db.Pool())
+	fsWatcherRunning := false
 	if cfg.IkaUpstreamURL != "" && cfg.InternalAPIKey != "" {
 		fsWatcher := futuresign.NewWatcher(futuresign.WatcherOptions{
 			Store:     fsStore,
@@ -198,6 +201,7 @@ func main() {
 			URLGuard:  urlGuard,
 		})
 		fsWatcher.Start(rootCtx)
+		fsWatcherRunning = true
 		logger.Info("future-sign watcher running",
 			"slot_time_tick", "5s", "external_webhook_tick", "30s")
 	} else {
@@ -219,6 +223,7 @@ func main() {
 			logger.Error("policies service init failed", "err", err)
 			os.Exit(1)
 		}
+		policySvc.WithLogger(logger)
 		if cfg.GasSponsorKeypairJSON != "" {
 			sponsor, err := gasponsor.New(cfg.GasSponsorKeypairJSON, policySvc.RPCClient)
 			if err != nil {
@@ -252,8 +257,9 @@ func main() {
 		WebhookStore:        whStore,
 		PolicyService:       policySvc,
 		PolicySubscriptions: policySubsStore,
-		FutureSignStore:     fsStore,
-		Metrics:             metrics,
+		FutureSignStore:          fsStore,
+		FutureSignWatcherRunning: fsWatcherRunning,
+		Metrics:                  metrics,
 		MetricsHandler:      metricsHandler,
 		URLGuard:            urlGuard,
 		Logger:              logger,
