@@ -266,22 +266,6 @@ paths:
         - { name: dwalletAddress, in: path, required: true, schema: { type: string } }
       responses: { "200": { description: OK } }
 
-  # ---------- Identity ----------
-  /v1/identity/email/request:
-    post:
-      summary: Request a magic-link email for identity verification
-      tags: [Identity]
-      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
-      responses:
-        "200": { description: Always 200 (anti-enumeration), content: { application/json: { schema: { type: object } } } }
-
-  /v1/identity/email/verify:
-    post:
-      summary: Consume an email magic-link token
-      tags: [Identity]
-      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
-      responses: { "200": { description: OK } }
-
   # ---------- encrypt-backend ----------
   /v1/private-tx/submit:
     post:

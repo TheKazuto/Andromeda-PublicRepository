@@ -89,7 +89,6 @@ bodies are capped at 25 MiB.
 | **Recovery — policy** | `recovery/policy/{preview,deploy,admin/challenge,admin/submit,apply-pending}`, `GET recovery/policy/{dwalletAddress}` | write / read | ika |
 | **Recovery — Login Social (OIDC primary)** | `recovery/primary/oidc/{stage,open/challenge,open,use/challenge,use/submit,close,staging/close}`, `oidc/validate` — staged `id_token` carriers get an 8 KiB body cap | write / read | ika |
 | **OAuth broker (Login Social)** | `GET oauth/{authorize,callback}`, `POST oauth/token-exchange` — gateway-hosted Andromeda OAuth client (Google + Apple, `scope=openid` only). Authorization Code + PKCE. Free (no token cost). | write | gateway |
-| **Identity** | `identity/email/{request,verify}` (OAuth + passkey are engine-internal, not proxied) | write | ika |
 | **Private TX** | `private-tx/submit`, `GET private-tx/status/{signature}` | write / read | encrypt |
 | **Ciphertext** | `ciphertext/{create,read}`, `GET ciphertext/account/{address}` | write / read | encrypt |
 | **Graph** | `graph/{execute,register,execute-registered,commit}/prepare`, `graph/submit`, `graph/operations/register-bytes`, `GET graph/{status/{signature},operations}` | write / read | encrypt |
