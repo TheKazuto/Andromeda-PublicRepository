@@ -34,13 +34,25 @@ pub fn hashv(parts: &[&[u8]]) -> [u8; 32] {
         }
         result
     }
-    #[cfg(not(target_os = "solana"))]
+    #[cfg(all(not(target_os = "solana"), feature = "host-test"))]
+    {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        for p in parts {
+            hasher.update(p);
+        }
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&hasher.finalize());
+        out
+    }
+    #[cfg(all(not(target_os = "solana"), not(feature = "host-test")))]
     {
         let _ = parts;
         panic!(
-            "andromeda_auth::hash::hashv called on non-SBF target — \
-             this hash MUST run inside the Solana runtime; use litesvm \
-             or stub at the call site for host tests."
+            "andromeda_auth::hash::hashv called on non-SBF target without \
+             the `host-test` feature — this hash MUST run inside the Solana \
+             runtime in production; enable feature `host-test` for fixture \
+             tests."
         );
     }
 }
