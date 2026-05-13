@@ -1,0 +1,23 @@
+{
+  "name": "andromeda-jwk-rotator",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Off-chain watcher for the Andromeda JWK Registry: fetches Google/Apple JWKS, diffs against on-chain state, propose_jwk's new keys, alerts ops. Never activates.",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "once": "tsx src/index.ts --once",
+    "bootstrap": "tsx src/index.ts bootstrap",
+    "bootstrap:send": "tsx src/index.ts bootstrap -- --send",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "@solana/web3.js": "^1.98.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "@types/node": "^22.10.2"
+  }
+}
