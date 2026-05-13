@@ -23,9 +23,18 @@ name = "andromeda_fhe_gated"
 version = "0.1.0"
 dependencies = [
  "andromeda_auth",
+ "andromeda_policy_shared",
  "ika-dwallet-quasar",
- "quasar-lang",
+ "quasar-lang 0.0.0 (git+https://github.com/blueshift-gg/quasar?rev=096c8f7c7c37e373758da8a65b7528cb2230e20e)",
  "solana-address",
+]
+
+[[package]]
+name = "andromeda_policy_shared"
+version = "0.1.0"
+dependencies = [
+ "ika-dwallet-quasar",
+ "quasar-lang 0.0.0 (git+https://github.com/blueshift-gg/quasar?rev=096c8f7c7c37e373758da8a65b7528cb2230e20e)",
 ]
 
 [[package]]
@@ -206,9 +215,9 @@ checksum = "b9e0384b61958566e926dc50660321d12159025e767c18e043daf26b70104c39"
 [[package]]
 name = "ika-dwallet-quasar"
 version = "0.1.0"
-source = "git+https://github.com/dwallet-labs/ika-pre-alpha#3bd7945e012950e54fb4d0057b72a7d466556fc1"
+source = "git+https://github.com/dwallet-labs/ika-pre-alpha?rev=3bd7945e012950e54fb4d0057b72a7d466556fc1#3bd7945e012950e54fb4d0057b72a7d466556fc1"
 dependencies = [
- "quasar-lang",
+ "quasar-lang 0.0.0 (git+https://github.com/blueshift-gg/quasar)",
  "solana-instruction-view",
 ]
 
@@ -263,15 +272,39 @@ dependencies = [
 [[package]]
 name = "quasar-derive"
 version = "0.0.0"
-source = "git+https://github.com/blueshift-gg/quasar#096c8f7c7c37e373758da8a65b7528cb2230e20e"
+source = "git+https://github.com/blueshift-gg/quasar?rev=096c8f7c7c37e373758da8a65b7528cb2230e20e#096c8f7c7c37e373758da8a65b7528cb2230e20e"
 dependencies = [
  "proc-macro2",
- "quasar-idl-schema",
- "quasar-schema",
+ "quasar-idl-schema 0.0.0 (git+https://github.com/blueshift-gg/quasar?rev=096c8f7c7c37e373758da8a65b7528cb2230e20e)",
+ "quasar-schema 0.0.0 (git+https://github.com/blueshift-gg/quasar?rev=096c8f7c7c37e373758da8a65b7528cb2230e20e)",
  "quote",
  "serde",
  "serde_json",
  "syn",
+]
+
+[[package]]
+name = "quasar-derive"
+version = "0.0.0"
+source = "git+https://github.com/blueshift-gg/quasar#096c8f7c7c37e373758da8a65b7528cb2230e20e"
+dependencies = [
+ "proc-macro2",
+ "quasar-idl-schema 0.0.0 (git+https://github.com/blueshift-gg/quasar)",
+ "quasar-schema 0.0.0 (git+https://github.com/blueshift-gg/quasar)",
+ "quote",
+ "serde",
+ "serde_json",
+ "syn",
+]
+
+[[package]]
+name = "quasar-idl-schema"
+version = "0.0.0"
+source = "git+https://github.com/blueshift-gg/quasar?rev=096c8f7c7c37e373758da8a65b7528cb2230e20e#096c8f7c7c37e373758da8a65b7528cb2230e20e"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]
@@ -287,10 +320,10 @@ dependencies = [
 [[package]]
 name = "quasar-lang"
 version = "0.0.0"
-source = "git+https://github.com/blueshift-gg/quasar#096c8f7c7c37e373758da8a65b7528cb2230e20e"
+source = "git+https://github.com/blueshift-gg/quasar?rev=096c8f7c7c37e373758da8a65b7528cb2230e20e#096c8f7c7c37e373758da8a65b7528cb2230e20e"
 dependencies = [
  "const-crypto",
- "quasar-derive",
+ "quasar-derive 0.0.0 (git+https://github.com/blueshift-gg/quasar?rev=096c8f7c7c37e373758da8a65b7528cb2230e20e)",
  "solana-account-view",
  "solana-address",
  "solana-define-syscall 5.1.0",
@@ -301,6 +334,29 @@ dependencies = [
  "wincode",
  "zeropod",
 ]
+
+[[package]]
+name = "quasar-lang"
+version = "0.0.0"
+source = "git+https://github.com/blueshift-gg/quasar#096c8f7c7c37e373758da8a65b7528cb2230e20e"
+dependencies = [
+ "const-crypto",
+ "quasar-derive 0.0.0 (git+https://github.com/blueshift-gg/quasar)",
+ "solana-account-view",
+ "solana-address",
+ "solana-define-syscall 5.1.0",
+ "solana-instruction",
+ "solana-instruction-view",
+ "solana-program-error",
+ "solana-program-log",
+ "wincode",
+ "zeropod",
+]
+
+[[package]]
+name = "quasar-schema"
+version = "0.0.0"
+source = "git+https://github.com/blueshift-gg/quasar?rev=096c8f7c7c37e373758da8a65b7528cb2230e20e#096c8f7c7c37e373758da8a65b7528cb2230e20e"
 
 [[package]]
 name = "quasar-schema"

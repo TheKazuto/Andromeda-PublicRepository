@@ -9,8 +9,8 @@ license = "Apache-2.0 OR MIT"
 crate-type = ["lib"]
 
 [dependencies]
-quasar-lang = { git = "https://github.com/blueshift-gg/quasar" }
-ika-dwallet-quasar = { git = "https://github.com/dwallet-labs/ika-pre-alpha" }
+quasar-lang = { git = "https://github.com/blueshift-gg/quasar", rev = "096c8f7c7c37e373758da8a65b7528cb2230e20e" }
+ika-dwallet-quasar = { git = "https://github.com/dwallet-labs/ika-pre-alpha", rev = "3bd7945e012950e54fb4d0057b72a7d466556fc1" }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }

@@ -1,0 +1,30 @@
+[package]
+name = "andromeda_oidc_verifier"
+version = "0.1.0"
+edition = "2021"
+description = "Andromeda — no_std on-chain OIDC JWT verifier (RS256 via the sol_big_mod_exp syscall) for the Login Social feature. Consumed by rules-policy (scheme = 4 = OidcJwt)."
+license = "Apache-2.0 OR MIT"
+
+[lib]
+crate-type = ["lib"]
+
+[dependencies]
+# The SBF build needs nothing — SHA-256 and big-mod-exp are runtime syscalls.
+
+# Host-only: a real SHA-256 (so unit tests produce digests matching the on-chain
+# syscall) and a real modexp (so the host build of the RSA verify is not a stub).
+# Neither is pulled into the SBF build, where both are runtime syscalls.
+[target.'cfg(not(target_os = "solana"))'.dependencies]
+sha2 = { version = "0.10", default-features = false }
+num-bigint = "0.4"
+
+# Host-only dev-deps for the fixture-driven E2E test (`tests/fixtures_e2e.rs`).
+[target.'cfg(not(target_os = "solana"))'.dev-dependencies]
+serde_json = "1"
+base64 = "0.22"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }
+
+[profile.release]
+overflow-checks = true

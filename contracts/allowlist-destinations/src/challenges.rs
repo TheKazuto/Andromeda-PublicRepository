@@ -18,6 +18,7 @@ pub const OP_RESUME: &[u8] = b"resume";
 fn admin_hash(
     op_tag: &[u8],
     dwallet: &Address,
+    policy: &Address,
     nonce: u64,
     owner_slot: &[u8; 34],
     extras: &[&[u8]],
@@ -27,9 +28,10 @@ fn admin_hash(
     parts[0] = DOMAIN;
     parts[1] = op_tag;
     parts[2] = dwallet.as_array().as_slice();
-    parts[3] = &nonce_le;
-    parts[4] = owner_slot;
-    let mut n = 5usize;
+    parts[3] = policy.as_array().as_slice();
+    parts[4] = &nonce_le;
+    parts[5] = owner_slot;
+    let mut n = 6usize;
     for &e in extras {
         if n >= parts.len() {
             break;
@@ -61,29 +63,53 @@ pub fn init_policy_challenge(
 #[inline]
 pub fn add_destination_challenge(
     dwallet: &Address,
+    policy: &Address,
     destination: &[u8; 32],
     nonce: u64,
     owner_slot: &[u8; 34],
 ) -> [u8; 32] {
-    admin_hash(OP_ADD_DESTINATION, dwallet, nonce, owner_slot, &[destination.as_slice()])
+    admin_hash(OP_ADD_DESTINATION, dwallet, policy, nonce, owner_slot, &[destination.as_slice()])
 }
 
 #[inline]
 pub fn remove_destination_challenge(
     dwallet: &Address,
+    policy: &Address,
     destination: &[u8; 32],
     nonce: u64,
     owner_slot: &[u8; 34],
 ) -> [u8; 32] {
-    admin_hash(OP_REMOVE_DESTINATION, dwallet, nonce, owner_slot, &[destination.as_slice()])
+    admin_hash(OP_REMOVE_DESTINATION, dwallet, policy, nonce, owner_slot, &[destination.as_slice()])
 }
 
 #[inline]
-pub fn pause_challenge(dwallet: &Address, nonce: u64, owner_slot: &[u8; 34]) -> [u8; 32] {
-    admin_hash(OP_PAUSE, dwallet, nonce, owner_slot, &[])
+pub fn pause_challenge(dwallet: &Address, policy: &Address, nonce: u64, owner_slot: &[u8; 34]) -> [u8; 32] {
+    admin_hash(OP_PAUSE, dwallet, policy, nonce, owner_slot, &[])
 }
 
 #[inline]
-pub fn resume_challenge(dwallet: &Address, nonce: u64, owner_slot: &[u8; 34]) -> [u8; 32] {
-    admin_hash(OP_RESUME, dwallet, nonce, owner_slot, &[])
+pub fn resume_challenge(dwallet: &Address, policy: &Address, nonce: u64, owner_slot: &[u8; 34]) -> [u8; 32] {
+    admin_hash(OP_RESUME, dwallet, policy, nonce, owner_slot, &[])
+}
+
+#[inline]
+pub fn request_metadata_digest(
+    policy: &Address,
+    dwallet: &Address,
+    message_digest: &[u8; 32],
+    destination: &Address,
+    user_pubkey: &[u8; 32],
+    signature_scheme: u16,
+) -> [u8; 32] {
+    let scheme_le = signature_scheme.to_le_bytes();
+    hashv(&[
+        DOMAIN,
+        b"request-signature",
+        policy.as_array().as_slice(),
+        dwallet.as_array().as_slice(),
+        message_digest,
+        destination.as_array().as_slice(),
+        user_pubkey,
+        &scheme_le,
+    ])
 }

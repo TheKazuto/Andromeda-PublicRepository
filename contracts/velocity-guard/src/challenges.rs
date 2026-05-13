@@ -36,6 +36,7 @@ pub fn init_policy_challenge(
 fn admin_hash(
     op_tag: &[u8],
     dwallet: &Address,
+    policy: &Address,
     nonce: u64,
     owner_slot: &[u8; 34],
     extras: &[&[u8]],
@@ -45,9 +46,10 @@ fn admin_hash(
     parts[0] = DOMAIN;
     parts[1] = op_tag;
     parts[2] = dwallet.as_array().as_slice();
-    parts[3] = &nonce_le;
-    parts[4] = owner_slot;
-    let mut n = 5usize;
+    parts[3] = policy.as_array().as_slice();
+    parts[4] = &nonce_le;
+    parts[5] = owner_slot;
+    let mut n = 6usize;
     for &e in extras {
         if n >= parts.len() {
             break;
@@ -61,6 +63,7 @@ fn admin_hash(
 #[inline]
 pub fn update_window_challenge(
     dwallet: &Address,
+    policy: &Address,
     max_sigs_per_window: u32,
     window_slots: u64,
     nonce: u64,
@@ -68,15 +71,38 @@ pub fn update_window_challenge(
 ) -> [u8; 32] {
     let max_le = max_sigs_per_window.to_le_bytes();
     let win_le = window_slots.to_le_bytes();
-    admin_hash(OP_UPDATE_WINDOW, dwallet, nonce, owner_slot, &[&max_le, &win_le])
+    admin_hash(OP_UPDATE_WINDOW, dwallet, policy, nonce, owner_slot, &[&max_le, &win_le])
 }
 
 #[inline]
-pub fn pause_challenge(dwallet: &Address, nonce: u64, owner_slot: &[u8; 34]) -> [u8; 32] {
-    admin_hash(OP_PAUSE, dwallet, nonce, owner_slot, &[])
+pub fn pause_challenge(dwallet: &Address, policy: &Address, nonce: u64, owner_slot: &[u8; 34]) -> [u8; 32] {
+    admin_hash(OP_PAUSE, dwallet, policy, nonce, owner_slot, &[])
 }
 
 #[inline]
-pub fn resume_challenge(dwallet: &Address, nonce: u64, owner_slot: &[u8; 34]) -> [u8; 32] {
-    admin_hash(OP_RESUME, dwallet, nonce, owner_slot, &[])
+pub fn resume_challenge(dwallet: &Address, policy: &Address, nonce: u64, owner_slot: &[u8; 34]) -> [u8; 32] {
+    admin_hash(OP_RESUME, dwallet, policy, nonce, owner_slot, &[])
+}
+
+#[inline]
+pub fn request_metadata_digest(
+    policy: &Address,
+    dwallet: &Address,
+    message_digest: &[u8; 32],
+    user_pubkey: &[u8; 32],
+    signature_scheme: u16,
+    current_slot: u64,
+) -> [u8; 32] {
+    let scheme_le = signature_scheme.to_le_bytes();
+    let slot_le = current_slot.to_le_bytes();
+    hashv(&[
+        DOMAIN,
+        b"request-signature",
+        policy.as_array().as_slice(),
+        dwallet.as_array().as_slice(),
+        message_digest,
+        user_pubkey,
+        &scheme_le,
+        &slot_le,
+    ])
 }

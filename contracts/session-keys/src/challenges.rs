@@ -56,6 +56,7 @@ pub fn init_policy_challenge(
 fn admin_hash(
     op_tag: &[u8],
     dwallet: &Address,
+    policy: &Address,
     nonce: u64,
     owner_slot: &[u8; 34],
     extras: &[&[u8]],
@@ -65,9 +66,10 @@ fn admin_hash(
     parts[0] = DOMAIN;
     parts[1] = op_tag;
     parts[2] = dwallet.as_array().as_slice();
-    parts[3] = &nonce_le;
-    parts[4] = owner_slot;
-    let mut n = 5usize;
+    parts[3] = policy.as_array().as_slice();
+    parts[4] = &nonce_le;
+    parts[5] = owner_slot;
+    let mut n = 6usize;
     for &e in extras {
         if n >= parts.len() {
             break;
@@ -81,6 +83,7 @@ fn admin_hash(
 #[inline]
 pub fn create_session_challenge(
     dwallet: &Address,
+    policy: &Address,
     session_key: &Address,
     expires_at_slot: u64,
     max_amount_per_tx: u64,
@@ -94,6 +97,7 @@ pub fn create_session_challenge(
     admin_hash(
         OP_CREATE_SESSION,
         dwallet,
+        policy,
         nonce,
         owner_slot,
         &[
@@ -108,15 +112,17 @@ pub fn create_session_challenge(
 #[inline]
 pub fn revoke_session_challenge(
     dwallet: &Address,
+    policy: &Address,
     nonce: u64,
     owner_slot: &[u8; 34],
 ) -> [u8; 32] {
-    admin_hash(OP_REVOKE_SESSION, dwallet, nonce, owner_slot, &[])
+    admin_hash(OP_REVOKE_SESSION, dwallet, policy, nonce, owner_slot, &[])
 }
 
 #[inline]
 pub fn add_allowed_program_challenge(
     dwallet: &Address,
+    policy: &Address,
     program_id: &Address,
     nonce: u64,
     owner_slot: &[u8; 34],
@@ -124,6 +130,7 @@ pub fn add_allowed_program_challenge(
     admin_hash(
         OP_ADD_ALLOWED_PROGRAM,
         dwallet,
+        policy,
         nonce,
         owner_slot,
         &[program_id.as_array().as_slice()],
@@ -133,6 +140,7 @@ pub fn add_allowed_program_challenge(
 #[inline]
 pub fn remove_allowed_program_challenge(
     dwallet: &Address,
+    policy: &Address,
     program_id: &Address,
     nonce: u64,
     owner_slot: &[u8; 34],
@@ -140,6 +148,7 @@ pub fn remove_allowed_program_challenge(
     admin_hash(
         OP_REMOVE_ALLOWED_PROGRAM,
         dwallet,
+        policy,
         nonce,
         owner_slot,
         &[program_id.as_array().as_slice()],
@@ -149,6 +158,7 @@ pub fn remove_allowed_program_challenge(
 #[inline]
 pub fn close_session_challenge(
     dwallet: &Address,
+    policy: &Address,
     recipient: &Address,
     nonce: u64,
     owner_slot: &[u8; 34],
@@ -156,8 +166,39 @@ pub fn close_session_challenge(
     admin_hash(
         OP_CLOSE_SESSION,
         dwallet,
+        policy,
         nonce,
         owner_slot,
         &[recipient.as_array().as_slice()],
     )
+}
+
+#[inline]
+pub fn request_metadata_digest(
+    policy: &Address,
+    dwallet: &Address,
+    session_key: &Address,
+    message_digest: &[u8; 32],
+    amount: u64,
+    destination_program: &Address,
+    user_pubkey: &[u8; 32],
+    signature_scheme: u16,
+    signature_nonce: u64,
+) -> [u8; 32] {
+    let amount_le = amount.to_le_bytes();
+    let scheme_le = signature_scheme.to_le_bytes();
+    let nonce_le = signature_nonce.to_le_bytes();
+    hashv(&[
+        DOMAIN,
+        b"request-signature",
+        policy.as_array().as_slice(),
+        dwallet.as_array().as_slice(),
+        session_key.as_array().as_slice(),
+        message_digest,
+        &amount_le,
+        destination_program.as_array().as_slice(),
+        user_pubkey,
+        &scheme_le,
+        &nonce_le,
+    ])
 }

@@ -12,21 +12,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "andromeda_auth"
-version = "0.1.0"
-dependencies = [
- "solana-address",
-]
-
-[[package]]
-name = "andromeda_oidc_verifier"
-version = "0.1.0"
-dependencies = [
- "num-bigint",
- "sha2",
-]
-
-[[package]]
 name = "andromeda_policy_shared"
 version = "0.1.0"
 dependencies = [
@@ -85,34 +70,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "curve25519-dalek"
-version = "4.1.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "97fb8b7c4503de7d6ae7b42ab72a5a59857b4c937ec27a3d4539dba95b5ab2be"
-dependencies = [
- "cfg-if",
- "cpufeatures",
- "curve25519-dalek-derive",
- "digest",
- "fiat-crypto",
- "rand_core",
- "rustc_version",
- "subtle",
- "zeroize",
-]
-
-[[package]]
-name = "curve25519-dalek-derive"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f46882e17999c6cc590af592290432be3bce0428cb0d5f8b6715e4dc7b383eb3"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
-]
-
-[[package]]
 name = "darling"
 version = "0.21.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -156,12 +113,6 @@ dependencies = [
  "block-buffer",
  "crypto-common",
 ]
-
-[[package]]
-name = "fiat-crypto"
-version = "0.2.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
 
 [[package]]
 name = "five8"
@@ -243,25 +194,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
-name = "num-bigint"
-version = "0.4.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a5e44f723f1133c9deac646763579fdb3ac745e418f2a7af9cd0c431da1f20b9"
-dependencies = [
- "num-integer",
- "num-traits",
-]
-
-[[package]]
-name = "num-integer"
-version = "0.1.46"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7969661fd2958a5cb096e56c8e1ad0444ac2bbcd0061bd28660485a44879858f"
-dependencies = [
- "num-traits",
-]
-
-[[package]]
 name = "num-traits"
 version = "0.2.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -302,7 +234,7 @@ dependencies = [
 [[package]]
 name = "quasar-derive"
 version = "0.0.0"
-source = "git+https://github.com/blueshift-gg/quasar#096c8f7c7c37e373758da8a65b7528cb2230e20e"
+source = "git+https://github.com/blueshift-gg/quasar#84a4329a6c696bd847712bbd2a525aa8811b0ca4"
 dependencies = [
  "proc-macro2",
  "quasar-idl-schema 0.0.0 (git+https://github.com/blueshift-gg/quasar)",
@@ -326,7 +258,7 @@ dependencies = [
 [[package]]
 name = "quasar-idl-schema"
 version = "0.0.0"
-source = "git+https://github.com/blueshift-gg/quasar#096c8f7c7c37e373758da8a65b7528cb2230e20e"
+source = "git+https://github.com/blueshift-gg/quasar#84a4329a6c696bd847712bbd2a525aa8811b0ca4"
 dependencies = [
  "serde",
  "serde_json",
@@ -348,13 +280,13 @@ dependencies = [
  "solana-program-error",
  "solana-program-log",
  "wincode",
- "zeropod",
+ "zeropod 0.2.0",
 ]
 
 [[package]]
 name = "quasar-lang"
 version = "0.0.0"
-source = "git+https://github.com/blueshift-gg/quasar#096c8f7c7c37e373758da8a65b7528cb2230e20e"
+source = "git+https://github.com/blueshift-gg/quasar#84a4329a6c696bd847712bbd2a525aa8811b0ca4"
 dependencies = [
  "const-crypto",
  "quasar-derive 0.0.0 (git+https://github.com/blueshift-gg/quasar)",
@@ -366,7 +298,7 @@ dependencies = [
  "solana-program-error",
  "solana-program-log",
  "wincode",
- "zeropod",
+ "zeropod 0.3.0",
 ]
 
 [[package]]
@@ -377,7 +309,7 @@ source = "git+https://github.com/blueshift-gg/quasar?rev=096c8f7c7c37e373758da8a
 [[package]]
 name = "quasar-schema"
 version = "0.0.0"
-source = "git+https://github.com/blueshift-gg/quasar#096c8f7c7c37e373758da8a65b7528cb2230e20e"
+source = "git+https://github.com/blueshift-gg/quasar#84a4329a6c696bd847712bbd2a525aa8811b0ca4"
 
 [[package]]
 name = "quote"
@@ -387,12 +319,6 @@ checksum = "41f2619966050689382d2b44f664f4bc593e129785a36d6ee376ddf37259b924"
 dependencies = [
  "proc-macro2",
 ]
-
-[[package]]
-name = "rand_core"
-version = "0.6.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ec0be4795e2f6a28069bec0b5ff3e2ac9bafc99e6a9a7dc3547996c5c816922c"
 
 [[package]]
 name = "regex"
@@ -422,33 +348,6 @@ name = "regex-syntax"
 version = "0.8.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
-
-[[package]]
-name = "rules_policy"
-version = "0.1.0"
-dependencies = [
- "andromeda_auth",
- "andromeda_oidc_verifier",
- "andromeda_policy_shared",
- "ika-dwallet-quasar",
- "quasar-lang 0.0.0 (git+https://github.com/blueshift-gg/quasar?rev=096c8f7c7c37e373758da8a65b7528cb2230e20e)",
- "solana-address",
-]
-
-[[package]]
-name = "rustc_version"
-version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cfcb3a22ef46e85b45de6ee7e79d063319ebb6594faafcf1c225ea92ab6e9b92"
-dependencies = [
- "semver",
-]
-
-[[package]]
-name = "semver"
-version = "1.0.28"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
 
 [[package]]
 name = "serde"
@@ -526,14 +425,11 @@ version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5f08236dacd0e6dc8234becef58e27c8567856644ef509d7e97957d55a91dc72"
 dependencies = [
- "curve25519-dalek",
  "five8",
  "five8_const",
- "sha2-const-stable",
  "solana-define-syscall 5.1.0",
  "solana-program-error",
  "solana-sanitize",
- "solana-sha256-hasher",
  "wincode",
 ]
 
@@ -548,12 +444,6 @@ name = "solana-define-syscall"
 version = "5.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "21e14a4f604117f379840956a8fc8695e4c84f5b0ebed192f31f60d9b85d581d"
-
-[[package]]
-name = "solana-hash"
-version = "4.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1b113239362cee7093bfb250467138f079a2a03673181dc15bff6ccd677912d"
 
 [[package]]
 name = "solana-instruction"
@@ -631,27 +521,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dcf09694a0fc14e5ffb18f9b7b7c0f15ecb6eac5b5610bf76a1853459d19daf9"
 
 [[package]]
-name = "solana-sha256-hasher"
-version = "3.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "db7dc3011ea4c0334aaaa7e7128cb390ecf546b28d412e9bf2064680f57f588f"
-dependencies = [
- "sha2",
- "solana-define-syscall 4.0.1",
- "solana-hash",
-]
-
-[[package]]
 name = "strsim"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
-
-[[package]]
-name = "subtle"
-version = "2.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "syn"
@@ -728,12 +601,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "zeroize"
-version = "1.8.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b97154e67e32c85465826e8bcc1c59429aaaf107c1e4a9e53c8d8ccd5eff88d0"
-
-[[package]]
 name = "zeropod"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -742,7 +609,19 @@ dependencies = [
  "solana-address",
  "solana-program-error",
  "wincode",
- "zeropod-derive",
+ "zeropod-derive 0.2.0",
+]
+
+[[package]]
+name = "zeropod"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "326a19e31370c41192852e51a501f936ee4aff1bbf488951f6b75d1d61138b24"
+dependencies = [
+ "solana-address",
+ "solana-program-error",
+ "wincode",
+ "zeropod-derive 0.3.0",
 ]
 
 [[package]]
@@ -750,6 +629,17 @@ name = "zeropod-derive"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4b8369005ce19ec7a48b139c6535983521a9e721949ea0c9a1b56c53131749fa"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "zeropod-derive"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f0035f87c580a717d577becefd420f1e344b4109f810ca918636b88cb20d7051"
 dependencies = [
  "proc-macro2",
  "quote",

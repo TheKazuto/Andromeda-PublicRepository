@@ -50,6 +50,7 @@ pub fn init_policy_challenge(
 fn admin_hash(
     op_tag: &[u8],
     dwallet: &Address,
+    policy: &Address,
     nonce: u64,
     owner_slot: &[u8; 34],
     extras: &[&[u8]],
@@ -59,9 +60,10 @@ fn admin_hash(
     parts[0] = DOMAIN;
     parts[1] = op_tag;
     parts[2] = dwallet.as_array().as_slice();
-    parts[3] = &nonce_le;
-    parts[4] = owner_slot;
-    let mut n = 5usize;
+    parts[3] = policy.as_array().as_slice();
+    parts[4] = &nonce_le;
+    parts[5] = owner_slot;
+    let mut n = 6usize;
     for &e in extras {
         if n >= parts.len() {
             break;
@@ -75,6 +77,7 @@ fn admin_hash(
 #[inline]
 pub fn update_policy_challenge(
     dwallet: &Address,
+    policy: &Address,
     threshold_amount: u64,
     passkey_pubkey: &[u8; 33],
     nonce: u64,
@@ -84,6 +87,7 @@ pub fn update_policy_challenge(
     admin_hash(
         OP_UPDATE_POLICY,
         dwallet,
+        policy,
         nonce,
         owner_slot,
         &[&amount_le, passkey_pubkey.as_slice()],
@@ -91,13 +95,13 @@ pub fn update_policy_challenge(
 }
 
 #[inline]
-pub fn pause_challenge(dwallet: &Address, nonce: u64, owner_slot: &[u8; 34]) -> [u8; 32] {
-    admin_hash(OP_PAUSE, dwallet, nonce, owner_slot, &[])
+pub fn pause_challenge(dwallet: &Address, policy: &Address, nonce: u64, owner_slot: &[u8; 34]) -> [u8; 32] {
+    admin_hash(OP_PAUSE, dwallet, policy, nonce, owner_slot, &[])
 }
 
 #[inline]
-pub fn resume_challenge(dwallet: &Address, nonce: u64, owner_slot: &[u8; 34]) -> [u8; 32] {
-    admin_hash(OP_RESUME, dwallet, nonce, owner_slot, &[])
+pub fn resume_challenge(dwallet: &Address, policy: &Address, nonce: u64, owner_slot: &[u8; 34]) -> [u8; 32] {
+    admin_hash(OP_RESUME, dwallet, policy, nonce, owner_slot, &[])
 }
 
 /// Challenge that the WebAuthn passkey must sign for an above-threshold
@@ -106,20 +110,61 @@ pub fn resume_challenge(dwallet: &Address, nonce: u64, owner_slot: &[u8; 34]) ->
 #[inline]
 pub fn step_up_challenge(
     dwallet: &Address,
+    message_approval: &Address,
     message_digest: &[u8; 32],
+    metadata_digest: &[u8; 32],
+    user_pubkey: &[u8; 32],
+    signature_scheme: u16,
+    message_approval_bump: u8,
     tx_amount: u64,
     nonce: u64,
     passkey_pubkey: &[u8; 33],
 ) -> [u8; 32] {
+    let scheme_le = signature_scheme.to_le_bytes();
+    let bump = [message_approval_bump];
     let amount_le = tx_amount.to_le_bytes();
     let nonce_le = nonce.to_le_bytes();
     hashv(&[
         DOMAIN,
         OP_STEP_UP,
         dwallet.as_array().as_slice(),
+        message_approval.as_array().as_slice(),
         message_digest,
+        metadata_digest,
+        user_pubkey,
+        &scheme_le,
+        &bump,
         &amount_le,
         &nonce_le,
         passkey_pubkey.as_slice(),
+    ])
+}
+
+#[inline]
+pub fn request_metadata_digest(
+    policy: &Address,
+    dwallet: &Address,
+    message_digest: &[u8; 32],
+    tx_amount: u64,
+    user_pubkey: &[u8; 32],
+    signature_scheme: u16,
+    step_up_nonce: Option<u64>,
+) -> [u8; 32] {
+    let amount_le = tx_amount.to_le_bytes();
+    let scheme_le = signature_scheme.to_le_bytes();
+    let no_nonce = 0u64.to_le_bytes();
+    let nonce_le = step_up_nonce.unwrap_or(0).to_le_bytes();
+    let nonce_flag = [if step_up_nonce.is_some() { 1 } else { 0 }];
+    hashv(&[
+        DOMAIN,
+        b"request-signature",
+        policy.as_array().as_slice(),
+        dwallet.as_array().as_slice(),
+        message_digest,
+        &amount_le,
+        user_pubkey,
+        &scheme_le,
+        &nonce_flag,
+        if step_up_nonce.is_some() { &nonce_le } else { &no_nonce },
     ])
 }

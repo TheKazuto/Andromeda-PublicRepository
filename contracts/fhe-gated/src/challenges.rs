@@ -50,6 +50,7 @@ pub fn init_policy_challenge(
 fn admin_hash(
     op_tag: &[u8],
     dwallet: &Address,
+    policy: &Address,
     nonce: u64,
     owner_slot: &[u8; 34],
     extras: &[&[u8]],
@@ -59,9 +60,10 @@ fn admin_hash(
     parts[0] = DOMAIN;
     parts[1] = op_tag;
     parts[2] = dwallet.as_array().as_slice();
-    parts[3] = &nonce_le;
-    parts[4] = owner_slot;
-    let mut n = 5usize;
+    parts[3] = policy.as_array().as_slice();
+    parts[4] = &nonce_le;
+    parts[5] = owner_slot;
+    let mut n = 6usize;
     for &e in extras {
         if n >= parts.len() {
             break;
@@ -75,6 +77,7 @@ fn admin_hash(
 #[inline]
 pub fn rotate_authority_challenge(
     dwallet: &Address,
+    policy: &Address,
     new_fhe_authority: &Address,
     nonce: u64,
     owner_slot: &[u8; 34],
@@ -82,6 +85,7 @@ pub fn rotate_authority_challenge(
     admin_hash(
         OP_ROTATE_AUTHORITY,
         dwallet,
+        policy,
         nonce,
         owner_slot,
         &[new_fhe_authority.as_array().as_slice()],
@@ -89,13 +93,39 @@ pub fn rotate_authority_challenge(
 }
 
 #[inline]
-pub fn pause_challenge(dwallet: &Address, nonce: u64, owner_slot: &[u8; 34]) -> [u8; 32] {
-    admin_hash(OP_PAUSE, dwallet, nonce, owner_slot, &[])
+pub fn pause_challenge(dwallet: &Address, policy: &Address, nonce: u64, owner_slot: &[u8; 34]) -> [u8; 32] {
+    admin_hash(OP_PAUSE, dwallet, policy, nonce, owner_slot, &[])
 }
 
 #[inline]
-pub fn resume_challenge(dwallet: &Address, nonce: u64, owner_slot: &[u8; 34]) -> [u8; 32] {
-    admin_hash(OP_RESUME, dwallet, nonce, owner_slot, &[])
+pub fn resume_challenge(dwallet: &Address, policy: &Address, nonce: u64, owner_slot: &[u8; 34]) -> [u8; 32] {
+    admin_hash(OP_RESUME, dwallet, policy, nonce, owner_slot, &[])
+}
+
+#[inline]
+pub fn request_metadata_digest(
+    policy: &Address,
+    dwallet: &Address,
+    message_digest: &[u8; 32],
+    decision_created_slot: u64,
+    decision_authorize: u8,
+    user_pubkey: &[u8; 32],
+    signature_scheme: u16,
+) -> [u8; 32] {
+    let slot_le = decision_created_slot.to_le_bytes();
+    let auth = [decision_authorize];
+    let scheme_le = signature_scheme.to_le_bytes();
+    hashv(&[
+        DOMAIN,
+        b"request-signature",
+        policy.as_array().as_slice(),
+        dwallet.as_array().as_slice(),
+        message_digest,
+        &slot_le,
+        &auth,
+        user_pubkey,
+        &scheme_le,
+    ])
 }
 
 /// Canonical 32-byte digest the Vault Transit `andromeda-fhe` key must sign

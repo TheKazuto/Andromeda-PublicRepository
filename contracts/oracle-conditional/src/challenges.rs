@@ -45,6 +45,7 @@ pub fn init_policy_challenge(
 fn admin_hash(
     op_tag: &[u8],
     dwallet: &Address,
+    policy: &Address,
     nonce: u64,
     owner_slot: &[u8; 34],
     extras: &[&[u8]],
@@ -54,9 +55,10 @@ fn admin_hash(
     parts[0] = DOMAIN;
     parts[1] = op_tag;
     parts[2] = dwallet.as_array().as_slice();
-    parts[3] = &nonce_le;
-    parts[4] = owner_slot;
-    let mut n = 5usize;
+    parts[3] = policy.as_array().as_slice();
+    parts[4] = &nonce_le;
+    parts[5] = owner_slot;
+    let mut n = 6usize;
     for &e in extras {
         if n >= parts.len() {
             break;
@@ -71,6 +73,7 @@ fn admin_hash(
 #[allow(clippy::too_many_arguments)]
 pub fn update_bounds_challenge(
     dwallet: &Address,
+    policy: &Address,
     min_price: i64,
     max_price: i64,
     max_age_slots: u64,
@@ -85,6 +88,7 @@ pub fn update_bounds_challenge(
     admin_hash(
         OP_UPDATE_BOUNDS,
         dwallet,
+        policy,
         nonce,
         owner_slot,
         &[&min_le, &max_le, &age_le, &bps_le],
@@ -92,11 +96,39 @@ pub fn update_bounds_challenge(
 }
 
 #[inline]
-pub fn pause_challenge(dwallet: &Address, nonce: u64, owner_slot: &[u8; 34]) -> [u8; 32] {
-    admin_hash(OP_PAUSE, dwallet, nonce, owner_slot, &[])
+pub fn pause_challenge(dwallet: &Address, policy: &Address, nonce: u64, owner_slot: &[u8; 34]) -> [u8; 32] {
+    admin_hash(OP_PAUSE, dwallet, policy, nonce, owner_slot, &[])
 }
 
 #[inline]
-pub fn resume_challenge(dwallet: &Address, nonce: u64, owner_slot: &[u8; 34]) -> [u8; 32] {
-    admin_hash(OP_RESUME, dwallet, nonce, owner_slot, &[])
+pub fn resume_challenge(dwallet: &Address, policy: &Address, nonce: u64, owner_slot: &[u8; 34]) -> [u8; 32] {
+    admin_hash(OP_RESUME, dwallet, policy, nonce, owner_slot, &[])
+}
+
+#[inline]
+pub fn request_metadata_digest(
+    policy: &Address,
+    dwallet: &Address,
+    message_digest: &[u8; 32],
+    oracle_feed: &Address,
+    current_price: i64,
+    posted_slot: u64,
+    user_pubkey: &[u8; 32],
+    signature_scheme: u16,
+) -> [u8; 32] {
+    let price_le = current_price.to_le_bytes();
+    let slot_le = posted_slot.to_le_bytes();
+    let scheme_le = signature_scheme.to_le_bytes();
+    hashv(&[
+        DOMAIN,
+        b"request-signature",
+        policy.as_array().as_slice(),
+        dwallet.as_array().as_slice(),
+        message_digest,
+        oracle_feed.as_array().as_slice(),
+        &price_le,
+        &slot_le,
+        user_pubkey,
+        &scheme_le,
+    ])
 }

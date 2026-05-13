@@ -476,6 +476,21 @@ impl RequestSignatureViaSession {
         }
         require!(allowed, SessionError::SessionDestinationNotAllowed);
 
+        let policy_addr = *self.session.address();
+        let dwallet_addr = *self.dwallet_account.address();
+        let expected_metadata_digest = challenges::request_metadata_digest(
+            &policy_addr,
+            &dwallet_addr,
+            &self.session.session_key,
+            &message_digest,
+            amount,
+            &destination_program,
+            &user_pubkey,
+            signature_scheme,
+            on_chain_nonce,
+        );
+        require!(metadata_digest == expected_metadata_digest, SessionError::AuthFailed);
+
         // Audit H3: increment signature nonce atomically before CPI.
         self.session.next_signature_nonce = (on_chain_nonce + 1).into();
         self.session.used_count = (used + 1).into();
@@ -534,12 +549,13 @@ pub struct AdminAction {
 impl AdminAction {
     fn run<F>(&mut self, expected_nonce: u64, build_challenge: F) -> Result<(), ProgramError>
     where
-        F: FnOnce(&Address, &[u8; MEMBER_SLOT_LEN], u64) -> [u8; 32],
+        F: FnOnce(&Address, &Address, &[u8; MEMBER_SLOT_LEN], u64) -> [u8; 32],
     {
         let dwallet_addr = *self.dwallet_account.address();
+        let policy_addr = *self.session.address();
         let owner_slot = self.session.owner_slot;
         let on_chain_nonce: u64 = self.session.next_admin_nonce.into();
-        let challenge = build_challenge(&dwallet_addr, &owner_slot, on_chain_nonce);
+        let challenge = build_challenge(&dwallet_addr, &policy_addr, &owner_slot, on_chain_nonce);
 
         check_sysvar_addr(self.instructions_sysvar.address())?;
         let sysvar_view = self.instructions_sysvar.to_account_view();
@@ -563,8 +579,8 @@ impl AdminAction {
 
     #[inline(always)]
     pub fn revoke(&mut self, expected_nonce: u64) -> Result<(), ProgramError> {
-        self.run(expected_nonce, |dw, owner, n| {
-            challenges::revoke_session_challenge(dw, n, owner)
+        self.run(expected_nonce, |dw, policy, owner, n| {
+            challenges::revoke_session_challenge(dw, policy, n, owner)
         })?;
         self.session.expires_at_slot = 0u64.into();
         Ok(())
@@ -576,8 +592,8 @@ impl AdminAction {
         program_id: Address,
         expected_nonce: u64,
     ) -> Result<(), ProgramError> {
-        self.run(expected_nonce, |dw, owner, n| {
-            challenges::add_allowed_program_challenge(dw, &program_id, n, owner)
+        self.run(expected_nonce, |dw, policy, owner, n| {
+            challenges::add_allowed_program_challenge(dw, policy, &program_id, n, owner)
         })?;
         let count = self.session.allowed_program_count as usize;
         let bytes = program_id.as_array();
@@ -600,8 +616,8 @@ impl AdminAction {
         program_id: Address,
         expected_nonce: u64,
     ) -> Result<(), ProgramError> {
-        self.run(expected_nonce, |dw, owner, n| {
-            challenges::remove_allowed_program_challenge(dw, &program_id, n, owner)
+        self.run(expected_nonce, |dw, policy, owner, n| {
+            challenges::remove_allowed_program_challenge(dw, policy, &program_id, n, owner)
         })?;
         let count = self.session.allowed_program_count as usize;
         let bytes = program_id.as_array();
@@ -655,11 +671,13 @@ impl CloseSession {
     #[inline(always)]
     pub fn close(&mut self, expected_nonce: u64) -> Result<(), ProgramError> {
         let dwallet_addr = *self.dwallet_account.address();
+        let policy_addr = *self.session.address();
         let owner_slot = self.session.owner_slot;
         let on_chain_nonce: u64 = self.session.next_admin_nonce.into();
         let recipient_addr = *self.recipient.address();
         let challenge = challenges::close_session_challenge(
             &dwallet_addr,
+            &policy_addr,
             &recipient_addr,
             on_chain_nonce,
             &owner_slot,

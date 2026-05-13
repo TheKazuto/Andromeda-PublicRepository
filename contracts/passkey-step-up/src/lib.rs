@@ -412,6 +412,18 @@ impl RequestSignature {
 
         let threshold: u64 = self.policy.threshold_amount.into();
         require!(tx_amount < threshold, PasskeyError::StepUpRequired);
+        let policy_addr = *self.policy.address();
+        let dwallet_addr = *self.dwallet_account.address();
+        let expected_metadata_digest = challenges::request_metadata_digest(
+            &policy_addr,
+            &dwallet_addr,
+            &message_digest,
+            tx_amount,
+            &user_pubkey,
+            signature_scheme,
+            None,
+        );
+        require!(metadata_digest == expected_metadata_digest, PasskeyError::AuthFailed);
         require!(
             validate_ika_cpi_accounts(
                 &self.dwallet_program.to_account_view(),
@@ -514,10 +526,27 @@ impl RequestSignatureStepUp {
         let cdj_slice = &webauthn_cdj[..cdj_len];
 
         let dwallet_addr = *self.dwallet_account.address();
+        let policy_addr = *self.policy.address();
+        let message_approval_addr = *self.message_approval.address();
         let passkey_pubkey = self.policy.passkey_pubkey;
-        let challenge = challenges::step_up_challenge(
+        let expected_metadata_digest = challenges::request_metadata_digest(
+            &policy_addr,
             &dwallet_addr,
             &message_digest,
+            tx_amount,
+            &user_pubkey,
+            signature_scheme,
+            Some(on_chain_nonce),
+        );
+        require!(metadata_digest == expected_metadata_digest, PasskeyError::AuthFailed);
+        let challenge = challenges::step_up_challenge(
+            &dwallet_addr,
+            &message_approval_addr,
+            &message_digest,
+            &metadata_digest,
+            &user_pubkey,
+            signature_scheme,
+            message_approval_bump,
             tx_amount,
             on_chain_nonce,
             &passkey_pubkey,
@@ -600,12 +629,13 @@ pub struct AdminAction {
 impl AdminAction {
     fn run<F>(&mut self, expected_nonce: u64, build_challenge: F) -> Result<(), ProgramError>
     where
-        F: FnOnce(&Address, &[u8; MEMBER_SLOT_LEN], u64) -> [u8; 32],
+        F: FnOnce(&Address, &Address, &[u8; MEMBER_SLOT_LEN], u64) -> [u8; 32],
     {
         let dwallet_addr = *self.dwallet_account.address();
+        let policy_addr = *self.policy.address();
         let owner_slot = self.policy.owner_slot;
         let on_chain_nonce: u64 = self.policy.next_admin_nonce.into();
-        let challenge = build_challenge(&dwallet_addr, &owner_slot, on_chain_nonce);
+        let challenge = build_challenge(&dwallet_addr, &policy_addr, &owner_slot, on_chain_nonce);
 
         check_sysvar_addr(self.instructions_sysvar.address())?;
         let sysvar_view = self.instructions_sysvar.to_account_view();
@@ -638,8 +668,8 @@ impl AdminAction {
             passkey_pubkey[0] == 0x02 || passkey_pubkey[0] == 0x03,
             PasskeyError::InvalidPasskeyLen
         );
-        self.run(expected_nonce, |dw, owner, n| {
-            challenges::update_policy_challenge(dw, threshold_amount, &passkey_pubkey, n, owner)
+        self.run(expected_nonce, |dw, policy, owner, n| {
+            challenges::update_policy_challenge(dw, policy, threshold_amount, &passkey_pubkey, n, owner)
         })?;
         self.policy.threshold_amount = threshold_amount.into();
         self.policy.passkey_pubkey = passkey_pubkey;
@@ -648,8 +678,8 @@ impl AdminAction {
 
     #[inline(always)]
     pub fn pause(&mut self, expected_nonce: u64) -> Result<(), ProgramError> {
-        self.run(expected_nonce, |dw, owner, n| {
-            challenges::pause_challenge(dw, n, owner)
+        self.run(expected_nonce, |dw, policy, owner, n| {
+            challenges::pause_challenge(dw, policy, n, owner)
         })?;
         self.policy.paused = 1u64.into();
         Ok(())
@@ -657,8 +687,8 @@ impl AdminAction {
 
     #[inline(always)]
     pub fn resume(&mut self, expected_nonce: u64) -> Result<(), ProgramError> {
-        self.run(expected_nonce, |dw, owner, n| {
-            challenges::resume_challenge(dw, n, owner)
+        self.run(expected_nonce, |dw, policy, owner, n| {
+            challenges::resume_challenge(dw, policy, n, owner)
         })?;
         self.policy.paused = 0u64.into();
         Ok(())

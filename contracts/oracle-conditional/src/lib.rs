@@ -494,6 +494,20 @@ impl RequestSignature {
                 OracleError::PriceTooUncertain
             );
         }
+        let policy_addr = *self.policy.address();
+        let dwallet_addr = *self.dwallet_account.address();
+        let oracle_feed_addr = *self.oracle_feed.address();
+        let expected_metadata_digest = challenges::request_metadata_digest(
+            &policy_addr,
+            &dwallet_addr,
+            &message_digest,
+            &oracle_feed_addr,
+            current_price,
+            posted_slot,
+            &user_pubkey,
+            signature_scheme,
+        );
+        require!(metadata_digest == expected_metadata_digest, OracleError::AuthFailed);
         require!(
             validate_ika_cpi_accounts(
                 &self.dwallet_program.to_account_view(),
@@ -548,12 +562,13 @@ pub struct AdminAction {
 impl AdminAction {
     fn run<F>(&mut self, expected_nonce: u64, build_challenge: F) -> Result<(), ProgramError>
     where
-        F: FnOnce(&Address, &[u8; MEMBER_SLOT_LEN], u64) -> [u8; 32],
+        F: FnOnce(&Address, &Address, &[u8; MEMBER_SLOT_LEN], u64) -> [u8; 32],
     {
         let dwallet_addr = *self.dwallet_account.address();
+        let policy_addr = *self.policy.address();
         let owner_slot = self.policy.owner_slot;
         let on_chain_nonce: u64 = self.policy.next_admin_nonce.into();
-        let challenge = build_challenge(&dwallet_addr, &owner_slot, on_chain_nonce);
+        let challenge = build_challenge(&dwallet_addr, &policy_addr, &owner_slot, on_chain_nonce);
 
         check_sysvar_addr(self.instructions_sysvar.address())?;
         let sysvar_view = self.instructions_sysvar.to_account_view();
@@ -586,9 +601,10 @@ impl AdminAction {
         expected_nonce: u64,
     ) -> Result<(), ProgramError> {
         require!(min_price <= max_price, OracleError::InvalidBounds);
-        self.run(expected_nonce, |dw, owner, n| {
+        self.run(expected_nonce, |dw, policy, owner, n| {
             challenges::update_bounds_challenge(
                 dw,
+                policy,
                 min_price,
                 max_price,
                 max_age_slots,
@@ -606,8 +622,8 @@ impl AdminAction {
 
     #[inline(always)]
     pub fn pause(&mut self, expected_nonce: u64) -> Result<(), ProgramError> {
-        self.run(expected_nonce, |dw, owner, n| {
-            challenges::pause_challenge(dw, n, owner)
+        self.run(expected_nonce, |dw, policy, owner, n| {
+            challenges::pause_challenge(dw, policy, n, owner)
         })?;
         self.policy.paused = 1u64.into();
         Ok(())
@@ -615,8 +631,8 @@ impl AdminAction {
 
     #[inline(always)]
     pub fn resume(&mut self, expected_nonce: u64) -> Result<(), ProgramError> {
-        self.run(expected_nonce, |dw, owner, n| {
-            challenges::resume_challenge(dw, n, owner)
+        self.run(expected_nonce, |dw, policy, owner, n| {
+            challenges::resume_challenge(dw, policy, n, owner)
         })?;
         self.policy.paused = 0u64.into();
         Ok(())

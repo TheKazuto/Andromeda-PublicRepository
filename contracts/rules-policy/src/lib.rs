@@ -55,14 +55,15 @@ use andromeda_auth::{
         admin_remove_member_challenge, admin_revoke_challenge,
         admin_set_cooldown_immediate_challenge, admin_set_daily_limit_immediate_challenge,
         admin_set_primary_challenge, admin_set_quorum_threshold_immediate_challenge,
-        primary_recover_challenge, quorum_contribute_challenge, quorum_session_open_challenge,
-        rules_policy_init_challenge,
+        oidc_primary_use_challenge, oidc_session_open_challenge, primary_recover_challenge,
+        quorum_contribute_challenge, quorum_session_open_challenge, rules_policy_init_challenge,
     },
     hash::hashv,
-    validate_slot, verify_signature, VerifyInput, MEMBER_SLOT_LEN, SCHEME_ED25519,
-    SCHEME_SECP256K1, SCHEME_SECP256R1, SCHEME_WEBAUTHN, WEBAUTHN_AUTH_DATA_MAX,
-    WEBAUTHN_CLIENT_DATA_JSON_MAX,
+    validate_oidc_slot, validate_slot, verify_signature, VerifyInput, MEMBER_SLOT_LEN,
+    SCHEME_ED25519, SCHEME_OIDC_JWT, SCHEME_SECP256K1, SCHEME_SECP256R1, SCHEME_WEBAUTHN,
+    WEBAUTHN_AUTH_DATA_MAX, WEBAUTHN_CLIENT_DATA_JSON_MAX,
 };
+use andromeda_oidc_verifier as oidc_verifier;
 use ika_dwallet_quasar::DWalletContext;
 use andromeda_policy_shared::validate_ika_cpi_accounts;
 use quasar_lang::prelude::*;
@@ -82,6 +83,178 @@ const PENDING_KIND_NONE: u8 = 0;
 const PENDING_KIND_QUORUM: u8 = 1;
 const PENDING_KIND_DAILY_LIMIT: u8 = 2;
 const PENDING_KIND_COOLDOWN: u8 = 3;
+
+// ── Login Social (`scheme = 4 = OidcJwt`) constants ─────────────
+//
+// See `loginsocial.md` §6–§8 and `contracts/oidc-verifier`. Login Social lets a
+// dWallet's *primary* slot be an OIDC identity (`addr_seed = sha256("andromeda::
+// oidc::addr::v1" || lp(iss) || lp(aud) || lp(sub))`). The user proves control
+// of that identity by presenting the provider's `id_token` (RS256 JWT), whose
+// `nonce` claim binds an ephemeral Ed25519 key the user actually holds; the
+// program verifies the JWT signature against the on-chain JWK registry (a
+// separate Quasar program — trust root), opens a short-lived `OidcSession` PDA
+// bound to that ephemeral key, and from then on authorizes Ika signatures by
+// checking a fresh Ed25519 precompile signature (ephemeral key over a per-use
+// challenge) — no JWT replay, no off-chain attestor.
+
+/// Lifetime cap of an `OidcSession` from `oidc_session_open` (seconds). Chosen
+/// short so it fits inside the provider `id_token`'s own window (Apple ≈ 600 s);
+/// the effective expiry is `min(not_after, min(jwt.exp, now + SESSION_TTL))`.
+const SESSION_TTL_SECONDS: i64 = 600;
+
+/// How long an abandoned `OidcJwtStaging` account must sit before
+/// `oidc_jwt_staging_close` may reclaim its rent (seconds). On the happy path
+/// `oidc_session_open` closes the staging immediately.
+const STAGING_TTL_SECONDS: i64 = 15 * 60;
+
+/// Hard cap on a staged JWT — matches `OidcJwtStaging.jwt_bytes` and
+/// `oidc_verifier::MAX_JWT_LEN`.
+const MAX_JWT_LEN: usize = 4096;
+
+/// OIDC issuer allowlist (frozen per environment; audit memo M4 — hardcoded).
+/// Google issues `id_token`s with `iss == "https://accounts.google.com"` (it
+/// has historically also used the bare `accounts.google.com`; both accepted).
+/// Apple uses `iss == "https://appleid.apple.com"`.
+const OIDC_ALLOWED_ISSUERS: &[&[u8]] = &[
+    b"https://accounts.google.com",
+    b"accounts.google.com",
+    b"https://appleid.apple.com",
+];
+
+/// OIDC audience allowlist — the Andromeda auth-broker `client_id` for this
+/// environment (`loginsocial.md` §5.4 item 1). CONFIG: the broker's OAuth
+/// client is created at deploy time; this constant must be set to that exact
+/// `client_id` before the devnet deploy of `scheme = 4`. It is intentionally a
+/// single explicit per-environment value (like a program id) — the verifier
+/// path itself is fully functional.
+///
+/// Devnet (set 2026-05-13): Google OAuth client for the gateway-hosted broker
+/// at `https://api.andromedainfra.pro`. This value is part of every Login
+/// Social dWallet's `addr_seed` — changing it later orphans all dWallets
+/// derived under the old value.
+const OIDC_ALLOWED_AUDIENCES: &[&[u8]] =
+    &[b"33123645941-v986q5r3n7cfalnq24vasl543dud1e2q.apps.googleusercontent.com"];
+
+/// Read-side mirror of `contracts/jwk-registry`'s account byte layout (frozen).
+///
+/// `rules-policy` deliberately does **not** depend on the `andromeda_jwk_registry`
+/// crate: it is a Quasar `#[program]` whose SBF `entrypoint` symbol would
+/// collide with ours at link time. Instead we re-declare just the bytes we read
+/// here. Any change to `JwkRegistry`'s on-chain layout MUST be reflected here in
+/// the same commit. Source of truth: `contracts/jwk-registry/src/lib.rs`.
+mod oidc_jwk {
+    use solana_address::Address;
+
+    /// `8xL2mrQ2amDpinQMHJPaEELbgEXWRVGn4PQ7kzDm7vNM` — `andromeda_jwk_registry`'s
+    /// program id (must own the `jwk_registry` account passed to `rules-policy`).
+    /// Keep in sync with `declare_id!` in `contracts/jwk-registry/src/lib.rs`.
+    pub const JWK_REGISTRY_PROGRAM_ID: Address =
+        solana_address::address!("8xL2mrQ2amDpinQMHJPaEELbgEXWRVGn4PQ7kzDm7vNM");
+
+    /// PDA seed prefix of the canonical `JwkRegistry` account.
+    pub const SEED_PREFIX: &[u8] = b"jwk_registry";
+    /// The canonical registry uses the all-zero `registry_seed`.
+    pub const CANONICAL_REGISTRY_SEED: [u8; 32] = [0u8; 32];
+
+    /// Status tag for an entry that is live and usable.
+    pub const STATUS_ACTIVE: u8 = 2;
+    /// RSA-2048 modulus length, big-endian.
+    pub const MODULUS_LEN: usize = 256;
+
+    const DISC_LEN: usize = 1;
+    // `JwkRegistry` ZC fields, in declaration order (all align-1, no padding):
+    //   version u8 | entry_count u8 | reserved0 [u8;6] | authority [u8;32]
+    //   | pending_authority [u8;32] | emergency_revoker [u8;32]
+    //   | pending_emergency_revoker [u8;32] | timelock_seconds u64
+    //   | grace_period_seconds u64 | authority_rotation_ready_at i64
+    //   | emergency_revoker_rotation_ready_at i64 | entries_flat [u8; 8*400]
+    const RO_GRACE_PERIOD_SECONDS: usize = DISC_LEN + 2 + 6 + 32 + 32 + 32 + 32 + 8; // 145
+    const RO_ENTRIES: usize = DISC_LEN + 2 + 6 + 32 + 32 + 32 + 32 + 8 + 8 + 8 + 8; // 169
+    pub const MAX_JWKS: usize = 8;
+    pub const JWK_ENTRY_LEN: usize = 400;
+    const REQUIRED_LEN: usize = RO_ENTRIES + MAX_JWKS * JWK_ENTRY_LEN; // 3369
+
+    // Per-entry offsets within a 400-byte slot (mirror of jwk-registry's `EO_*`):
+    const EO_STATUS: usize = 0;
+    const EO_ISSUER_HASH: usize = 8;
+    const EO_AUDIENCE_HASH: usize = 40;
+    const EO_KID_HASH: usize = 72;
+    const EO_MODULUS: usize = 104;
+    const EO_EXPONENT: usize = 360;
+    const EO_VALID_FROM: usize = 376;
+    const EO_VALID_UNTIL: usize = 384;
+
+    pub struct ActiveJwk {
+        pub modulus_n: [u8; MODULUS_LEN],
+        pub exponent_e: u32,
+    }
+
+    #[inline]
+    fn read_i64(b: &[u8]) -> i64 {
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&b[..8]);
+        i64::from_le_bytes(a)
+    }
+
+    #[inline]
+    fn read_u32(b: &[u8]) -> u32 {
+        let mut a = [0u8; 4];
+        a.copy_from_slice(&b[..4]);
+        u32::from_le_bytes(a)
+    }
+
+    #[inline]
+    fn read_u64(b: &[u8]) -> u64 {
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&b[..8]);
+        u64::from_le_bytes(a)
+    }
+
+    /// Returns the `STATUS_ACTIVE` entry matching `(issuer_hash, audience_hash,
+    /// kid_hash)` iff `valid_from <= now <= valid_until + grace`. Returns `None`
+    /// if the data is too short, no such entry exists, or the entry is outside
+    /// its validity window (i.e. revoked / expired / not-yet-active are all
+    /// rejected). The grace period comes from the registry header — an
+    /// emergency `revoke_jwk` flips the status away from ACTIVE, which this
+    /// rejects, so revocation also kills already-open sessions on re-check.
+    pub fn find_active(
+        data: &[u8],
+        issuer_hash: &[u8; 32],
+        audience_hash: &[u8; 32],
+        kid_hash: &[u8; 32],
+        now: i64,
+    ) -> Option<ActiveJwk> {
+        if data.len() < REQUIRED_LEN {
+            return None;
+        }
+        let grace = read_u64(&data[RO_GRACE_PERIOD_SECONDS..RO_GRACE_PERIOD_SECONDS + 8]) as i64;
+        for i in 0..MAX_JWKS {
+            let base = RO_ENTRIES + i * JWK_ENTRY_LEN;
+            if data[base + EO_STATUS] != STATUS_ACTIVE {
+                continue;
+            }
+            if &data[base + EO_ISSUER_HASH..base + EO_ISSUER_HASH + 32] != issuer_hash {
+                continue;
+            }
+            if &data[base + EO_AUDIENCE_HASH..base + EO_AUDIENCE_HASH + 32] != audience_hash {
+                continue;
+            }
+            if &data[base + EO_KID_HASH..base + EO_KID_HASH + 32] != kid_hash {
+                continue;
+            }
+            let valid_from = read_i64(&data[base + EO_VALID_FROM..base + EO_VALID_FROM + 8]);
+            let valid_until = read_i64(&data[base + EO_VALID_UNTIL..base + EO_VALID_UNTIL + 8]);
+            if now < valid_from || now > valid_until.saturating_add(grace) {
+                continue;
+            }
+            let mut modulus_n = [0u8; MODULUS_LEN];
+            modulus_n.copy_from_slice(&data[base + EO_MODULUS..base + EO_MODULUS + MODULUS_LEN]);
+            let exponent_e = read_u32(&data[base + EO_EXPONENT..base + EO_EXPONENT + 4]);
+            return Some(ActiveJwk { modulus_n, exponent_e });
+        }
+        None
+    }
+}
 
 #[program]
 mod rules_policy_program {
@@ -446,6 +619,182 @@ mod rules_policy_program {
         let current_ts: i64 = ctx.accounts.clock.unix_timestamp.into();
         ctx.accounts.apply(current_ts)
     }
+
+    // ── Login Social — `scheme = 4 = OidcJwt` (disc 20..=24) ─────
+    //
+    // See `loginsocial.md` §6–§8 and the `// Login Social constants` block
+    // above. These five instructions are only reachable when the policy's
+    // *primary* slot is an OIDC identity `[4, addr_seed, 0]`; the
+    // challenge-signing flows (`recover_as_primary` etc.) reject scheme 4 in
+    // `verify_primary_challenge`, so an OIDC-primary dWallet recovers via OIDC
+    // sessions only.
+
+    /// 20 — stage a provider `id_token` (RS256 JWT) into a temporary PDA so
+    /// `oidc_session_open` can verify it without exceeding the 1232-byte tx
+    /// limit (the JWT plus the open's accounts/precompile would not fit inline).
+    /// The JWT is opaque here — its real verification happens at
+    /// `oidc_session_open`. Anyone may stage; the PDA is single-use per
+    /// `policy.next_staging_nonce`, and its rent is refunded when
+    /// `oidc_session_open` consumes it (or by `oidc_jwt_staging_close` after
+    /// `STAGING_TTL_SECONDS` if it never is).
+    #[instruction(discriminator = 20)]
+    pub fn oidc_jwt_stage(
+        ctx: Ctx<OidcJwtStage>,
+        _init_authority_hash: Address,
+        #[max(4096, pfx = 2)] jwt_bytes: &[u8],
+    ) -> Result<(), ProgramError> {
+        let current_ts: i64 = ctx.accounts.clock.unix_timestamp.into();
+        ctx.accounts.stage(jwt_bytes, current_ts)
+    }
+
+    /// 21 — verify a staged `id_token` and open a short-lived `OidcSession`.
+    ///
+    /// Step order (no claim drives an auth decision before the RSA verify):
+    ///  1. the policy PDA derives from `(dwallet, init_authority_hash)`;
+    ///  2. `policy.primary_slot` is an OIDC slot `[4, addr_seed, 0]`;
+    ///  3. `oidc_verifier_version == OIDC_VERIFIER_V1`;
+    ///  4. `jwk_registry` is owned by `andromeda_jwk_registry` AND is the
+    ///     canonical PDA (`jwk_registry_bump`);
+    ///  5. pick the `ACTIVE` JWK for the claimed `(issuer_hash, audience_hash,
+    ///     kid_hash)` (a hint — `oidc-verifier::verify` is authoritative);
+    ///  6. `oidc-verifier::verify(jwt, that JWK's n/e, allowlists, eph_pk,
+    ///     not_after, nonce_randomness, now)` — RSA signature ok, `nonce` binds
+    ///     `(eph_pk, not_after, nonce_randomness)`, iss/aud allowlisted,
+    ///     exp/iat/nbf sane, plausible lifetime;
+    ///  7. the verified `(issuer_hash, audience_hash, kid_hash)` equal the hint,
+    ///     and `addr_seed == policy.primary_slot[1..33]`;
+    ///  8. an Ed25519 precompile in this tx signed `oidc_session_open_challenge(
+    ///     dwallet, primary_slot, eph_pk, not_after, jwt_digest, jwk_registry,
+    ///     verifier_version, session_nonce)` with `eph_pk` — proves the user
+    ///     holds the ephemeral key;
+    ///  9. create the `OidcSession`, bump `policy.next_oidc_session_nonce`,
+    ///     close the staging account (rent → its `payer_for_close`), emit.
+    #[instruction(discriminator = 21)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn oidc_session_open(
+        ctx: Ctx<OidcSessionOpen>,
+        _init_authority_hash: Address,
+        eph_pk: [u8; 32],
+        not_after_unix_ts: u64,
+        nonce_randomness: [u8; 32],
+        oidc_verifier_version: u32,
+        jwk_registry_bump: u8,
+        issuer_hash: [u8; 32],
+        audience_hash: [u8; 32],
+        kid_hash: [u8; 32],
+        // Audit F-1 (2026-05-13): the client signs `oidc_session_open_challenge`
+        // off-chain with the policy's `next_oidc_session_nonce` it observed.
+        // Validating it explicitly here rejects stale-nonce attempts BEFORE
+        // the ~41k CU JWT verify, and surfaces a clear `InvalidNonce` error.
+        expected_oidc_session_nonce: u64,
+    ) -> Result<(), ProgramError> {
+        let current_ts: i64 = ctx.accounts.clock.unix_timestamp.into();
+        let dwallet_addr = *ctx.accounts.dwallet_account.address();
+        let policy_addr = *ctx.accounts.policy.address();
+        let session_addr = *ctx.accounts.session.address();
+        let addr_seed = ctx.accounts.open(
+            eph_pk,
+            not_after_unix_ts,
+            nonce_randomness,
+            oidc_verifier_version,
+            jwk_registry_bump,
+            issuer_hash,
+            audience_hash,
+            kid_hash,
+            expected_oidc_session_nonce,
+            current_ts,
+        )?;
+        ctx.accounts.program.emit_event(
+            &OidcSessionOpened {
+                policy: policy_addr,
+                session: session_addr,
+                dwallet: dwallet_addr,
+                addr_seed: Address::from(addr_seed),
+                ts: current_ts,
+            },
+            &ctx.accounts.event_authority,
+            EventAuthority::BUMP,
+        )?;
+        Ok(())
+    }
+
+    /// 22 — authorize an Ika signature through an open `OidcSession`.
+    ///
+    /// Re-validates: session not expired; `expected_use_nonce` matches; the
+    /// policy's primary is still `[4, session.addr_seed, 0]` (a rotation/revoke
+    /// of the primary kills the session immediately); the session's JWK is
+    /// still `ACTIVE` in the same registry (an emergency `revoke_jwk` kills the
+    /// session immediately); and an Ed25519 precompile in this tx signed
+    /// `oidc_primary_use_challenge(session, dwallet, message_digest,
+    /// metadata_digest, use_nonce, primary_slot)` with the session's `eph_pk`.
+    /// Then bumps `next_use_nonce` (before the CPI) and CPIs Ika
+    /// `approve_message`.
+    #[instruction(discriminator = 22)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn recover_as_primary_oidc_session(
+        ctx: Ctx<RecoverAsPrimaryOidcSession>,
+        _init_authority_hash: Address,
+        message_digest: [u8; 32],
+        metadata_digest: [u8; 32],
+        user_pubkey: [u8; 32],
+        signature_scheme: u16,
+        message_approval_bump: u8,
+        cpi_authority_bump: u8,
+        expected_use_nonce: u64,
+    ) -> Result<(), ProgramError> {
+        let current_ts: i64 = ctx.accounts.clock.unix_timestamp.into();
+        let policy_addr = *ctx.accounts.policy.address();
+        let request_hash = Address::from(message_digest);
+        ctx.accounts.program.emit_event(
+            &SignatureRequested {
+                policy: policy_addr,
+                request_hash,
+                ts: current_ts,
+            },
+            &ctx.accounts.event_authority,
+            EventAuthority::BUMP,
+        )?;
+        ctx.accounts.recover(
+            message_digest,
+            metadata_digest,
+            user_pubkey,
+            signature_scheme,
+            message_approval_bump,
+            cpi_authority_bump,
+            expected_use_nonce,
+            current_ts,
+        )?;
+        ctx.accounts.program.emit_event(
+            &SignatureApproved {
+                policy: policy_addr,
+                request_hash,
+                ts: current_ts,
+            },
+            &ctx.accounts.event_authority,
+            EventAuthority::BUMP,
+        )?;
+        Ok(())
+    }
+
+    /// 23 — close an expired `OidcSession`, refunding its rent to the
+    /// `payer_for_close` captured at open time.
+    #[instruction(discriminator = 23)]
+    pub fn oidc_session_close(
+        ctx: Ctx<OidcSessionClose>,
+        _init_authority_hash: Address,
+    ) -> Result<(), ProgramError> {
+        let current_ts: i64 = ctx.accounts.clock.unix_timestamp.into();
+        ctx.accounts.close(current_ts)
+    }
+
+    /// 24 — reclaim the rent of an abandoned `OidcJwtStaging` account once
+    /// `STAGING_TTL_SECONDS` have passed since it was created, refunding the
+    /// `payer_for_close`. On the happy path `oidc_session_open` closes it first.
+    #[instruction(discriminator = 24)]
+    pub fn oidc_jwt_staging_close(ctx: Ctx<OidcJwtStagingClose>) -> Result<(), ProgramError> {
+        let current_ts: i64 = ctx.accounts.clock.unix_timestamp.into();
+        ctx.accounts.close(current_ts)
+    }
 }
 
 #[error_code]
@@ -472,6 +821,29 @@ pub enum RulesPolicyError {
     AlreadyContributed,
     InvalidFlag,
     CooldownTooLong,
+    // ── Login Social (`scheme = 4 = OidcJwt`) ──
+    /// `jwk_registry` account is not owned by `andromeda_jwk_registry`, is not
+    /// the canonical registry, or (on re-use) does not match the one pinned
+    /// into the `OidcSession` at open time.
+    InvalidJwkRegistry,
+    /// Staged JWT is empty or longer than `MAX_JWT_LEN`.
+    InvalidJwt,
+    /// No `ACTIVE` JWK matching `(issuer_hash, audience_hash, kid_hash)` within
+    /// its validity window (+ grace) — covers revoked / expired / not-yet-active
+    /// / unknown keys, and so an emergency `revoke_jwk` also fails open sessions.
+    JwkNotActive,
+    /// `oidc-verifier` rejected the JWT (bad RSA signature, malformed JSON,
+    /// nonce mismatch, expired / implausible lifetime, issuer / audience not
+    /// allowlisted, …).
+    OidcVerifyFailed,
+    /// `oidc_verifier_version` does not equal `OIDC_VERIFIER_V1`.
+    OidcVerifierVersionMismatch,
+    /// `policy.primary_slot` is not `[4, addr_seed, 0]` for the relevant
+    /// `addr_seed` (the primary is not an OIDC identity, or it was rotated /
+    /// revoked after the session was opened).
+    NotOidcPrimary,
+    /// `oidc_jwt_staging_close` was called before `created_at + STAGING_TTL`.
+    StagingNotExpired,
 }
 
 // ── Accounts: RulesPolicy ───────────────────────────────────────
@@ -492,6 +864,12 @@ pub struct RulesPolicy {
     pub next_admin_nonce: u64,
     pub next_primary_recover_nonce: u64,
     pub next_session_nonce: u64,
+    /// Single-use nonce space for OIDC sessions (`oidc_session_open`), disjoint
+    /// from every other nonce. See `loginsocial.md` §7.4/§7.6.
+    pub next_oidc_session_nonce: u64,
+    /// Single-use nonce space for OIDC JWT staging accounts (`oidc_jwt_stage`),
+    /// disjoint from every other nonce.
+    pub next_staging_nonce: u64,
     pub quorum_threshold: u8,
     pub member_count: u8,
     pub daily_limit_some: u8,
@@ -568,6 +946,48 @@ fn validate_cooldown(cooldown_seconds: u64) -> Result<(), ProgramError> {
     require!(
         cooldown_seconds <= MAX_COOLDOWN_SECONDS,
         RulesPolicyError::CooldownTooLong
+    );
+    Ok(())
+}
+
+/// Validates a slot intended to be a `RulesPolicy` *primary*: schemes 0 / 1 / 2
+/// (challenge-signing wallet credentials, verified via Solana precompiles) or
+/// scheme 4 (`OidcJwt` — Login Social identity, verified via `oidc-verifier` +
+/// an Ed25519 precompile over the user's ephemeral key). WebAuthn (scheme 3) is
+/// rejected: an assertion is session-scoped, not a long-lived primary.
+#[inline]
+fn validate_rules_policy_primary_slot(slot: &[u8; MEMBER_SLOT_LEN]) -> Result<(), ProgramError> {
+    match slot[0] {
+        SCHEME_ED25519 | SCHEME_SECP256K1 | SCHEME_SECP256R1 => {
+            validate_slot(slot).map_err(|_| RulesPolicyError::InvalidMemberSlot)?;
+        }
+        SCHEME_OIDC_JWT => {
+            validate_oidc_slot(slot).map_err(|_| RulesPolicyError::InvalidMemberSlot)?;
+        }
+        _ => return Err(RulesPolicyError::UnsupportedScheme.into()),
+    }
+    Ok(())
+}
+
+/// Builds the canonical OIDC primary slot for an `addr_seed`: `[4, addr_seed(32), 0]`.
+#[inline]
+fn oidc_primary_slot(addr_seed: &[u8; 32]) -> [u8; MEMBER_SLOT_LEN] {
+    let mut slot = [0u8; MEMBER_SLOT_LEN];
+    slot[0] = SCHEME_OIDC_JWT;
+    slot[1..33].copy_from_slice(addr_seed);
+    slot
+}
+
+/// Validates that `view` is a genuine `JwkRegistry` account: owned by the
+/// `andromeda_jwk_registry` program. (Canonicity — the all-zero `registry_seed`
+/// PDA — is checked at `oidc_session_open` time via `jwk_registry_bump` and
+/// then pinned into the `OidcSession`; on re-use we only re-check the stored
+/// address + this owner.)
+#[inline]
+fn check_jwk_registry_owner(view: &AccountView) -> Result<(), ProgramError> {
+    require!(
+        view.owner() == &oidc_jwk::JWK_REGISTRY_PROGRAM_ID,
+        RulesPolicyError::InvalidJwkRegistry
     );
     Ok(())
 }
@@ -660,11 +1080,10 @@ impl InitPolicy {
         validate_optional_flag(daily_limit_some)?;
         validate_optional_flag(allowed_destinations_some)?;
         validate_cooldown(cooldown_seconds)?;
-        validate_slot(&primary_slot).map_err(|_| RulesPolicyError::InvalidMemberSlot)?;
-        require!(
-            primary_slot[0] != SCHEME_WEBAUTHN,
-            RulesPolicyError::UnsupportedScheme
-        );
+        // Primary may be schemes 0/1/2 (challenge-signing wallet credentials)
+        // OR scheme 4 (OIDC identity — Login Social). Not WebAuthn (session-scoped)
+        // and not scheme 3.
+        validate_rules_policy_primary_slot(&primary_slot)?;
 
         // Audit C2 (Opção 4): verify init precompile signature. The
         // init_authority signs a canonical hash of all init parameters so
@@ -702,6 +1121,8 @@ impl InitPolicy {
             next_admin_nonce: 0,
             next_primary_recover_nonce: 0,
             next_session_nonce: 0,
+            next_oidc_session_nonce: 0,
+            next_staging_nonce: 0,
             quorum_threshold,
             member_count: 0,
             daily_limit_some,
@@ -746,7 +1167,11 @@ pub struct RecoverAsPrimary {
     pub payer: Signer,
 
     pub cpi_authority: UncheckedAccount,
-    pub caller_program: UncheckedAccount,
+    // NOTE: no separate `caller_program` slot. For the Ika `approve_message`
+    // CPI the caller program IS this program, so `recover()` reuses `program`.
+    // Passing this program in two slots (`caller_program` + `program`) makes
+    // the Quasar `UncheckedAccount` Ref-borrow collide with the `emit_cpi!`
+    // self-CPI on the same AccountInfo → `AccountBorrowFailed`.
     pub dwallet_program: UncheckedAccount,
     pub instructions_sysvar: UncheckedAccount,
     pub clock: Sysvar<Clock>,
@@ -772,11 +1197,16 @@ impl RecoverAsPrimary {
         require!(expected_nonce == policy_nonce, RulesPolicyError::InvalidNonce);
 
         let dwallet_addr = *self.dwallet_account.address();
+        let message_approval_addr = *self.message_approval.address();
         let primary_slot = self.policy.primary_slot;
         let challenge = primary_recover_challenge(
             &dwallet_addr,
+            &message_approval_addr,
             &message_digest,
             &metadata_digest,
+            &user_pubkey,
+            signature_scheme,
+            message_approval_bump,
             policy_nonce,
             &primary_slot,
         );
@@ -801,7 +1231,8 @@ impl RecoverAsPrimary {
         let dwallet_ctx = DWalletContext {
             dwallet_program: self.dwallet_program.to_account_view(),
             cpi_authority: self.cpi_authority.to_account_view(),
-            caller_program: self.caller_program.to_account_view(),
+            // The caller program for the Ika CPI is this program itself.
+            caller_program: self.program.to_account_view(),
             cpi_authority_bump,
         };
         dwallet_ctx.approve_message(
@@ -879,6 +1310,9 @@ impl QuorumSessionOpen {
             &dwallet_addr,
             &message_digest,
             &metadata_digest,
+            &user_pubkey,
+            signature_scheme,
+            message_approval_bump,
             amount,
             &destination,
             expires_at,
@@ -1032,7 +1466,8 @@ pub struct QuorumSessionFinalize {
     pub payer: Signer,
 
     pub cpi_authority: UncheckedAccount,
-    pub caller_program: UncheckedAccount,
+    // No separate `caller_program` slot — see RecoverAsPrimary's note.
+    // `finalize()` reuses `program` as the Ika CPI caller program.
     pub dwallet_program: UncheckedAccount,
     pub clock: Sysvar<Clock>,
     pub system_program: Program<SystemProgram>,
@@ -1100,7 +1535,8 @@ impl QuorumSessionFinalize {
         let dwallet_ctx = DWalletContext {
             dwallet_program: self.dwallet_program.to_account_view(),
             cpi_authority: self.cpi_authority.to_account_view(),
-            caller_program: self.caller_program.to_account_view(),
+            // The caller program for the Ika CPI is this program itself.
+            caller_program: self.program.to_account_view(),
             cpi_authority_bump,
         };
         dwallet_ctx.approve_message(
@@ -1187,13 +1623,14 @@ pub struct AdminAction {
 impl AdminAction {
     fn run<F>(&mut self, expected_nonce: u64, build_challenge: F) -> Result<(), ProgramError>
     where
-        F: FnOnce(&Address, &[u8; MEMBER_SLOT_LEN], u64) -> [u8; 32],
+        F: FnOnce(&Address, &Address, &[u8; MEMBER_SLOT_LEN], u64) -> [u8; 32],
     {
         let policy_nonce: u64 = self.policy.next_admin_nonce.into();
         require!(expected_nonce == policy_nonce, RulesPolicyError::InvalidNonce);
         let dwallet_addr = *self.dwallet_account.address();
+        let policy_addr = *self.policy.address();
         let primary_slot = self.policy.primary_slot;
-        let challenge = build_challenge(&dwallet_addr, &primary_slot, policy_nonce);
+        let challenge = build_challenge(&dwallet_addr, &policy_addr, &primary_slot, policy_nonce);
         check_sysvar_addr(self.instructions_sysvar.address())?;
         let sysvar_view = self.instructions_sysvar.to_account_view();
         let sysvar_data_ref = sysvar_view
@@ -1212,8 +1649,8 @@ impl AdminAction {
         expected_nonce: u64,
     ) -> Result<(), ProgramError> {
         validate_slot(&new_member_slot).map_err(|_| RulesPolicyError::InvalidMemberSlot)?;
-        self.run(expected_nonce, |dw, primary, n| {
-            admin_add_member_challenge(dw, &new_member_slot, n, primary)
+        self.run(expected_nonce, |dw, policy, primary, n| {
+            admin_add_member_challenge(dw, policy, &new_member_slot, n, primary)
         })?;
         let count = self.policy.member_count as usize;
         for i in 0..count {
@@ -1235,8 +1672,8 @@ impl AdminAction {
         member_slot_to_remove: [u8; MEMBER_SLOT_LEN],
         expected_nonce: u64,
     ) -> Result<(), ProgramError> {
-        self.run(expected_nonce, |dw, primary, n| {
-            admin_remove_member_challenge(dw, &member_slot_to_remove, n, primary)
+        self.run(expected_nonce, |dw, policy, primary, n| {
+            admin_remove_member_challenge(dw, policy, &member_slot_to_remove, n, primary)
         })?;
         let count = self.policy.member_count as usize;
         for i in 0..count {
@@ -1268,8 +1705,8 @@ impl AdminAction {
         destination: [u8; 32],
         expected_nonce: u64,
     ) -> Result<(), ProgramError> {
-        self.run(expected_nonce, |dw, primary, n| {
-            admin_add_destination_challenge(dw, &destination, n, primary)
+        self.run(expected_nonce, |dw, policy, primary, n| {
+            admin_add_destination_challenge(dw, policy, &destination, n, primary)
         })?;
         let count = self.policy.allowed_destinations_count as usize;
         for i in 0..count {
@@ -1295,8 +1732,8 @@ impl AdminAction {
         destination: [u8; 32],
         expected_nonce: u64,
     ) -> Result<(), ProgramError> {
-        self.run(expected_nonce, |dw, primary, n| {
-            admin_remove_destination_challenge(dw, &destination, n, primary)
+        self.run(expected_nonce, |dw, policy, primary, n| {
+            admin_remove_destination_challenge(dw, policy, &destination, n, primary)
         })?;
         let count = self.policy.allowed_destinations_count as usize;
         for i in 0..count {
@@ -1319,8 +1756,8 @@ impl AdminAction {
 
     #[inline(always)]
     pub fn revoke(&mut self, expected_nonce: u64) -> Result<(), ProgramError> {
-        self.run(expected_nonce, |dw, primary, n| {
-            admin_revoke_challenge(dw, n, primary)
+        self.run(expected_nonce, |dw, policy, primary, n| {
+            admin_revoke_challenge(dw, policy, n, primary)
         })?;
         self.policy.member_count = 0;
         self.policy.quorum_threshold = 1;
@@ -1334,13 +1771,9 @@ impl AdminAction {
         new_primary_slot: [u8; MEMBER_SLOT_LEN],
         expected_nonce: u64,
     ) -> Result<(), ProgramError> {
-        validate_slot(&new_primary_slot).map_err(|_| RulesPolicyError::InvalidMemberSlot)?;
-        require!(
-            new_primary_slot[0] != SCHEME_WEBAUTHN,
-            RulesPolicyError::UnsupportedScheme
-        );
-        self.run(expected_nonce, |dw, primary, n| {
-            admin_set_primary_challenge(dw, &new_primary_slot, n, primary)
+        validate_rules_policy_primary_slot(&new_primary_slot)?;
+        self.run(expected_nonce, |dw, policy, primary, n| {
+            admin_set_primary_challenge(dw, policy, &new_primary_slot, n, primary)
         })?;
         self.policy.primary_slot = new_primary_slot;
         Ok(())
@@ -1357,8 +1790,8 @@ impl AdminAction {
             new_threshold <= core::cmp::max(1, self.policy.member_count),
             RulesPolicyError::InvalidThreshold
         );
-        self.run(expected_nonce, |dw, primary, n| {
-            admin_set_quorum_threshold_immediate_challenge(dw, new_threshold, n, primary)
+        self.run(expected_nonce, |dw, policy, primary, n| {
+            admin_set_quorum_threshold_immediate_challenge(dw, policy, new_threshold, n, primary)
         })?;
         self.policy.quorum_threshold = new_threshold;
         self.policy.pending_change_some = PENDING_KIND_NONE;
@@ -1373,8 +1806,8 @@ impl AdminAction {
         expected_nonce: u64,
     ) -> Result<(), ProgramError> {
         validate_optional_flag(new_some)?;
-        self.run(expected_nonce, |dw, primary, n| {
-            admin_set_daily_limit_immediate_challenge(dw, new_some, new_limit, n, primary)
+        self.run(expected_nonce, |dw, policy, primary, n| {
+            admin_set_daily_limit_immediate_challenge(dw, policy, new_some, new_limit, n, primary)
         })?;
         self.policy.daily_limit_some = new_some;
         self.policy.daily_limit = new_limit.into();
@@ -1389,8 +1822,8 @@ impl AdminAction {
         expected_nonce: u64,
     ) -> Result<(), ProgramError> {
         validate_cooldown(new_cooldown_seconds)?;
-        self.run(expected_nonce, |dw, primary, n| {
-            admin_set_cooldown_immediate_challenge(dw, new_cooldown_seconds, n, primary)
+        self.run(expected_nonce, |dw, policy, primary, n| {
+            admin_set_cooldown_immediate_challenge(dw, policy, new_cooldown_seconds, n, primary)
         })?;
         self.policy.policy_change_cooldown_seconds = new_cooldown_seconds.into();
         self.policy.pending_change_some = PENDING_KIND_NONE;
@@ -1409,8 +1842,8 @@ impl AdminAction {
             new_threshold <= core::cmp::max(1, self.policy.member_count),
             RulesPolicyError::InvalidThreshold
         );
-        self.run(expected_nonce, |dw, primary, n| {
-            admin_propose_quorum_threshold_challenge(dw, new_threshold, n, primary)
+        self.run(expected_nonce, |dw, policy, primary, n| {
+            admin_propose_quorum_threshold_challenge(dw, policy, new_threshold, n, primary)
         })?;
         let cooldown: u64 = self.policy.policy_change_cooldown_seconds.into();
         self.policy.pending_change_some = PENDING_KIND_QUORUM;
@@ -1431,8 +1864,8 @@ impl AdminAction {
         current_ts: i64,
     ) -> Result<(), ProgramError> {
         validate_optional_flag(new_some)?;
-        self.run(expected_nonce, |dw, primary, n| {
-            admin_propose_daily_limit_challenge(dw, new_some, new_limit, n, primary)
+        self.run(expected_nonce, |dw, policy, primary, n| {
+            admin_propose_daily_limit_challenge(dw, policy, new_some, new_limit, n, primary)
         })?;
         let cooldown: u64 = self.policy.policy_change_cooldown_seconds.into();
         self.policy.pending_change_some = PENDING_KIND_DAILY_LIMIT;
@@ -1453,8 +1886,8 @@ impl AdminAction {
         current_ts: i64,
     ) -> Result<(), ProgramError> {
         validate_cooldown(new_cooldown_seconds)?;
-        self.run(expected_nonce, |dw, primary, n| {
-            admin_propose_cooldown_challenge(dw, new_cooldown_seconds, n, primary)
+        self.run(expected_nonce, |dw, policy, primary, n| {
+            admin_propose_cooldown_challenge(dw, policy, new_cooldown_seconds, n, primary)
         })?;
         let cooldown: u64 = self.policy.policy_change_cooldown_seconds.into();
         self.policy.pending_change_some = PENDING_KIND_COOLDOWN;
@@ -1531,5 +1964,628 @@ pub struct SignatureRequested {
 pub struct SignatureApproved {
     pub policy: Address,
     pub request_hash: Address,
+    pub ts: i64,
+}
+
+// ════════════════════════════════════════════════════════════════
+// Login Social — `scheme = 4 = OidcJwt`
+//
+// See `loginsocial.md` §6–§8, the "Login Social constants" block near the top,
+// `contracts/oidc-verifier` (RSA verify + claim parsing) and
+// `contracts/jwk-registry` (trust root). Two account types — a short-lived
+// `OidcJwtStaging` (holds the raw JWT between `oidc_jwt_stage` and
+// `oidc_session_open`) and an `OidcSession` (the open session bound to the
+// user's ephemeral Ed25519 key) — plus five instruction contexts.
+// ════════════════════════════════════════════════════════════════
+
+/// Saturating `u64 -> i64` (timestamps are well below `i64::MAX`; the clamp is
+/// defensive against an out-of-range `not_after_unix_ts` from the client).
+#[inline]
+fn u64_sat_i64(v: u64) -> i64 {
+    if v > i64::MAX as u64 {
+        i64::MAX
+    } else {
+        v as i64
+    }
+}
+
+// ── Account: OidcJwtStaging (disc 4) ────────────────────────────
+//
+// Fixed-size: a flat `[u8; 4096]` JWT buffer + a `jwt_len`. Deliberately NOT
+// `set_inner` — building a 4 KiB `Inner` value on the BPF stack would blow the
+// 4 KiB frame; `init` zero-fills the account and the handler writes the few
+// header fields + `jwt_bytes[..len]` directly into the zero-copy view (the
+// trailing buffer bytes stay zero). Rent (~0.03 SOL) is sponsored by whoever
+// calls `oidc_jwt_stage` and refunded when the staging is consumed/closed.
+
+#[account(discriminator = 4)]
+#[seeds(b"oidc_jwt_staging", policy: Address, dwallet: Address, staging_nonce: u64)]
+pub struct OidcJwtStaging {
+    pub dwallet: Address,
+    pub policy: Address,
+    /// The account that funded this staging — receives the rent refund on close.
+    pub payer_for_close: Address,
+    pub staging_nonce: u64,
+    pub created_at: i64,
+    pub jwt_len: u16,
+    pub jwt_bytes: [u8; 4096],
+}
+
+// ── Account: OidcSession (disc 3) ───────────────────────────────
+
+#[account(discriminator = 3, set_inner)]
+#[seeds(b"oidc_session", policy: Address, dwallet: Address, session_nonce: u64)]
+pub struct OidcSession {
+    pub dwallet: Address,
+    pub policy: Address,
+    /// The account that funded this session — receives the rent refund on close.
+    pub payer_for_close: Address,
+    /// The `JwkRegistry` account whose ACTIVE entry was used at open time; its
+    /// status is re-checked on every use (an emergency `revoke_jwk` kills it).
+    pub jwk_registry: Address,
+    /// `sha256("andromeda::oidc::addr::v1" || lp(iss) || lp(aud) || lp(sub))` —
+    /// must equal `policy.primary_slot[1..33]` (the policy's OIDC primary).
+    pub addr_seed: [u8; 32],
+    /// The user's ephemeral Ed25519 public key — every use is authorized by a
+    /// fresh Ed25519 precompile signature from this key over a per-use challenge.
+    pub eph_pk: [u8; 32],
+    /// `sha256(iss)` / `sha256(aud)` / `sha256(kid)` — JWK registry lookup key.
+    pub issuer_hash: [u8; 32],
+    pub audience_hash: [u8; 32],
+    pub kid_hash: [u8; 32],
+    pub session_nonce: u64,
+    /// Monotonic per-use nonce — consumed before each Ika CPI.
+    pub next_use_nonce: u64,
+    /// `not_after_unix_ts` chosen by the client at open time (≤ the JWT's `exp`).
+    pub not_after_unix_ts: u64,
+    /// The JWT's `exp` claim (seconds).
+    pub exp_from_jwt: i64,
+    /// Effective expiry = `min(not_after, min(exp, created_at + SESSION_TTL))`.
+    pub expires_at: i64,
+    pub created_at: i64,
+    /// Reserved (always 0 — the session is GC'd on close, never "closed but live").
+    pub closed_at: i64,
+    pub oidc_verifier_version: u32,
+}
+
+// ── OidcJwtStage (disc 20) ──────────────────────────────────────
+
+#[derive(Accounts)]
+#[instruction(init_authority_hash: Address)]
+pub struct OidcJwtStage {
+    pub dwallet_account: UncheckedAccount,
+
+    #[account(mut, address = RulesPolicy::seeds(
+        dwallet_account.address(),
+        &init_authority_hash
+    ))]
+    pub policy: Account<RulesPolicy>,
+
+    #[account(init,
+        payer = payer,
+        address = OidcJwtStaging::seeds(
+            policy.address(),
+            dwallet_account.address(),
+            policy.next_staging_nonce.into()
+        )
+    )]
+    pub staging: Account<OidcJwtStaging>,
+
+    #[account(mut)]
+    pub payer: Signer,
+
+    pub clock: Sysvar<Clock>,
+    pub rent: Sysvar<Rent>,
+    pub system_program: Program<SystemProgram>,
+}
+
+impl OidcJwtStage {
+    #[inline(always)]
+    pub fn stage(&mut self, jwt_bytes: &[u8], current_ts: i64) -> Result<(), ProgramError> {
+        let n = jwt_bytes.len();
+        require!(n > 0 && n <= MAX_JWT_LEN, RulesPolicyError::InvalidJwt);
+
+        let dwallet_addr = *self.dwallet_account.address();
+        let policy_addr = *self.policy.address();
+        let payer_addr = *self.payer.address();
+        let staging_nonce: u64 = self.policy.next_staging_nonce.into();
+
+        self.staging.dwallet = dwallet_addr;
+        self.staging.policy = policy_addr;
+        self.staging.payer_for_close = payer_addr;
+        self.staging.staging_nonce = staging_nonce.into();
+        self.staging.created_at = current_ts.into();
+        self.staging.jwt_len = (n as u16).into();
+        self.staging.jwt_bytes[..n].copy_from_slice(jwt_bytes);
+
+        self.policy.next_staging_nonce = (staging_nonce + 1).into();
+        Ok(())
+    }
+}
+
+// ── OidcSessionOpen (disc 21) ───────────────────────────────────
+
+#[derive(Accounts)]
+#[instruction(init_authority_hash: Address)]
+pub struct OidcSessionOpen {
+    pub dwallet_account: UncheckedAccount,
+
+    #[account(mut, address = RulesPolicy::seeds(
+        dwallet_account.address(),
+        &init_authority_hash
+    ))]
+    pub policy: Account<RulesPolicy>,
+
+    #[account(mut, has_one(policy))]
+    pub staging: Account<OidcJwtStaging>,
+
+    /// On-chain JWK trust root — owned by `andromeda_jwk_registry` and the
+    /// canonical PDA (verified in `open()` via `jwk_registry_bump`).
+    pub jwk_registry: UncheckedAccount,
+
+    #[account(init,
+        payer = payer,
+        address = OidcSession::seeds(
+            policy.address(),
+            dwallet_account.address(),
+            policy.next_oidc_session_nonce.into()
+        )
+    )]
+    pub session: Account<OidcSession>,
+
+    /// Receives the staging account's rent refund. Must equal
+    /// `staging.payer_for_close`.
+    #[account(mut)]
+    pub staging_payer: UncheckedAccount,
+
+    #[account(mut)]
+    pub payer: Signer,
+
+    pub instructions_sysvar: UncheckedAccount,
+    pub clock: Sysvar<Clock>,
+    pub rent: Sysvar<Rent>,
+    pub system_program: Program<SystemProgram>,
+    pub event_authority: EventAuthority,
+    pub program: Program<RulesPolicyProgram>,
+}
+
+impl OidcSessionOpen {
+    #[inline(always)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn open(
+        &mut self,
+        eph_pk: [u8; 32],
+        not_after_unix_ts: u64,
+        nonce_randomness: [u8; 32],
+        oidc_verifier_version: u32,
+        jwk_registry_bump: u8,
+        issuer_hash: [u8; 32],
+        audience_hash: [u8; 32],
+        kid_hash: [u8; 32],
+        expected_oidc_session_nonce: u64,
+        current_ts: i64,
+    ) -> Result<[u8; 32], ProgramError> {
+        // 0. expected-nonce reject-fast (audit F-1, 2026-05-13). The client
+        //    observed `policy.next_oidc_session_nonce = N` off-chain, signed
+        //    a challenge that includes `N`, and submits with
+        //    `expected_oidc_session_nonce = N`. If the on-chain value has
+        //    advanced (someone opened another session in the meantime), the
+        //    precompile would fail anyway via challenge-bytes mismatch — but
+        //    failing here costs near-zero CU vs ~41k for the JWT verify path,
+        //    and surfaces a clear `InvalidNonce` instead of an opaque
+        //    `AuthFailed`. The check is repeated again in step 9 against the
+        //    SAME field read; the duplication is intentional defense-in-depth.
+        let policy_nonce: u64 = self.policy.next_oidc_session_nonce.into();
+        require!(
+            expected_oidc_session_nonce == policy_nonce,
+            RulesPolicyError::InvalidNonce
+        );
+
+        // 1. staging belongs to this dWallet (has_one already pinned it to this
+        //    policy; the policy PDA already pinned (dwallet, init_authority)).
+        let dwallet_addr = *self.dwallet_account.address();
+        require!(self.staging.dwallet == dwallet_addr, RulesPolicyError::InvalidJwt);
+
+        // 2. primary must be an OIDC slot `[4, addr_seed, 0]`.
+        let primary_slot = self.policy.primary_slot;
+        require!(primary_slot[0] == SCHEME_OIDC_JWT, RulesPolicyError::NotOidcPrimary);
+        validate_oidc_slot(&primary_slot).map_err(|_| RulesPolicyError::NotOidcPrimary)?;
+
+        // 3. verifier-version pin (also bound into the open challenge below).
+        require!(
+            oidc_verifier_version == oidc_verifier::OIDC_VERIFIER_V1,
+            RulesPolicyError::OidcVerifierVersionMismatch
+        );
+
+        // 4. jwk_registry: owned by the registry program AND the canonical PDA.
+        let jwk_registry_addr = *self.jwk_registry.address();
+        {
+            let jwk_view = self.jwk_registry.to_account_view();
+            check_jwk_registry_owner(&jwk_view)?;
+        }
+        quasar_lang::pda::verify_program_address(
+            &[
+                oidc_jwk::SEED_PREFIX,
+                oidc_jwk::CANONICAL_REGISTRY_SEED.as_slice(),
+                &[jwk_registry_bump],
+            ],
+            &oidc_jwk::JWK_REGISTRY_PROGRAM_ID,
+            &jwk_registry_addr,
+        )
+        .map_err(|_| RulesPolicyError::InvalidJwkRegistry)?;
+
+        // 5. pick the ACTIVE JWK for the claimed (iss, aud, kid). The triple is
+        //    only a lookup hint — step 7 cross-checks it against the verified
+        //    claims, so a wrong hint just fails (no matching JWK / RSA mismatch).
+        let active = {
+            let jwk_view = self.jwk_registry.to_account_view();
+            let data = jwk_view
+                .try_borrow()
+                .map_err(|_| RulesPolicyError::InvalidJwkRegistry)?;
+            oidc_jwk::find_active(&data, &issuer_hash, &audience_hash, &kid_hash, current_ts)
+                .ok_or(RulesPolicyError::JwkNotActive)?
+        };
+
+        // 6. verify the JWT end-to-end (authoritative). No claim has driven an
+        //    auth decision yet — `verify` does the RSA check before trusting
+        //    the claims.
+        let jwt_len: usize = u16::from(self.staging.jwt_len) as usize;
+        require!(jwt_len > 0 && jwt_len <= MAX_JWT_LEN, RulesPolicyError::InvalidJwt);
+        let parsed = {
+            let jwt = &self.staging.jwt_bytes[..jwt_len];
+            oidc_verifier::verify(oidc_verifier::VerifyOidcInput {
+                jwt,
+                modulus_n: &active.modulus_n,
+                exponent_e: active.exponent_e,
+                allowed_issuers: OIDC_ALLOWED_ISSUERS,
+                allowed_audiences: OIDC_ALLOWED_AUDIENCES,
+                eph_pk: &eph_pk,
+                not_after_unix_ts,
+                nonce_randomness: &nonce_randomness,
+                now_unix_ts: current_ts,
+            })
+            .map_err(|_| RulesPolicyError::OidcVerifyFailed)?
+        };
+
+        // 7. the JWK we used must be the one the *verified* claims point to,
+        //    and the identity must be the policy's OIDC primary.
+        require!(
+            parsed.issuer_hash == issuer_hash
+                && parsed.audience_hash == audience_hash
+                && parsed.kid_hash == kid_hash,
+            RulesPolicyError::OidcVerifyFailed
+        );
+        require!(
+            parsed.addr_seed[..] == primary_slot[1..33],
+            RulesPolicyError::NotOidcPrimary
+        );
+
+        // 8. effective expiry — never past the JWT's exp, never past not_after,
+        //    capped at now + SESSION_TTL. `verify` already proved exp > now and
+        //    exp >= not_after.
+        let exp = parsed.exp_unix_ts;
+        let not_after_i = u64_sat_i64(not_after_unix_ts);
+        let expires_at = exp
+            .min(current_ts.saturating_add(SESSION_TTL_SECONDS))
+            .min(not_after_i);
+        require!(expires_at > current_ts, RulesPolicyError::InvalidSessionTtl);
+
+        // 9. Ed25519 precompile over the open challenge with eph_pk. The
+        //    `expected_oidc_session_nonce` reject-fast (audit F-1, 2026-05-13)
+        //    fails BEFORE the precompile work would (which would also fail,
+        //    via challenge-bytes mismatch) — useful for both CU savings on
+        //    stale-nonce attempts and clearer error reporting.
+        let session_nonce: u64 = self.policy.next_oidc_session_nonce.into();
+        require!(
+            expected_oidc_session_nonce == session_nonce,
+            RulesPolicyError::InvalidNonce
+        );
+        let challenge = oidc_session_open_challenge(
+            &dwallet_addr,
+            &primary_slot,
+            &eph_pk,
+            not_after_unix_ts,
+            &parsed.jwt_digest,
+            &jwk_registry_addr,
+            oidc_verifier_version,
+            session_nonce,
+        );
+        {
+            check_sysvar_addr(self.instructions_sysvar.address())?;
+            let sysvar_view = self.instructions_sysvar.to_account_view();
+            let sysvar_data = sysvar_view
+                .try_borrow()
+                .map_err(|_| RulesPolicyError::AuthFailed)?;
+            auth::precompile::verify_ed25519(&eph_pk, &challenge, &sysvar_data)
+                .map_err(|_| RulesPolicyError::AuthFailed)?;
+        }
+
+        // 10. create the session, bump the policy nonce.
+        let policy_addr = *self.policy.address();
+        let session_payer = *self.payer.address();
+        let addr_seed = parsed.addr_seed;
+        self.session.set_inner(OidcSessionInner {
+            dwallet: dwallet_addr,
+            policy: policy_addr,
+            payer_for_close: session_payer,
+            jwk_registry: jwk_registry_addr,
+            addr_seed,
+            eph_pk,
+            issuer_hash,
+            audience_hash,
+            kid_hash,
+            session_nonce,
+            next_use_nonce: 0,
+            not_after_unix_ts,
+            exp_from_jwt: exp,
+            expires_at,
+            created_at: current_ts,
+            closed_at: 0,
+            oidc_verifier_version,
+        });
+        self.policy.next_oidc_session_nonce = (session_nonce + 1).into();
+
+        // 11. close the staging account → refund its rent to the staging payer.
+        let staging_payer_addr = *self.staging_payer.address();
+        require!(
+            staging_payer_addr == self.staging.payer_for_close,
+            RulesPolicyError::InvalidJwt
+        );
+        self.staging
+            .close(self.staging_payer.to_account_view())
+            .map_err(|_| RulesPolicyError::InvalidJwt)?;
+
+        Ok(addr_seed)
+    }
+}
+
+// ── RecoverAsPrimaryOidcSession (disc 22) ───────────────────────
+
+#[derive(Accounts)]
+#[instruction(init_authority_hash: Address)]
+pub struct RecoverAsPrimaryOidcSession {
+    pub dwallet_account: UncheckedAccount,
+
+    #[account(address = RulesPolicy::seeds(
+        dwallet_account.address(),
+        &init_authority_hash
+    ))]
+    pub policy: Account<RulesPolicy>,
+
+    #[account(mut, has_one(policy))]
+    pub session: Account<OidcSession>,
+
+    /// The same JWK trust root pinned into `session` at open time — its current
+    /// status is re-checked so an emergency `revoke_jwk` kills this session.
+    pub jwk_registry: UncheckedAccount,
+
+    pub coordinator: UncheckedAccount,
+
+    #[account(mut)]
+    pub message_approval: UncheckedAccount,
+
+    #[account(mut)]
+    pub payer: Signer,
+
+    pub cpi_authority: UncheckedAccount,
+    // No separate `caller_program` slot — for the Ika `approve_message` CPI the
+    // caller program IS this program, so `recover()` reuses `program` (see the
+    // note on `RecoverAsPrimary`).
+    pub dwallet_program: UncheckedAccount,
+    pub instructions_sysvar: UncheckedAccount,
+    pub clock: Sysvar<Clock>,
+    pub system_program: Program<SystemProgram>,
+    pub event_authority: EventAuthority,
+    pub program: Program<RulesPolicyProgram>,
+}
+
+impl RecoverAsPrimaryOidcSession {
+    #[inline(always)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn recover(
+        &mut self,
+        message_digest: [u8; 32],
+        metadata_digest: [u8; 32],
+        user_pubkey: [u8; 32],
+        signature_scheme: u16,
+        message_approval_bump: u8,
+        cpi_authority_bump: u8,
+        expected_use_nonce: u64,
+        current_ts: i64,
+    ) -> Result<(), ProgramError> {
+        // 0. verifier-version pin (audit F-2, 2026-05-13). The session
+        //    captured the verifier version at open time; if the program is
+        //    ever upgraded to introduce V2, old V1 sessions must be re-opened
+        //    rather than silently consumed under the new semantics.
+        let stored_version: u32 = self.session.oidc_verifier_version.into();
+        require!(
+            stored_version == oidc_verifier::OIDC_VERIFIER_V1,
+            RulesPolicyError::OidcVerifierVersionMismatch
+        );
+
+        // 1. session open + unexpired.
+        let closed_at: i64 = self.session.closed_at.into();
+        require!(closed_at == 0, RulesPolicyError::SessionExpired);
+        let expires_at: i64 = self.session.expires_at.into();
+        require!(current_ts < expires_at, RulesPolicyError::SessionExpired);
+
+        // 2. use-nonce.
+        let use_nonce: u64 = self.session.next_use_nonce.into();
+        require!(expected_use_nonce == use_nonce, RulesPolicyError::InvalidNonce);
+
+        // 2b. policy primary must still be `[4, session.addr_seed, 0]` — a
+        //     rotation/revoke of the primary after the open invalidates the
+        //     session immediately.
+        let addr_seed = self.session.addr_seed;
+        let expected_primary = oidc_primary_slot(&addr_seed);
+        let primary_slot = self.policy.primary_slot;
+        require!(primary_slot == expected_primary, RulesPolicyError::NotOidcPrimary);
+
+        // 2c. session's JWK must still be ACTIVE in the same registry — an
+        //     emergency `revoke_jwk` (or expiry past grace) kills the session.
+        let session_registry = self.session.jwk_registry;
+        let jwk_registry_addr = *self.jwk_registry.address();
+        require!(
+            jwk_registry_addr == session_registry,
+            RulesPolicyError::InvalidJwkRegistry
+        );
+        {
+            let jwk_view = self.jwk_registry.to_account_view();
+            check_jwk_registry_owner(&jwk_view)?;
+            let data = jwk_view
+                .try_borrow()
+                .map_err(|_| RulesPolicyError::InvalidJwkRegistry)?;
+            let issuer_hash = self.session.issuer_hash;
+            let audience_hash = self.session.audience_hash;
+            let kid_hash = self.session.kid_hash;
+            oidc_jwk::find_active(&data, &issuer_hash, &audience_hash, &kid_hash, current_ts)
+                .ok_or(RulesPolicyError::JwkNotActive)?;
+        }
+
+        // 3. Ed25519 precompile over the per-use challenge with the session's eph_pk.
+        let dwallet_addr = *self.dwallet_account.address();
+        let session_addr = *self.session.address();
+        let message_approval_addr = *self.message_approval.address();
+        let eph_pk = self.session.eph_pk;
+        let challenge = oidc_primary_use_challenge(
+            &session_addr,
+            &dwallet_addr,
+            &message_approval_addr,
+            &message_digest,
+            &metadata_digest,
+            &user_pubkey,
+            signature_scheme,
+            message_approval_bump,
+            use_nonce,
+            &expected_primary,
+        );
+        {
+            check_sysvar_addr(self.instructions_sysvar.address())?;
+            let sysvar_view = self.instructions_sysvar.to_account_view();
+            let sysvar_data = sysvar_view
+                .try_borrow()
+                .map_err(|_| RulesPolicyError::AuthFailed)?;
+            auth::precompile::verify_ed25519(&eph_pk, &challenge, &sysvar_data)
+                .map_err(|_| RulesPolicyError::AuthFailed)?;
+        }
+
+        // 4. consume the use-nonce BEFORE the CPI.
+        self.session.next_use_nonce = (use_nonce + 1).into();
+
+        // 5–6. CPI Ika approve_message.
+        require!(
+            validate_ika_cpi_accounts(
+                &self.dwallet_program.to_account_view(),
+                &self.dwallet_account.to_account_view(),
+            ),
+            RulesPolicyError::AuthFailed
+        );
+        let dwallet_ctx = DWalletContext {
+            dwallet_program: self.dwallet_program.to_account_view(),
+            cpi_authority: self.cpi_authority.to_account_view(),
+            caller_program: self.program.to_account_view(),
+            cpi_authority_bump,
+        };
+        dwallet_ctx.approve_message(
+            self.coordinator.to_account_view(),
+            self.message_approval.to_account_view(),
+            self.dwallet_account.to_account_view(),
+            self.payer.to_account_view(),
+            self.system_program.to_account_view(),
+            message_digest,
+            metadata_digest,
+            user_pubkey,
+            signature_scheme,
+            message_approval_bump,
+        )
+    }
+}
+
+// ── OidcSessionClose (disc 23) ──────────────────────────────────
+
+#[derive(Accounts)]
+#[instruction(init_authority_hash: Address)]
+pub struct OidcSessionClose {
+    pub dwallet_account: UncheckedAccount,
+
+    #[account(address = RulesPolicy::seeds(
+        dwallet_account.address(),
+        &init_authority_hash
+    ))]
+    pub policy: Account<RulesPolicy>,
+
+    #[account(mut, has_one(policy))]
+    pub session: Account<OidcSession>,
+
+    /// Receives the rent refund. Must equal `session.payer_for_close`.
+    #[account(mut)]
+    pub rent_destination: UncheckedAccount,
+
+    pub clock: Sysvar<Clock>,
+}
+
+impl OidcSessionClose {
+    #[inline(always)]
+    pub fn close(&mut self, current_ts: i64) -> Result<(), ProgramError> {
+        let closed_at: i64 = self.session.closed_at.into();
+        require!(closed_at == 0, RulesPolicyError::SessionFinalizable);
+        let expires_at: i64 = self.session.expires_at.into();
+        require!(current_ts >= expires_at, RulesPolicyError::SessionFinalizable);
+        let dest_addr = *self.rent_destination.address();
+        require!(
+            dest_addr == self.session.payer_for_close,
+            RulesPolicyError::AuthFailed
+        );
+        self.session
+            .close(self.rent_destination.to_account_view())
+            .map_err(|_| RulesPolicyError::AuthFailed)?;
+        Ok(())
+    }
+}
+
+// ── OidcJwtStagingClose (disc 24) ───────────────────────────────
+
+#[derive(Accounts)]
+pub struct OidcJwtStagingClose {
+    #[account(mut)]
+    pub staging: Account<OidcJwtStaging>,
+
+    /// Receives the rent refund. Must equal `staging.payer_for_close`.
+    #[account(mut)]
+    pub rent_destination: UncheckedAccount,
+
+    pub clock: Sysvar<Clock>,
+}
+
+impl OidcJwtStagingClose {
+    #[inline(always)]
+    pub fn close(&mut self, current_ts: i64) -> Result<(), ProgramError> {
+        let created_at: i64 = self.staging.created_at.into();
+        require!(
+            current_ts >= created_at.saturating_add(STAGING_TTL_SECONDS),
+            RulesPolicyError::StagingNotExpired
+        );
+        let dest_addr = *self.rent_destination.address();
+        require!(
+            dest_addr == self.staging.payer_for_close,
+            RulesPolicyError::AuthFailed
+        );
+        self.staging
+            .close(self.rent_destination.to_account_view())
+            .map_err(|_| RulesPolicyError::AuthFailed)?;
+        Ok(())
+    }
+}
+
+// ── Event ───────────────────────────────────────────────────────
+
+#[event(discriminator = 3)]
+pub struct OidcSessionOpened {
+    pub policy: Address,
+    pub session: Address,
+    pub dwallet: Address,
+    /// `sha256("andromeda::oidc::addr::v1" || lp(iss) || lp(aud) || lp(sub))` —
+    /// the OIDC primary identity. Never the JWT or the `sub` in clear.
+    pub addr_seed: Address,
     pub ts: i64,
 }

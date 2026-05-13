@@ -23,7 +23,17 @@
 //! 1 = Secp256k1    identifier = 20-byte eth_address  (EVM / Bitcoin / Cosmos secp256k1 / Substrate ecdsa)
 //! 2 = Secp256r1    identifier = 33-byte compressed   (passkey with raw pubkey)
 //! 3 = WebAuthn     identifier = 33-byte compressed   (passkey with WebAuthn assertion: validates challenge in clientDataJSON)
+//! 4 = OidcJwt      identifier = 32-byte addr_seed    (Login Social — see below; rules-policy primary only)
 //! ```
+//!
+//! Schemes 0..=3 are the "base" schemes every Andromeda Quasar program
+//! understands ([`validate_slot`] / [`verify_signature`]). Scheme 4 (OIDC) is
+//! context-specific: it carries `addr_seed = sha256("andromeda::oidc::addr::v1"
+//! || lp(iss) || lp(aud) || lp(sub))`, it is verified by
+//! `contracts/oidc-verifier` (RSA over the provider's `id_token`) + an Ed25519
+//! precompile over the user's ephemeral key — NOT by [`verify_signature`] — and
+//! only `rules-policy` accepts it, as a *primary* slot, via [`validate_oidc_slot`].
+//! `MAX_SCHEME` stays at 3 so the 7 owner-style templates keep rejecting it.
 //!
 //! sr25519 / Ristretto / Bitcoin-Taproot have no Solana precompile and are
 //! NOT supported on-chain. Substrate users wishing to use a Polkadot account
@@ -41,7 +51,21 @@ pub const SCHEME_ED25519: u8 = 0;
 pub const SCHEME_SECP256K1: u8 = 1;
 pub const SCHEME_SECP256R1: u8 = 2;
 pub const SCHEME_WEBAUTHN: u8 = 3;
+/// `scheme = 4 = OidcJwt` — identifier = 32-byte `addr_seed`
+/// (`sha256("andromeda::oidc::addr::v1" || lp(iss) || lp(aud) || lp(sub))`).
+///
+/// Deliberately NOT a "base" scheme: it is verified by `contracts/oidc-verifier`
+/// (RSA over the provider JWT) plus an Ed25519 precompile over the user's
+/// ephemeral key — NOT by [`verify_signature`] (which would treat it as "a
+/// signature over a 32-byte challenge", which it is not). The 7 owner-style
+/// templates use [`validate_slot`] / [`validate_member_slot_base`], which
+/// reject scheme 4; only `rules-policy` accepts it (as a *primary*) via
+/// [`validate_oidc_slot`]. Hence `MAX_SCHEME` is intentionally left at 3.
+pub const SCHEME_OIDC_JWT: u8 = 4;
 
+/// Highest "base" scheme (0..=3) — the schemes every Andromeda Quasar program
+/// understands via [`validate_slot`] / [`verify_signature`]. Scheme 4 (OIDC) is
+/// context-specific and is *not* counted here on purpose.
 pub const MAX_SCHEME: u8 = SCHEME_WEBAUTHN;
 
 pub const MEMBER_SLOT_LEN: usize = 34;
@@ -75,6 +99,7 @@ pub fn id_len_for_scheme(scheme: u8) -> Result<usize, AuthError> {
         SCHEME_SECP256K1 => Ok(20),
         SCHEME_SECP256R1 => Ok(33),
         SCHEME_WEBAUTHN => Ok(33),
+        SCHEME_OIDC_JWT => Ok(32), // addr_seed
         _ => Err(AuthError::UnsupportedScheme),
     }
 }
@@ -92,13 +117,40 @@ pub fn build_member_slot(scheme: u8, identifier: &[u8]) -> Result<[u8; MEMBER_SL
     Ok(slot)
 }
 
-/// Validates a stored slot: known scheme, identifier bytes followed by zero
-/// padding all the way to byte 33.
-pub fn validate_slot(slot: &[u8; MEMBER_SLOT_LEN]) -> Result<(), AuthError> {
+/// Validates a stored slot for a **base** scheme (0..=3): known scheme,
+/// identifier bytes followed by zero padding all the way to byte 33. Scheme 4
+/// (OIDC) is rejected here — use [`validate_oidc_slot`].
+pub fn validate_member_slot_base(slot: &[u8; MEMBER_SLOT_LEN]) -> Result<(), AuthError> {
     let scheme = slot[0];
+    if scheme > MAX_SCHEME {
+        return Err(AuthError::UnsupportedScheme);
+    }
     let id_len = id_len_for_scheme(scheme)?;
     let padding_start = 1 + id_len;
     for &b in &slot[padding_start..] {
+        if b != 0 {
+            return Err(AuthError::InvalidSlotLayout);
+        }
+    }
+    Ok(())
+}
+
+/// Alias retained for the 7 owner-style templates that call `validate_slot`.
+/// Identical to [`validate_member_slot_base`] — rejects scheme 4 (OIDC).
+#[inline]
+pub fn validate_slot(slot: &[u8; MEMBER_SLOT_LEN]) -> Result<(), AuthError> {
+    validate_member_slot_base(slot)
+}
+
+/// Validates an OIDC primary slot: exactly `[SCHEME_OIDC_JWT, addr_seed(32), 0]`.
+/// Only `rules-policy` should use this, and only for the *primary* slot — OIDC
+/// is not a quorum-member scheme in the MVP.
+pub fn validate_oidc_slot(slot: &[u8; MEMBER_SLOT_LEN]) -> Result<(), AuthError> {
+    if slot[0] != SCHEME_OIDC_JWT {
+        return Err(AuthError::UnsupportedScheme);
+    }
+    let id_len = id_len_for_scheme(SCHEME_OIDC_JWT)?; // == 32
+    for &b in &slot[1 + id_len..] {
         if b != 0 {
             return Err(AuthError::InvalidSlotLayout);
         }
@@ -166,6 +218,11 @@ pub fn verify_signature(input: VerifyInput<'_>) -> Result<(), AuthError> {
                 input.webauthn_client_data_json,
             )
         }
+        // OIDC is not "a signature over a 32-byte challenge" — it is verified by
+        // `contracts/oidc-verifier` (RSA over the provider JWT) plus an Ed25519
+        // precompile over the ephemeral key, both inside `rules-policy`. Never
+        // route it through `verify_signature`.
+        SCHEME_OIDC_JWT => Err(AuthError::UnsupportedScheme),
         _ => Err(AuthError::UnsupportedScheme),
     }
 }
