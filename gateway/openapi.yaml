@@ -531,7 +531,14 @@ paths:
                     items:
                       type: object
                       properties:
-                        unsigned_tx_base64: { type: string }
+                        unsigned_tx_base64:
+                          type: string
+                          description: |
+                            Base64-encoded Solana transaction (full, unsigned).
+                            Deserialize with your client's transaction
+                            decoder, sign locally, then submit via
+                            `/v1/private-tx/submit`. All endpoints that
+                            return `unsigned_tx_base64` use this same format.
                         request_indices: { type: array, items: { type: integer } }
                         size_bytes: { type: integer }
 
