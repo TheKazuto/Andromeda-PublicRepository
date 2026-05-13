@@ -73,6 +73,19 @@ self.policy.next_admin_nonce = new_nonce.into();
 
 `gateway/internal/auth/` é o mirror byte-a-byte deste crate em Go (`core.go`, `errors.go`, `hashv.go`, `precompile.go`, `challenges_recovery.go`, `challenges_templates.go`). Toda mudança aqui exige update equivalente do mirror — os bytes têm que bater até o último.
 
+## Feature `host-test`
+
+`hashv` chama a syscall `sol_sha256` em SBF e **panica** em qualquer outro target (defesa contra usos host acidentais que retornavam digest zerado). Para permitir testes host-side cross-language (e.g. fixture parity entre Rust ↔ Go ↔ TypeScript), o crate expõe a feature opcional `host-test`:
+
+```toml
+# Dev-only dependency em outro crate:
+andromeda_auth = { path = "../auth", features = ["host-test"] }
+```
+
+Com `host-test` ligada, `hashv` em target não-SBF passa a usar `sha2::Sha256` (resultado idêntico ao da syscall). Em SBF a feature é inerte. **Nunca ativar em build de produção** — quebra a invariante de "todo hash criptográfico passa pela runtime do Solana".
+
+Uso atual: `contracts/sbf-tests` lê `fixtures/fhe-decision-vectors.json` e valida que `decision_canonical_bytes` produz o mesmo digest que o gateway (Go) e o encrypt-backend (TS).
+
 ## Build
 
 ```bash
