@@ -17,15 +17,8 @@ interface CleanupTarget {
 }
 
 const TARGETS: ReadonlyArray<CleanupTarget> = [
-  { table: 'ika_identity_email_tokens', column: 'expires_at', graceInterval: "INTERVAL '7 days'" },
-  { table: 'ika_identity_oauth_states', column: 'expires_at', graceInterval: "INTERVAL '1 day'" },
-  { table: 'ika_identity_passkey_challenges', column: 'expires_at', graceInterval: "INTERVAL '1 day'" },
-  { table: 'ika_identity_refresh_tokens', column: 'expires_at', graceInterval: "INTERVAL '30 days'" },
   { table: 'ika_idempotency_keys', column: 'expires_at', graceInterval: "INTERVAL '1 day'" },
   { table: 'recovery_challenges', column: 'expires_at', graceInterval: "INTERVAL '7 days'" },
-  // Rate log lives in a sliding 1h window; anything older than 2h is dead weight.
-  { table: 'ika_identity_email_rate_log', column: 'created_at', graceInterval: "INTERVAL '2 hours'" },
-  { table: 'ika_identity_email_rate_buckets', column: 'updated_at', graceInterval: "INTERVAL '2 hours'" },
 ]
 
 let timer: NodeJS.Timeout | null = null
