@@ -18,7 +18,33 @@ import (
 // authority of deployed dWallet policies, so changes here are a contract
 // review item (see contracts/ and CLAUDE.md §3).
 
-func computeAdminChallenge(template string, req adminChallengeRequest, dwallet solana.PublicKey, ownerSlot [auth.MemberSlotLen]byte) ([32]byte, error) {
+// resolvePolicyPDAForAdmin derives the policy PDA for the given template,
+// dwallet, init_authority_hash, and (for session-keys) session_index. Used
+// to bind each admin challenge to a specific policy account so signatures
+// cannot be replayed across policies that share the same (dwallet, owner).
+func resolvePolicyPDAForAdmin(reg *Registry, template string, dwallet solana.PublicKey, initAuthorityHash [32]byte, sessionIndex *uint32) (solana.PublicKey, error) {
+	prog, err := reg.ProgramID(template)
+	if err != nil {
+		return solana.PublicKey{}, fmt.Errorf("%w: %s", ErrTemplateNotDeployed, err)
+	}
+	if template == TemplateSessionKeys {
+		if sessionIndex == nil {
+			return solana.PublicKey{}, errors.New("session_index required for session-keys admin (Audit H6)")
+		}
+		pda, _, derr := SessionKeyPolicyPDA(prog, dwallet, initAuthorityHash, *sessionIndex)
+		if derr != nil {
+			return solana.PublicKey{}, derr
+		}
+		return pda, nil
+	}
+	pda, _, derr := PolicyPDA(template, prog, dwallet, initAuthorityHash)
+	if derr != nil {
+		return solana.PublicKey{}, derr
+	}
+	return pda, nil
+}
+
+func computeAdminChallenge(template string, req adminChallengeRequest, dwallet, policy solana.PublicKey, ownerSlot [auth.MemberSlotLen]byte) ([32]byte, error) {
 	var zero [32]byte
 	switch template {
 	case TemplateAllowlist:
@@ -29,13 +55,13 @@ func computeAdminChallenge(template string, req adminChallengeRequest, dwallet s
 				return zero, fmt.Errorf("destination: %w", derr)
 			}
 			if req.Action == "add_destination" {
-				return auth.AllowlistAddDestinationChallenge(dwallet, dest, req.ExpectedNonce, ownerSlot), nil
+				return auth.AllowlistAddDestinationChallenge(dwallet, policy, dest, req.ExpectedNonce, ownerSlot), nil
 			}
-			return auth.AllowlistRemoveDestinationChallenge(dwallet, dest, req.ExpectedNonce, ownerSlot), nil
+			return auth.AllowlistRemoveDestinationChallenge(dwallet, policy, dest, req.ExpectedNonce, ownerSlot), nil
 		case "pause":
-			return auth.AllowlistPauseChallenge(dwallet, req.ExpectedNonce, ownerSlot), nil
+			return auth.AllowlistPauseChallenge(dwallet, policy, req.ExpectedNonce, ownerSlot), nil
 		case "resume":
-			return auth.AllowlistResumeChallenge(dwallet, req.ExpectedNonce, ownerSlot), nil
+			return auth.AllowlistResumeChallenge(dwallet, policy, req.ExpectedNonce, ownerSlot), nil
 		}
 	case TemplateVelocityGuard:
 		switch req.Action {
@@ -43,11 +69,11 @@ func computeAdminChallenge(template string, req adminChallengeRequest, dwallet s
 			if req.MaxSigsPerWindow == nil || req.WindowSlots == nil {
 				return zero, errors.New("max_sigs_per_window and window_slots required")
 			}
-			return auth.VelocityUpdateWindowChallenge(dwallet, *req.MaxSigsPerWindow, *req.WindowSlots, req.ExpectedNonce, ownerSlot), nil
+			return auth.VelocityUpdateWindowChallenge(dwallet, policy, *req.MaxSigsPerWindow, *req.WindowSlots, req.ExpectedNonce, ownerSlot), nil
 		case "pause":
-			return auth.VelocityPauseChallenge(dwallet, req.ExpectedNonce, ownerSlot), nil
+			return auth.VelocityPauseChallenge(dwallet, policy, req.ExpectedNonce, ownerSlot), nil
 		case "resume":
-			return auth.VelocityResumeChallenge(dwallet, req.ExpectedNonce, ownerSlot), nil
+			return auth.VelocityResumeChallenge(dwallet, policy, req.ExpectedNonce, ownerSlot), nil
 		}
 	case TemplateTimeLock:
 		switch req.Action {
@@ -55,11 +81,11 @@ func computeAdminChallenge(template string, req adminChallengeRequest, dwallet s
 			if req.Mode == nil || req.StartSlot == nil || req.EndSlot == nil || req.RecurringPeriodSlots == nil {
 				return zero, errors.New("mode, start_slot, end_slot, recurring_period_slots required")
 			}
-			return auth.TimeLockUpdateWindowChallenge(dwallet, *req.Mode, *req.StartSlot, *req.EndSlot, *req.RecurringPeriodSlots, req.ExpectedNonce, ownerSlot), nil
+			return auth.TimeLockUpdateWindowChallenge(dwallet, policy, *req.Mode, *req.StartSlot, *req.EndSlot, *req.RecurringPeriodSlots, req.ExpectedNonce, ownerSlot), nil
 		case "pause":
-			return auth.TimeLockPauseChallenge(dwallet, req.ExpectedNonce, ownerSlot), nil
+			return auth.TimeLockPauseChallenge(dwallet, policy, req.ExpectedNonce, ownerSlot), nil
 		case "resume":
-			return auth.TimeLockResumeChallenge(dwallet, req.ExpectedNonce, ownerSlot), nil
+			return auth.TimeLockResumeChallenge(dwallet, policy, req.ExpectedNonce, ownerSlot), nil
 		}
 	case TemplateOracleConditional:
 		switch req.Action {
@@ -71,11 +97,11 @@ func computeAdminChallenge(template string, req adminChallengeRequest, dwallet s
 			if req.MaxConfidenceBps != nil {
 				maxConfBps = *req.MaxConfidenceBps
 			}
-			return auth.OracleUpdateBoundsChallenge(dwallet, *req.MinPrice, *req.MaxPrice, *req.MaxAgeSlots, maxConfBps, req.ExpectedNonce, ownerSlot), nil
+			return auth.OracleUpdateBoundsChallenge(dwallet, policy, *req.MinPrice, *req.MaxPrice, *req.MaxAgeSlots, maxConfBps, req.ExpectedNonce, ownerSlot), nil
 		case "pause":
-			return auth.OraclePauseChallenge(dwallet, req.ExpectedNonce, ownerSlot), nil
+			return auth.OraclePauseChallenge(dwallet, policy, req.ExpectedNonce, ownerSlot), nil
 		case "resume":
-			return auth.OracleResumeChallenge(dwallet, req.ExpectedNonce, ownerSlot), nil
+			return auth.OracleResumeChallenge(dwallet, policy, req.ExpectedNonce, ownerSlot), nil
 		}
 	case TemplatePasskeyStepUp:
 		switch req.Action {
@@ -89,11 +115,11 @@ func computeAdminChallenge(template string, req adminChallengeRequest, dwallet s
 			}
 			var pk [33]byte
 			copy(pk[:], pkb)
-			return auth.PasskeyUpdatePolicyChallenge(dwallet, *req.ThresholdAmount, pk, req.ExpectedNonce, ownerSlot), nil
+			return auth.PasskeyUpdatePolicyChallenge(dwallet, policy, *req.ThresholdAmount, pk, req.ExpectedNonce, ownerSlot), nil
 		case "pause":
-			return auth.PasskeyPauseChallenge(dwallet, req.ExpectedNonce, ownerSlot), nil
+			return auth.PasskeyPauseChallenge(dwallet, policy, req.ExpectedNonce, ownerSlot), nil
 		case "resume":
-			return auth.PasskeyResumeChallenge(dwallet, req.ExpectedNonce, ownerSlot), nil
+			return auth.PasskeyResumeChallenge(dwallet, policy, req.ExpectedNonce, ownerSlot), nil
 		}
 	case TemplateFHEGated:
 		switch req.Action {
@@ -105,18 +131,18 @@ func computeAdminChallenge(template string, req adminChallengeRequest, dwallet s
 			if ferr != nil {
 				return zero, fmt.Errorf("new_fhe_authority: %w", ferr)
 			}
-			return auth.FHEGatedRotateAuthorityChallenge(dwallet, fa, req.ExpectedNonce, ownerSlot), nil
+			return auth.FHEGatedRotateAuthorityChallenge(dwallet, policy, fa, req.ExpectedNonce, ownerSlot), nil
 		case "pause":
-			return auth.FHEGatedPauseChallenge(dwallet, req.ExpectedNonce, ownerSlot), nil
+			return auth.FHEGatedPauseChallenge(dwallet, policy, req.ExpectedNonce, ownerSlot), nil
 		case "resume":
-			return auth.FHEGatedResumeChallenge(dwallet, req.ExpectedNonce, ownerSlot), nil
+			return auth.FHEGatedResumeChallenge(dwallet, policy, req.ExpectedNonce, ownerSlot), nil
 		}
 	case TemplateSessionKeys:
 		// Audit C2 (Opção 4): create_session is now an init_policy flow,
 		// not an admin action — use POST /v1/policies/session-keys/init.
 		switch req.Action {
 		case "revoke":
-			return auth.SessionKeysRevokeChallenge(dwallet, req.ExpectedNonce, ownerSlot), nil
+			return auth.SessionKeysRevokeChallenge(dwallet, policy, req.ExpectedNonce, ownerSlot), nil
 		case "add_allowed_program", "remove_allowed_program":
 			if req.AllowedProgram == "" {
 				return zero, errors.New("allowed_program required")
@@ -126,9 +152,9 @@ func computeAdminChallenge(template string, req adminChallengeRequest, dwallet s
 				return zero, fmt.Errorf("allowed_program: %w", perr)
 			}
 			if req.Action == "add_allowed_program" {
-				return auth.SessionKeysAddAllowedProgramChallenge(dwallet, pid, req.ExpectedNonce, ownerSlot), nil
+				return auth.SessionKeysAddAllowedProgramChallenge(dwallet, policy, pid, req.ExpectedNonce, ownerSlot), nil
 			}
-			return auth.SessionKeysRemoveAllowedProgramChallenge(dwallet, pid, req.ExpectedNonce, ownerSlot), nil
+			return auth.SessionKeysRemoveAllowedProgramChallenge(dwallet, policy, pid, req.ExpectedNonce, ownerSlot), nil
 		case "close_session":
 			if req.Recipient == "" {
 				return zero, errors.New("recipient required")
@@ -137,7 +163,7 @@ func computeAdminChallenge(template string, req adminChallengeRequest, dwallet s
 			if rerr != nil {
 				return zero, fmt.Errorf("recipient: %w", rerr)
 			}
-			return auth.SessionKeysCloseSessionChallenge(dwallet, rcpt, req.ExpectedNonce, ownerSlot), nil
+			return auth.SessionKeysCloseSessionChallenge(dwallet, policy, rcpt, req.ExpectedNonce, ownerSlot), nil
 		case "create_session":
 			return zero, errors.New("create_session is now an init flow — POST /v1/policies/session-keys/init (Audit C2)")
 		}

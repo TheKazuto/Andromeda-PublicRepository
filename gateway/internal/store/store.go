@@ -540,6 +540,12 @@ type Store interface {
 	// invariant: never advance unless Stripe confirmed the event.
 	AdvanceOverageReported(ctx context.Context, subscriptionID string, delta int64) error
 
+	// --- Login Social OAuth broker ---
+	// IsTenantOAuthRedirectAllowed returns true when (user_id, redirect_uri)
+	// exists in tenant_oauth_redirects. Used by the broker's /authorize to
+	// gate the URI before minting the state cookie.
+	IsTenantOAuthRedirectAllowed(ctx context.Context, userID, redirectURI string) (bool, error)
+
 	// --- Raw access ---
 	Pool() *pgxpool.Pool
 	Close()

@@ -504,7 +504,17 @@ func (s *Service) adminChallenge(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid_owner_slot", err.Error())
 		return
 	}
-	challenge, err := computeAdminChallenge(template, req, dwallet, ownerSlot)
+	initAuthorityHash, err := decodeInitAuthorityHash(req.InitAuthorityHashBase64)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_init_authority_hash", err.Error())
+		return
+	}
+	policyPda, err := resolvePolicyPDAForAdmin(s.Registry, template, dwallet, initAuthorityHash, req.SessionIndex)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_policy_pda", err.Error())
+		return
+	}
+	challenge, err := computeAdminChallenge(template, req, dwallet, policyPda, ownerSlot)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "challenge_failed", err.Error())
 		return

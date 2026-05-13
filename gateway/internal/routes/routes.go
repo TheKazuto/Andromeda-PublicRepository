@@ -53,6 +53,11 @@ type Route struct {
 	// Optional — when blank but DeprecatedAt is set, the route stays
 	// callable indefinitely (just flagged deprecated).
 	SunsetAt string
+	// MaxBodyBytes, when > 0, caps the request body for this route at a
+	// tighter limit than the global one (server.go applies an extra
+	// `limitPayload`). Used by the OIDC routes (a staged `id_token` is
+	// ≤ 4 KiB; an 8 KiB cap leaves slack without inviting payload DoS).
+	MaxBodyBytes int64
 }
 
 // All catalogues every public route. Order does not matter — the
@@ -117,6 +122,25 @@ var All = []Route{
 	{Method: "POST", Path: "/v1/recovery/policy/admin/challenge", Upstream: UpstreamIka, Key: "ika.recovery.policy.admin.challenge", Idempotent: true, RateClass: RateClassRead},
 	{Method: "POST", Path: "/v1/recovery/policy/admin/submit", Upstream: UpstreamIka, Key: "ika.recovery.policy.admin.submit", Idempotent: true, RateClass: RateClassTx},
 	{Method: "POST", Path: "/v1/recovery/policy/apply-pending", Upstream: UpstreamIka, Key: "ika.recovery.policy.apply-pending", Idempotent: true, RateClass: RateClassTx},
+
+	// Recovery — Login Social (RulesPolicy OIDC primary; scheme = 4; loginsocial.md §6.1/§10).
+	// A staged `id_token` (≤ 4 KiB) goes on-chain in a temp PDA, then the user
+	// authorizes signatures with an ephemeral Ed25519 key. The JWT-bearing
+	// routes get a dedicated 8 KiB body cap (MaxBodyBytes).
+	{Method: "POST", Path: "/v1/recovery/primary/oidc/stage", Upstream: UpstreamIka, Key: "ika.recovery.primary.oidc.stage", Idempotent: true, RateClass: RateClassTx, TimeoutSeconds: 90, MaxBodyBytes: 8 << 10},
+	{Method: "POST", Path: "/v1/recovery/primary/oidc/open/challenge", Upstream: UpstreamIka, Key: "ika.recovery.primary.oidc.open.challenge", Idempotent: true, RateClass: RateClassRead, MaxBodyBytes: 8 << 10},
+	{Method: "POST", Path: "/v1/recovery/primary/oidc/open", Upstream: UpstreamIka, Key: "ika.recovery.primary.oidc.open", Idempotent: true, RateClass: RateClassTx, TimeoutSeconds: 90, MaxBodyBytes: 8 << 10},
+	{Method: "POST", Path: "/v1/recovery/primary/oidc/use/challenge", Upstream: UpstreamIka, Key: "ika.recovery.primary.oidc.use.challenge", RateClass: RateClassRead},
+	{Method: "POST", Path: "/v1/recovery/primary/oidc/use/submit", Upstream: UpstreamIka, Key: "ika.recovery.primary.oidc.use.submit", Idempotent: true, RateClass: RateClassTx, TimeoutSeconds: 90},
+	{Method: "POST", Path: "/v1/recovery/primary/oidc/close", Upstream: UpstreamIka, Key: "ika.recovery.primary.oidc.close", Idempotent: true, RateClass: RateClassTx},
+	{Method: "POST", Path: "/v1/recovery/primary/oidc/staging/close", Upstream: UpstreamIka, Key: "ika.recovery.primary.oidc.staging.close", Idempotent: true, RateClass: RateClassTx},
+
+	// Login Social — pre-step: server picks not_after + nonce_randomness and
+	// returns the canonical `oidc_nonce` (so the client carries no crypto-layout
+	// code). Not idempotent — fresh randomness each call.
+	{Method: "POST", Path: "/v1/oidc/nonce", Upstream: UpstreamIka, Key: "ika.oidc.nonce", RateClass: RateClassRead, MaxBodyBytes: 1 << 10},
+	// Login Social — obligatory server-side `id_token` pre-validation (JWKS) before staging.
+	{Method: "POST", Path: "/v1/oidc/validate", Upstream: UpstreamIka, Key: "ika.oidc.validate", Idempotent: true, RateClass: RateClassRead, MaxBodyBytes: 8 << 10},
 
 	// Identity (opt-in email magic-link)
 	{Method: "POST", Path: "/v1/identity/email/request", Upstream: UpstreamIka, Key: "ika.identity.email.request", Idempotent: true, RateClass: RateClassTx},

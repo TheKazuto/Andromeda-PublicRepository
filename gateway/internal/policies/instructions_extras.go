@@ -86,17 +86,17 @@ func BuildOracleAdmin(reg *Registry, in OracleAdminInput) ([]solana.Instruction,
 	w.Bytes32(in.InitAuthorityHash)
 	switch in.Action {
 	case OracleUpdateBounds:
-		challenge = auth.OracleUpdateBoundsChallenge(in.Dwallet, in.MinPrice, in.MaxPrice, in.MaxAgeSlots, in.MaxConfidenceBps, in.ExpectedNonce, in.OwnerSlot)
+		challenge = auth.OracleUpdateBoundsChallenge(in.Dwallet, policyPda, in.MinPrice, in.MaxPrice, in.MaxAgeSlots, in.MaxConfidenceBps, in.ExpectedNonce, in.OwnerSlot)
 		w.I64(in.MinPrice)
 		w.I64(in.MaxPrice)
 		w.U64(in.MaxAgeSlots)
 		w.U16(in.MaxConfidenceBps) // Audit M1.
 		w.U64(in.ExpectedNonce)
 	case OraclePauseAction:
-		challenge = auth.OraclePauseChallenge(in.Dwallet, in.ExpectedNonce, in.OwnerSlot)
+		challenge = auth.OraclePauseChallenge(in.Dwallet, policyPda, in.ExpectedNonce, in.OwnerSlot)
 		w.U64(in.ExpectedNonce)
 	case OracleResumeAction:
-		challenge = auth.OracleResumeChallenge(in.Dwallet, in.ExpectedNonce, in.OwnerSlot)
+		challenge = auth.OracleResumeChallenge(in.Dwallet, policyPda, in.ExpectedNonce, in.OwnerSlot)
 		w.U64(in.ExpectedNonce)
 	default:
 		return nil, fmt.Errorf("invalid OracleAdminAction %d", in.Action)
@@ -237,15 +237,15 @@ func BuildPasskeyAdmin(reg *Registry, in PasskeyAdminInput) ([]solana.Instructio
 	w.Bytes32(in.InitAuthorityHash)
 	switch in.Action {
 	case PasskeyUpdatePolicy:
-		challenge = auth.PasskeyUpdatePolicyChallenge(in.Dwallet, in.ThresholdAmount, in.PasskeyPubkey, in.ExpectedNonce, in.OwnerSlot)
+		challenge = auth.PasskeyUpdatePolicyChallenge(in.Dwallet, policyPda, in.ThresholdAmount, in.PasskeyPubkey, in.ExpectedNonce, in.OwnerSlot)
 		w.U64(in.ThresholdAmount)
 		w.Bytes(in.PasskeyPubkey[:])
 		w.U64(in.ExpectedNonce)
 	case PasskeyPauseAction:
-		challenge = auth.PasskeyPauseChallenge(in.Dwallet, in.ExpectedNonce, in.OwnerSlot)
+		challenge = auth.PasskeyPauseChallenge(in.Dwallet, policyPda, in.ExpectedNonce, in.OwnerSlot)
 		w.U64(in.ExpectedNonce)
 	case PasskeyResumeAction:
-		challenge = auth.PasskeyResumeChallenge(in.Dwallet, in.ExpectedNonce, in.OwnerSlot)
+		challenge = auth.PasskeyResumeChallenge(in.Dwallet, policyPda, in.ExpectedNonce, in.OwnerSlot)
 		w.U64(in.ExpectedNonce)
 	default:
 		return nil, fmt.Errorf("invalid PasskeyAdminAction %d", in.Action)
@@ -473,16 +473,16 @@ func BuildSessionKeysAdmin(reg *Registry, in SessionKeysAdminInput) ([]solana.In
 	w.U32(in.SessionIndex)
 	switch in.Action {
 	case SessionKeysRevoke:
-		challenge = auth.SessionKeysRevokeChallenge(in.Dwallet, in.ExpectedNonce, in.OwnerSlot)
+		challenge = auth.SessionKeysRevokeChallenge(in.Dwallet, policyPda, in.ExpectedNonce, in.OwnerSlot)
 		w.U64(in.ExpectedNonce)
 	case SessionKeysAddAllowedProgram:
-		challenge = auth.SessionKeysAddAllowedProgramChallenge(in.Dwallet, in.ProgramID, in.ExpectedNonce, in.OwnerSlot)
+		challenge = auth.SessionKeysAddAllowedProgramChallenge(in.Dwallet, policyPda, in.ProgramID, in.ExpectedNonce, in.OwnerSlot)
 		var pid [32]byte
 		copy(pid[:], in.ProgramID.Bytes())
 		w.Bytes32(pid)
 		w.U64(in.ExpectedNonce)
 	case SessionKeysRemoveAllowedProgram:
-		challenge = auth.SessionKeysRemoveAllowedProgramChallenge(in.Dwallet, in.ProgramID, in.ExpectedNonce, in.OwnerSlot)
+		challenge = auth.SessionKeysRemoveAllowedProgramChallenge(in.Dwallet, policyPda, in.ProgramID, in.ExpectedNonce, in.OwnerSlot)
 		var pid [32]byte
 		copy(pid[:], in.ProgramID.Bytes())
 		w.Bytes32(pid)
@@ -518,7 +518,7 @@ func BuildSessionKeysClose(reg *Registry, in SessionKeysCloseInput) ([]solana.In
 	if err != nil {
 		return nil, err
 	}
-	challenge := auth.SessionKeysCloseSessionChallenge(in.Dwallet, in.Recipient, in.ExpectedNonce, in.OwnerSlot)
+	challenge := auth.SessionKeysCloseSessionChallenge(in.Dwallet, policyPda, in.Recipient, in.ExpectedNonce, in.OwnerSlot)
 	preIx, err := auth.BuildCredentialPrecompile(in.OwnerSlot, challenge, in.OwnerSig.Signature, in.OwnerSig.WebauthnAuthData, in.OwnerSig.WebauthnClientDataJSON)
 	if err != nil {
 		return nil, fmt.Errorf("build owner precompile: %w", err)
@@ -715,14 +715,14 @@ func BuildFHEGatedAdmin(reg *Registry, in FHEGatedAdminInput) ([]solana.Instruct
 	w.Bytes32(in.InitAuthorityHash)
 	switch in.Action {
 	case FHEGatedRotateAuthority:
-		challenge = auth.FHEGatedRotateAuthorityChallenge(in.Dwallet, in.NewFHEAuthority, in.ExpectedNonce, in.OwnerSlot)
+		challenge = auth.FHEGatedRotateAuthorityChallenge(in.Dwallet, policyPda, in.NewFHEAuthority, in.ExpectedNonce, in.OwnerSlot)
 		w.Bytes32(in.NewFHEAuthority)
 		w.U64(in.ExpectedNonce)
 	case FHEGatedPauseAction:
-		challenge = auth.FHEGatedPauseChallenge(in.Dwallet, in.ExpectedNonce, in.OwnerSlot)
+		challenge = auth.FHEGatedPauseChallenge(in.Dwallet, policyPda, in.ExpectedNonce, in.OwnerSlot)
 		w.U64(in.ExpectedNonce)
 	case FHEGatedResumeAction:
-		challenge = auth.FHEGatedResumeChallenge(in.Dwallet, in.ExpectedNonce, in.OwnerSlot)
+		challenge = auth.FHEGatedResumeChallenge(in.Dwallet, policyPda, in.ExpectedNonce, in.OwnerSlot)
 		w.U64(in.ExpectedNonce)
 	default:
 		return nil, fmt.Errorf("invalid FHEGatedAdminAction %d", in.Action)
