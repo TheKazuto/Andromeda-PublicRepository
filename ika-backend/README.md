@@ -76,7 +76,6 @@ ika-backend/
 | Layer | Flag | Endpoints |
 |-------|------|-----------|
 | MPC engine | always on | `/v1/dwallet/*` |
-| Identity | `IKA_IDENTITY_ENABLED` | `/v1/identity/*` |
 | Recovery (discovery) | `IKA_RECOVERY_ENABLED` | `/v1/recovery/{challenge,resolve}` |
 | Recovery (policy) | `IKA_RECOVERY_POLICY_ENABLED` | `/v1/recovery/{primary,quorum,policy}/*` |
 | Login Social (OIDC) | `IKA_OIDC_ENABLED` (requires policy layer + `jwk-registry` deployed) | `/v1/oidc/{nonce,validate}` + `/v1/recovery/primary/oidc/*` |
@@ -178,23 +177,6 @@ On-chain schemes (validated via Solana precompile, **zero attestor**):
 
 The trust root for the JWKs lives in a separate on-chain `jwk-registry` program. The off-chain `jwk-rotator` worker (see [`jwk-rotator/README.md`](../jwk-rotator/README.md)) keeps it in sync with the provider JWKS.
 
-### Identity (opt-in)
-
-OAuth (Google/Apple/Twitter/GitHub), email magic link, passkey-as-identity (WebAuthn PRF).
-Mounted under `/v1/identity/*` only when `IKA_IDENTITY_ENABLED=true`; each provider is gated by its
-own flag. CORS is enabled here (unlike the engine routes). `walletAddress = sha256("<provider>:<subject>")`
-— deterministic, so any client that authenticates the same account derives the same dWallet.
-
-- `GET  /v1/identity/providers` — which providers are enabled
-- `POST /v1/identity/oauth/{start,callback}` — OAuth (PKCE; `provider` in body)
-- `POST /v1/identity/email/{request,verify}` — magic link (`/request` is anti-enumeration: always `200`)
-- `POST /v1/identity/passkey/register/{options,verify}` — WebAuthn PRF registration
-- `POST /v1/identity/passkey/authenticate/{options,verify}` — WebAuthn PRF login
-- `GET  /v1/identity/me` · `POST /v1/identity/refresh` · `POST /v1/identity/logout` — session (Bearer JWT; `/refresh` is public, single-use rotated refresh token)
-- `GET  /v1/identity/me/export` — GDPR JSON dump
-- `DELETE /v1/identity/me` — GDPR purge (on-chain dWallet remains, with disclaimer)
-- Account linking (Bearer JWT): `POST /v1/identity/link/oauth/{start,callback}`, `POST /v1/identity/link/email/{request,verify}`, `POST /v1/identity/link/passkey/register/{options,verify}`, `DELETE /v1/identity/link/:provider/:subject`
-
 ### Health
 - `GET /health` — liveness (no auth)
 - `GET /health/deep` — Postgres + Ika gRPC + Solana RPC checks; requires `X-Api-Key: <IKA_ADMIN_API_KEY>`
@@ -220,33 +202,13 @@ missing required value is aggregated and printed, and the process exits.
 | `NODE_ENV` | `development` | `development` / `production` / `test`. |
 | `LOG_LEVEL` | `info` | `fatal` / `error` / `warn` / `info` / `debug` / `trace`. |
 | `IKA_ADMIN_API_KEY` | _(unset)_ | Required for `GET /health/deep`. |
-| `ALLOWED_ORIGINS` | _(empty → CORS off)_ | CSV of origins allowed on `/v1/identity/*` and `/v1/recovery/*`. Engine routes never set CORS. |
+| `ALLOWED_ORIGINS` | _(empty → CORS off)_ | CSV of origins allowed on `/v1/recovery/*` and `/v1/oidc/*`. Engine routes never set CORS. |
 | `IKA_GRPC_TLS` | `true` | TLS for the Ika gRPC channel. |
 | `SOLANA_COMMITMENT` | `confirmed` | `processed` / `confirmed` / `finalized`. |
 | `PGSSLMODE` | _(unset)_ | Postgres SSL mode (e.g. `prefer`, `require`). |
 | `IKA_PG_POOL_MAX` | `20` | Max Postgres pool size. |
 | `IKA_PG_CONNECTION_TIMEOUT_MS` | `3000` | Postgres connection timeout (ms). |
 | `SENTRY_DSN` | _(unset)_ | Optional error reporting. |
-
-### Identity Layer (opt-in — `IKA_IDENTITY_ENABLED=true`)
-Each provider has its own `*_ENABLED` flag. When identity is on, `IKA_IDENTITY_JWT_SECRET` (≥32 chars)
-and `IKA_IDENTITY_PII_KEY` (32 bytes, base64) are required or the boot refuses to start.
-
-| Var | Notes |
-|-----|-------|
-| `IKA_IDENTITY_ENABLED` | Master flag. |
-| `IKA_IDENTITY_JWT_SECRET` | Session-token signing key, ≥32 chars (`openssl rand -hex 32`). **Required when enabled.** |
-| `IKA_IDENTITY_PII_KEY` | 32-byte master key for PII encryption-at-rest (`openssl rand -base64 32`). **Required when enabled.** |
-| `IKA_IDENTITY_JWT_ISSUER` / `_JWT_AUDIENCE` | Default `ika-backend` / `andromeda-client`. |
-| `IKA_IDENTITY_JWT_TTL_SECONDS` / `_REFRESH_TOKEN_TTL_DAYS` | Default `900` / `7`. |
-| `IKA_IDENTITY_AUDIT_LOG_ENABLED` | Optional sanitized audit log. |
-| `IKA_IDENTITY_PERSIST_EMAIL` / `_PERSIST_DISPLAY_NAME` | Default `false`. |
-| `IKA_IDENTITY_OAUTH_GOOGLE_ENABLED` + `..._OAUTH_GOOGLE_CLIENT_ID` / `_CLIENT_SECRET` / `_REDIRECT_URIS` | Google OAuth. |
-| `IKA_IDENTITY_OAUTH_APPLE_ENABLED` + `..._OAUTH_APPLE_CLIENT_ID` / `_TEAM_ID` / `_KEY_ID` / `_PRIVATE_KEY` / `_REDIRECT_URIS` | Apple Sign-in. |
-| `IKA_IDENTITY_OAUTH_TWITTER_ENABLED` + `..._OAUTH_TWITTER_CLIENT_ID` / `_CLIENT_SECRET` / `_REDIRECT_URIS` | Twitter (X) OAuth. |
-| `IKA_IDENTITY_OAUTH_GITHUB_ENABLED` + `..._OAUTH_GITHUB_CLIENT_ID` / `_CLIENT_SECRET` / `_REDIRECT_URIS` | GitHub OAuth. |
-| `IKA_IDENTITY_EMAIL_ENABLED` + `..._EMAIL_TRANSPORT` (`smtp`/`memory`) / `_EMAIL_FROM` / `_EMAIL_SMTP_URL` / `_EMAIL_FRONTEND_CALLBACK_URL` / `_EMAIL_TOKEN_TTL_SECONDS` / `_EMAIL_RATE_LIMIT_PER_EMAIL_PER_HOUR` / `_EMAIL_RATE_LIMIT_PER_IP_PER_HOUR` | Email magic link. `FROM`, `FRONTEND_CALLBACK_URL` required when enabled; `SMTP_URL` required with `smtp` transport. |
-| `IKA_IDENTITY_PASSKEY_ENABLED` + `..._PASSKEY_RP_ID` / `_PASSKEY_RP_NAME` / `_PASSKEY_ORIGINS` / `_PASSKEY_PRF_SALT` | WebAuthn PRF. `RP_ID` + `PRF_SALT` (64 hex chars) required when enabled. **`PRF_SALT` is immutable after first boot** — rotating it orphans every passkey-derived wallet; the backend refuses to start if it changes. |
 
 ### Recovery Layer (opt-in)
 
