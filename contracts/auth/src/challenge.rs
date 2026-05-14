@@ -1,4 +1,4 @@
-//! Domain-separated, per-operation challenges.
+//! Domain-separated, per-operation challenges (clear-signing v2).
 //!
 //! Every credential signs the bytes returned by these functions off-chain.
 //! The on-chain handler recomputes the same hash from the same inputs and
@@ -7,29 +7,49 @@
 //! Each challenge embeds:
 //!  * a global `DOMAIN` tag (rules out cross-program replay)
 //!  * an operation-specific tag (rules out cross-operation replay)
+//!  * the human-readable message bytes, length-prefixed (u16 LE)
+//!    — the approver reads this exact text before signing
 //!  * the dWallet identity (rules out cross-policy replay)
 //!  * a single-use nonce (rules out replay across time)
 //!  * the credential's own member-id (rules out signing-on-behalf-of)
 //!
-//! All inputs are length-prefixed by being concatenated as separate `hashv`
-//! arguments (the SHA-256 absorbing each item in sequence makes the boundaries
-//! unambiguous as long as no two challenge functions share the same input
-//! shape — which is enforced by the unique operation tag).
+//! ─── Clear signing wire format ────────────────────────────────────
+//! ```text
+//! challenge = sha256(
+//!     DOMAIN
+//!     || op_tag
+//!     || human_message_len_u16_le
+//!     || human_message_bytes
+//!     || canonical_typed_params...
+//! )
+//! ```
 //!
-//! The TypeScript mirror is `ika-backend/src/recovery/challenge.ts`. Frozen
-//! golden vectors live at `ika-backend/src/recovery/__tests__/challenge_vectors.json`
-//! (asserted on the TS side; the SBF-only `hashv` here is checked via
-//! on-chain / litesvm program tests). Any wire-format change must touch both
-//! sides and regenerate the vectors in the same commit.
+//! See `docs/SPEC_CLEAR_SIGNING_FROZEN.md` for the canonical templates and
+//! `crate::human_message` for the no_std renderers. The TypeScript mirror is
+//! `ika-backend/src/recovery/challenge.ts`. Frozen golden vectors live at
+//! `ika-backend/src/recovery/__tests__/challenge_vectors.json` (asserted on
+//! the TS side; the SBF-only `hashv` here is checked via on-chain / litesvm
+//! program tests). Any wire-format change must touch both sides and
+//! regenerate the vectors in the same commit.
+//!
+//! Flows preserved at v1 (no clear signing):
+//!  * [`rules_policy_init_challenge`] uses [`DOMAIN_INIT_V1`] — init is
+//!    single-shot, PDA-bound, no human approval needed.
 
 use crate::hash::hashv;
+use crate::human_message::{self, HumanMessageError, MAX_HUMAN_MESSAGE_BYTES};
 use solana_address::Address;
 
-pub const DOMAIN: &[u8] = b"andromeda::rules-policy::v1";
+/// Clear-signing domain (Fase 1, all 17 ops below). Bumped from v1 in
+/// 2026-05-14 because the wire format now embeds the human-readable
+/// message.
+pub const DOMAIN: &[u8] = b"andromeda::rules-policy::v2";
 
-// Init flow tag (init_authority signs once at creation; PDA is single-shot
-// per (dwallet, init_authority) pair so no nonce is needed — replay against
-// the same PDA fails because the account already exists).
+/// Init-flow domain. Preserved at v1: init is single-shot per
+/// `(dwallet, init_authority_hash)` and does not need clear signing.
+pub const DOMAIN_INIT_V1: &[u8] = b"andromeda::rules-policy::v1";
+
+// Init flow tag (no clear signing)
 pub const OP_INIT: &[u8] = b"init";
 
 // Recovery flow tags
@@ -57,6 +77,14 @@ pub const OP_ADMIN_PROPOSE_QUORUM_THRESHOLD: &[u8] = b"admin-propose-qt";
 pub const OP_ADMIN_PROPOSE_DAILY_LIMIT: &[u8] = b"admin-propose-dl";
 pub const OP_ADMIN_PROPOSE_COOLDOWN: &[u8] = b"admin-propose-cd";
 
+#[inline(always)]
+fn human_len_le(human: &[u8]) -> [u8; 2] {
+    // Caller is responsible for guaranteeing `human.len() <= u16::MAX`. All
+    // renderers in `crate::human_message` already cap at MAX_HUMAN_MESSAGE_BYTES.
+    debug_assert!(human.len() <= MAX_HUMAN_MESSAGE_BYTES);
+    (human.len() as u16).to_le_bytes()
+}
+
 // ── Init (Opção 4 — init_authority binds the PDA seed) ──────────
 
 /// Init challenge for rules-policy. The init_authority signs this exactly
@@ -64,6 +92,10 @@ pub const OP_ADMIN_PROPOSE_COOLDOWN: &[u8] = b"admin-propose-cd";
 /// each (dwallet, init_authority) pair maps to a distinct PDA — the
 /// signature here proves the caller really controls init_authority and
 /// commits all init parameters.
+///
+/// Wire format stays at [`DOMAIN_INIT_V1`] (no clear signing — init is
+/// single-shot and PDA-bound; UX clarity for create flow is tracked as a
+/// future Fase 3).
 ///
 /// Replay protection: PDA uniqueness. The PDA is created with `init`
 /// (fails if already exists), so the same signature cannot be replayed to
@@ -87,7 +119,7 @@ pub fn rules_policy_init_challenge(
     let cd_le = cooldown_seconds.to_le_bytes();
     let ads = [allowed_destinations_some];
     hashv(&[
-        DOMAIN,
+        DOMAIN_INIT_V1,
         OP_INIT,
         dwallet.as_array().as_slice(),
         init_authority_slot,
@@ -100,9 +132,15 @@ pub fn rules_policy_init_challenge(
     ])
 }
 
-// ── Recovery ────────────────────────────────────────────────────
+// ── Recovery (clear-signing v2) ─────────────────────────────────
 
+/// Returns the challenge hash for `primary-recover`. The clear-signing
+/// message is rendered internally from the typed params and embedded
+/// length-prefixed in the hash. On-chain code uses this; off-chain code
+/// that also wants the rendered text can call
+/// [`primary_recover_challenge_with_message`].
 #[inline]
+#[allow(clippy::too_many_arguments)]
 pub fn primary_recover_challenge(
     dwallet: &Address,
     message_approval: &Address,
@@ -113,13 +151,94 @@ pub fn primary_recover_challenge(
     message_approval_bump: u8,
     nonce: u64,
     primary_slot: &[u8; 34],
+) -> Result<[u8; 32], HumanMessageError> {
+    let mut msg_buf = [0u8; MAX_HUMAN_MESSAGE_BYTES];
+    let len = human_message::primary_recover_message(
+        &mut msg_buf,
+        dwallet,
+        message_digest,
+        metadata_digest,
+        user_pubkey,
+        signature_scheme,
+    )?;
+    let human = &msg_buf[..len];
+    let hash = primary_recover_challenge_with_rendered_message(
+        human,
+        dwallet,
+        message_approval,
+        message_digest,
+        metadata_digest,
+        user_pubkey,
+        signature_scheme,
+        message_approval_bump,
+        nonce,
+        primary_slot,
+    );
+    Ok(hash)
+}
+
+/// Same as [`primary_recover_challenge`] but also returns the rendered
+/// message bytes (useful for host-side tests and golden vectors).
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub fn primary_recover_challenge_with_message(
+    dwallet: &Address,
+    message_approval: &Address,
+    message_digest: &[u8; 32],
+    metadata_digest: &[u8; 32],
+    user_pubkey: &[u8; 32],
+    signature_scheme: u16,
+    message_approval_bump: u8,
+    nonce: u64,
+    primary_slot: &[u8; 34],
+) -> Result<([u8; 32], [u8; MAX_HUMAN_MESSAGE_BYTES], usize), HumanMessageError> {
+    let mut msg_buf = [0u8; MAX_HUMAN_MESSAGE_BYTES];
+    let len = human_message::primary_recover_message(
+        &mut msg_buf,
+        dwallet,
+        message_digest,
+        metadata_digest,
+        user_pubkey,
+        signature_scheme,
+    )?;
+    let hash = primary_recover_challenge_with_rendered_message(
+        &msg_buf[..len],
+        dwallet,
+        message_approval,
+        message_digest,
+        metadata_digest,
+        user_pubkey,
+        signature_scheme,
+        message_approval_bump,
+        nonce,
+        primary_slot,
+    );
+    Ok((hash, msg_buf, len))
+}
+
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub fn primary_recover_challenge_with_rendered_message(
+    human: &[u8],
+    dwallet: &Address,
+    message_approval: &Address,
+    message_digest: &[u8; 32],
+    metadata_digest: &[u8; 32],
+    user_pubkey: &[u8; 32],
+    signature_scheme: u16,
+    message_approval_bump: u8,
+    nonce: u64,
+    primary_slot: &[u8; 34],
 ) -> [u8; 32] {
+    let h_len = human_len_le(human);
     let scheme_le = signature_scheme.to_le_bytes();
     let bump = [message_approval_bump];
     let nonce_le = nonce.to_le_bytes();
     hashv(&[
         DOMAIN,
         OP_PRIMARY_RECOVER,
+        &h_len,
+        human,
         dwallet.as_array().as_slice(),
         message_approval.as_array().as_slice(),
         message_digest,
@@ -132,8 +251,6 @@ pub fn primary_recover_challenge(
     ])
 }
 
-/// Primary signs this to authorize opening a new quorum session bound to a
-/// specific (message, amount, destination, expiry).
 #[inline]
 #[allow(clippy::too_many_arguments)]
 pub fn quorum_session_open_challenge(
@@ -148,7 +265,94 @@ pub fn quorum_session_open_challenge(
     expires_at: i64,
     session_nonce: u64,
     primary_slot: &[u8; 34],
+) -> Result<[u8; 32], HumanMessageError> {
+    let mut msg_buf = [0u8; MAX_HUMAN_MESSAGE_BYTES];
+    let len = human_message::quorum_session_open_message(
+        &mut msg_buf,
+        dwallet,
+        amount,
+        destination,
+        message_digest,
+        metadata_digest,
+        signature_scheme,
+        expires_at,
+    )?;
+    Ok(quorum_session_open_challenge_with_rendered_message(
+        &msg_buf[..len],
+        dwallet,
+        message_digest,
+        metadata_digest,
+        user_pubkey,
+        signature_scheme,
+        message_approval_bump,
+        amount,
+        destination,
+        expires_at,
+        session_nonce,
+        primary_slot,
+    ))
+}
+
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub fn quorum_session_open_challenge_with_message(
+    dwallet: &Address,
+    message_digest: &[u8; 32],
+    metadata_digest: &[u8; 32],
+    user_pubkey: &[u8; 32],
+    signature_scheme: u16,
+    message_approval_bump: u8,
+    amount: u64,
+    destination: &[u8; 32],
+    expires_at: i64,
+    session_nonce: u64,
+    primary_slot: &[u8; 34],
+) -> Result<([u8; 32], [u8; MAX_HUMAN_MESSAGE_BYTES], usize), HumanMessageError> {
+    let mut msg_buf = [0u8; MAX_HUMAN_MESSAGE_BYTES];
+    let len = human_message::quorum_session_open_message(
+        &mut msg_buf,
+        dwallet,
+        amount,
+        destination,
+        message_digest,
+        metadata_digest,
+        signature_scheme,
+        expires_at,
+    )?;
+    let hash = quorum_session_open_challenge_with_rendered_message(
+        &msg_buf[..len],
+        dwallet,
+        message_digest,
+        metadata_digest,
+        user_pubkey,
+        signature_scheme,
+        message_approval_bump,
+        amount,
+        destination,
+        expires_at,
+        session_nonce,
+        primary_slot,
+    );
+    Ok((hash, msg_buf, len))
+}
+
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub fn quorum_session_open_challenge_with_rendered_message(
+    human: &[u8],
+    dwallet: &Address,
+    message_digest: &[u8; 32],
+    metadata_digest: &[u8; 32],
+    user_pubkey: &[u8; 32],
+    signature_scheme: u16,
+    message_approval_bump: u8,
+    amount: u64,
+    destination: &[u8; 32],
+    expires_at: i64,
+    session_nonce: u64,
+    primary_slot: &[u8; 34],
 ) -> [u8; 32] {
+    let h_len = human_len_le(human);
     let scheme_le = signature_scheme.to_le_bytes();
     let bump = [message_approval_bump];
     let amount_le = amount.to_le_bytes();
@@ -157,6 +361,8 @@ pub fn quorum_session_open_challenge(
     hashv(&[
         DOMAIN,
         OP_QUORUM_SESSION_OPEN,
+        &h_len,
+        human,
         dwallet.as_array().as_slice(),
         message_digest,
         metadata_digest,
@@ -171,41 +377,167 @@ pub fn quorum_session_open_challenge(
     ])
 }
 
-/// Each member signs this to add a contribution to a session. The session
-/// PDA address makes the challenge unique per-session; the member slot makes
-/// it unique per-member (so member A's signature can't be replayed as B's).
+/// Quorum-contribute v2 hashes the full session snapshot used in
+/// `approve_message`, so that adulterating any field of the session
+/// invalidates every member's signature.
 #[inline]
+#[allow(clippy::too_many_arguments)]
 pub fn quorum_contribute_challenge(
     session: &Address,
     member_slot: &[u8; 34],
+    dwallet: &Address,
+    amount: u64,
+    destination: &[u8; 32],
+    message_digest: &[u8; 32],
+    metadata_digest: &[u8; 32],
+    user_pubkey: &[u8; 32],
+    signature_scheme: u16,
+    message_approval_bump: u8,
+    expires_at: i64,
+) -> Result<[u8; 32], HumanMessageError> {
+    let mut msg_buf = [0u8; MAX_HUMAN_MESSAGE_BYTES];
+    let len = human_message::quorum_contribute_message(
+        &mut msg_buf,
+        session,
+        member_slot,
+        dwallet,
+        amount,
+        destination,
+        message_digest,
+        metadata_digest,
+        user_pubkey,
+        signature_scheme,
+        expires_at,
+    )?;
+    Ok(quorum_contribute_challenge_with_rendered_message(
+        &msg_buf[..len],
+        session,
+        member_slot,
+        dwallet,
+        amount,
+        destination,
+        message_digest,
+        metadata_digest,
+        user_pubkey,
+        signature_scheme,
+        message_approval_bump,
+        expires_at,
+    ))
+}
+
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub fn quorum_contribute_challenge_with_message(
+    session: &Address,
+    member_slot: &[u8; 34],
+    dwallet: &Address,
+    amount: u64,
+    destination: &[u8; 32],
+    message_digest: &[u8; 32],
+    metadata_digest: &[u8; 32],
+    user_pubkey: &[u8; 32],
+    signature_scheme: u16,
+    message_approval_bump: u8,
+    expires_at: i64,
+) -> Result<([u8; 32], [u8; MAX_HUMAN_MESSAGE_BYTES], usize), HumanMessageError> {
+    let mut msg_buf = [0u8; MAX_HUMAN_MESSAGE_BYTES];
+    let len = human_message::quorum_contribute_message(
+        &mut msg_buf,
+        session,
+        member_slot,
+        dwallet,
+        amount,
+        destination,
+        message_digest,
+        metadata_digest,
+        user_pubkey,
+        signature_scheme,
+        expires_at,
+    )?;
+    let hash = quorum_contribute_challenge_with_rendered_message(
+        &msg_buf[..len],
+        session,
+        member_slot,
+        dwallet,
+        amount,
+        destination,
+        message_digest,
+        metadata_digest,
+        user_pubkey,
+        signature_scheme,
+        message_approval_bump,
+        expires_at,
+    );
+    Ok((hash, msg_buf, len))
+}
+
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub fn quorum_contribute_challenge_with_rendered_message(
+    human: &[u8],
+    session: &Address,
+    member_slot: &[u8; 34],
+    dwallet: &Address,
+    amount: u64,
+    destination: &[u8; 32],
+    message_digest: &[u8; 32],
+    metadata_digest: &[u8; 32],
+    user_pubkey: &[u8; 32],
+    signature_scheme: u16,
+    message_approval_bump: u8,
+    expires_at: i64,
 ) -> [u8; 32] {
+    let h_len = human_len_le(human);
+    let amount_le = amount.to_le_bytes();
+    let scheme_le = signature_scheme.to_le_bytes();
+    let bump = [message_approval_bump];
+    let expires_le = expires_at.to_le_bytes();
     hashv(&[
         DOMAIN,
         OP_QUORUM_CONTRIBUTE,
+        &h_len,
+        human,
         session.as_array().as_slice(),
         member_slot,
+        dwallet.as_array().as_slice(),
+        &amount_le,
+        destination,
+        message_digest,
+        metadata_digest,
+        user_pubkey,
+        &scheme_le,
+        &bump,
+        &expires_le,
     ])
 }
 
-// ── Admin (primary signs) ───────────────────────────────────────
+// ── Admin (primary signs, clear-signing v2) ─────────────────────
 
-fn admin_hash(
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn admin_hash_with_human(
     op_tag: &[u8],
+    human: &[u8],
     dwallet: &Address,
     policy: &Address,
     nonce: u64,
     primary_slot: &[u8; 34],
     extras: &[&[u8]],
 ) -> [u8; 32] {
+    let h_len = human_len_le(human);
     let nonce_le = nonce.to_le_bytes();
+    // Up to: DOMAIN(1) + op(1) + h_len(1) + human(1) + dwallet(1) + policy(1)
+    // + nonce(1) + primary(1) + extras (up to 4 today) = 12. Reserve 16.
     let mut parts: [&[u8]; 16] = [&[]; 16];
     parts[0] = DOMAIN;
     parts[1] = op_tag;
-    parts[2] = dwallet.as_array().as_slice();
-    parts[3] = policy.as_array().as_slice();
-    parts[4] = &nonce_le;
-    parts[5] = primary_slot;
-    let mut n = 6usize;
+    parts[2] = &h_len;
+    parts[3] = human;
+    parts[4] = dwallet.as_array().as_slice();
+    parts[5] = policy.as_array().as_slice();
+    parts[6] = &nonce_le;
+    parts[7] = primary_slot;
+    let mut n = 8usize;
     for &e in extras {
         if n >= parts.len() {
             break;
@@ -223,8 +555,18 @@ pub fn admin_add_member_challenge(
     new_member_slot: &[u8; 34],
     nonce: u64,
     primary_slot: &[u8; 34],
-) -> [u8; 32] {
-    admin_hash(OP_ADMIN_ADD_MEMBER, dwallet, policy, nonce, primary_slot, &[new_member_slot.as_slice()])
+) -> Result<[u8; 32], HumanMessageError> {
+    let mut msg = [0u8; MAX_HUMAN_MESSAGE_BYTES];
+    let len = human_message::admin_add_member_message(&mut msg, new_member_slot, policy, dwallet)?;
+    Ok(admin_hash_with_human(
+        OP_ADMIN_ADD_MEMBER,
+        &msg[..len],
+        dwallet,
+        policy,
+        nonce,
+        primary_slot,
+        &[new_member_slot.as_slice()],
+    ))
 }
 
 #[inline]
@@ -234,15 +576,23 @@ pub fn admin_remove_member_challenge(
     member_slot_to_remove: &[u8; 34],
     nonce: u64,
     primary_slot: &[u8; 34],
-) -> [u8; 32] {
-    admin_hash(
+) -> Result<[u8; 32], HumanMessageError> {
+    let mut msg = [0u8; MAX_HUMAN_MESSAGE_BYTES];
+    let len = human_message::admin_remove_member_message(
+        &mut msg,
+        member_slot_to_remove,
+        policy,
+        dwallet,
+    )?;
+    Ok(admin_hash_with_human(
         OP_ADMIN_REMOVE_MEMBER,
+        &msg[..len],
         dwallet,
         policy,
         nonce,
         primary_slot,
         &[member_slot_to_remove.as_slice()],
-    )
+    ))
 }
 
 #[inline]
@@ -252,8 +602,18 @@ pub fn admin_add_destination_challenge(
     destination: &[u8; 32],
     nonce: u64,
     primary_slot: &[u8; 34],
-) -> [u8; 32] {
-    admin_hash(OP_ADMIN_ADD_DESTINATION, dwallet, policy, nonce, primary_slot, &[destination.as_slice()])
+) -> Result<[u8; 32], HumanMessageError> {
+    let mut msg = [0u8; MAX_HUMAN_MESSAGE_BYTES];
+    let len = human_message::admin_add_destination_message(&mut msg, destination, policy, dwallet)?;
+    Ok(admin_hash_with_human(
+        OP_ADMIN_ADD_DESTINATION,
+        &msg[..len],
+        dwallet,
+        policy,
+        nonce,
+        primary_slot,
+        &[destination.as_slice()],
+    ))
 }
 
 #[inline]
@@ -263,8 +623,19 @@ pub fn admin_remove_destination_challenge(
     destination: &[u8; 32],
     nonce: u64,
     primary_slot: &[u8; 34],
-) -> [u8; 32] {
-    admin_hash(OP_ADMIN_REMOVE_DESTINATION, dwallet, policy, nonce, primary_slot, &[destination.as_slice()])
+) -> Result<[u8; 32], HumanMessageError> {
+    let mut msg = [0u8; MAX_HUMAN_MESSAGE_BYTES];
+    let len =
+        human_message::admin_remove_destination_message(&mut msg, destination, policy, dwallet)?;
+    Ok(admin_hash_with_human(
+        OP_ADMIN_REMOVE_DESTINATION,
+        &msg[..len],
+        dwallet,
+        policy,
+        nonce,
+        primary_slot,
+        &[destination.as_slice()],
+    ))
 }
 
 #[inline]
@@ -273,8 +644,18 @@ pub fn admin_revoke_challenge(
     policy: &Address,
     nonce: u64,
     primary_slot: &[u8; 34],
-) -> [u8; 32] {
-    admin_hash(OP_ADMIN_REVOKE, dwallet, policy, nonce, primary_slot, &[])
+) -> Result<[u8; 32], HumanMessageError> {
+    let mut msg = [0u8; MAX_HUMAN_MESSAGE_BYTES];
+    let len = human_message::admin_revoke_message(&mut msg, policy, dwallet)?;
+    Ok(admin_hash_with_human(
+        OP_ADMIN_REVOKE,
+        &msg[..len],
+        dwallet,
+        policy,
+        nonce,
+        primary_slot,
+        &[],
+    ))
 }
 
 #[inline]
@@ -284,15 +665,19 @@ pub fn admin_set_primary_challenge(
     new_primary_slot: &[u8; 34],
     nonce: u64,
     current_primary_slot: &[u8; 34],
-) -> [u8; 32] {
-    admin_hash(
+) -> Result<[u8; 32], HumanMessageError> {
+    let mut msg = [0u8; MAX_HUMAN_MESSAGE_BYTES];
+    let len =
+        human_message::admin_set_primary_message(&mut msg, new_primary_slot, policy, dwallet)?;
+    Ok(admin_hash_with_human(
         OP_ADMIN_SET_PRIMARY,
+        &msg[..len],
         dwallet,
         policy,
         nonce,
         current_primary_slot,
         &[new_primary_slot.as_slice()],
-    )
+    ))
 }
 
 #[inline]
@@ -302,12 +687,28 @@ pub fn admin_set_quorum_threshold_immediate_challenge(
     new_threshold: u8,
     nonce: u64,
     primary_slot: &[u8; 34],
-) -> [u8; 32] {
+) -> Result<[u8; 32], HumanMessageError> {
+    let mut msg = [0u8; MAX_HUMAN_MESSAGE_BYTES];
+    let len = human_message::admin_set_quorum_threshold_immediate_message(
+        &mut msg,
+        new_threshold,
+        policy,
+        dwallet,
+    )?;
     let v = [new_threshold];
-    admin_hash(OP_ADMIN_SET_QUORUM_THRESHOLD_IMMEDIATE, dwallet, policy, nonce, primary_slot, &[&v])
+    Ok(admin_hash_with_human(
+        OP_ADMIN_SET_QUORUM_THRESHOLD_IMMEDIATE,
+        &msg[..len],
+        dwallet,
+        policy,
+        nonce,
+        primary_slot,
+        &[&v],
+    ))
 }
 
 #[inline]
+#[allow(clippy::too_many_arguments)]
 pub fn admin_set_daily_limit_immediate_challenge(
     dwallet: &Address,
     policy: &Address,
@@ -315,17 +716,22 @@ pub fn admin_set_daily_limit_immediate_challenge(
     new_limit: u64,
     nonce: u64,
     primary_slot: &[u8; 34],
-) -> [u8; 32] {
+) -> Result<[u8; 32], HumanMessageError> {
+    let mut msg = [0u8; MAX_HUMAN_MESSAGE_BYTES];
+    let len = human_message::admin_set_daily_limit_immediate_message(
+        &mut msg, new_some, new_limit, policy, dwallet,
+    )?;
     let some = [new_some];
     let limit_le = new_limit.to_le_bytes();
-    admin_hash(
+    Ok(admin_hash_with_human(
         OP_ADMIN_SET_DAILY_LIMIT_IMMEDIATE,
+        &msg[..len],
         dwallet,
         policy,
         nonce,
         primary_slot,
         &[&some, &limit_le],
-    )
+    ))
 }
 
 #[inline]
@@ -335,9 +741,24 @@ pub fn admin_set_cooldown_immediate_challenge(
     new_cooldown_seconds: u64,
     nonce: u64,
     primary_slot: &[u8; 34],
-) -> [u8; 32] {
+) -> Result<[u8; 32], HumanMessageError> {
+    let mut msg = [0u8; MAX_HUMAN_MESSAGE_BYTES];
+    let len = human_message::admin_set_cooldown_immediate_message(
+        &mut msg,
+        new_cooldown_seconds,
+        policy,
+        dwallet,
+    )?;
     let cd_le = new_cooldown_seconds.to_le_bytes();
-    admin_hash(OP_ADMIN_SET_COOLDOWN_IMMEDIATE, dwallet, policy, nonce, primary_slot, &[&cd_le])
+    Ok(admin_hash_with_human(
+        OP_ADMIN_SET_COOLDOWN_IMMEDIATE,
+        &msg[..len],
+        dwallet,
+        policy,
+        nonce,
+        primary_slot,
+        &[&cd_le],
+    ))
 }
 
 #[inline]
@@ -347,12 +768,28 @@ pub fn admin_propose_quorum_threshold_challenge(
     new_threshold: u8,
     nonce: u64,
     primary_slot: &[u8; 34],
-) -> [u8; 32] {
+) -> Result<[u8; 32], HumanMessageError> {
+    let mut msg = [0u8; MAX_HUMAN_MESSAGE_BYTES];
+    let len = human_message::admin_propose_quorum_threshold_message(
+        &mut msg,
+        new_threshold,
+        policy,
+        dwallet,
+    )?;
     let v = [new_threshold];
-    admin_hash(OP_ADMIN_PROPOSE_QUORUM_THRESHOLD, dwallet, policy, nonce, primary_slot, &[&v])
+    Ok(admin_hash_with_human(
+        OP_ADMIN_PROPOSE_QUORUM_THRESHOLD,
+        &msg[..len],
+        dwallet,
+        policy,
+        nonce,
+        primary_slot,
+        &[&v],
+    ))
 }
 
 #[inline]
+#[allow(clippy::too_many_arguments)]
 pub fn admin_propose_daily_limit_challenge(
     dwallet: &Address,
     policy: &Address,
@@ -360,10 +797,22 @@ pub fn admin_propose_daily_limit_challenge(
     new_limit: u64,
     nonce: u64,
     primary_slot: &[u8; 34],
-) -> [u8; 32] {
+) -> Result<[u8; 32], HumanMessageError> {
+    let mut msg = [0u8; MAX_HUMAN_MESSAGE_BYTES];
+    let len = human_message::admin_propose_daily_limit_message(
+        &mut msg, new_some, new_limit, policy, dwallet,
+    )?;
     let some = [new_some];
     let limit_le = new_limit.to_le_bytes();
-    admin_hash(OP_ADMIN_PROPOSE_DAILY_LIMIT, dwallet, policy, nonce, primary_slot, &[&some, &limit_le])
+    Ok(admin_hash_with_human(
+        OP_ADMIN_PROPOSE_DAILY_LIMIT,
+        &msg[..len],
+        dwallet,
+        policy,
+        nonce,
+        primary_slot,
+        &[&some, &limit_le],
+    ))
 }
 
 #[inline]
@@ -373,12 +822,27 @@ pub fn admin_propose_cooldown_challenge(
     new_cooldown_seconds: u64,
     nonce: u64,
     primary_slot: &[u8; 34],
-) -> [u8; 32] {
+) -> Result<[u8; 32], HumanMessageError> {
+    let mut msg = [0u8; MAX_HUMAN_MESSAGE_BYTES];
+    let len = human_message::admin_propose_cooldown_message(
+        &mut msg,
+        new_cooldown_seconds,
+        policy,
+        dwallet,
+    )?;
     let cd_le = new_cooldown_seconds.to_le_bytes();
-    admin_hash(OP_ADMIN_PROPOSE_COOLDOWN, dwallet, policy, nonce, primary_slot, &[&cd_le])
+    Ok(admin_hash_with_human(
+        OP_ADMIN_PROPOSE_COOLDOWN,
+        &msg[..len],
+        dwallet,
+        policy,
+        nonce,
+        primary_slot,
+        &[&cd_le],
+    ))
 }
 
-// ── OIDC (Login Social) ─────────────────────────────────────────
+// ── OIDC (Login Social, clear-signing v2) ───────────────────────
 
 /// The user signs this with their ephemeral key to open an `OidcSession`. It
 /// commits the dWallet identity, the OIDC primary slot, the ephemeral pubkey,
@@ -398,13 +862,45 @@ pub fn oidc_session_open_challenge(
     jwk_registry: &Address,
     oidc_verifier_version: u32,
     session_nonce: u64,
+) -> Result<[u8; 32], HumanMessageError> {
+    let mut msg = [0u8; MAX_HUMAN_MESSAGE_BYTES];
+    let len =
+        human_message::oidc_session_open_message(&mut msg, dwallet, not_after_unix_ts, eph_pk)?;
+    Ok(oidc_session_open_challenge_with_rendered_message(
+        &msg[..len],
+        dwallet,
+        primary_slot,
+        eph_pk,
+        not_after_unix_ts,
+        jwt_digest,
+        jwk_registry,
+        oidc_verifier_version,
+        session_nonce,
+    ))
+}
+
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub fn oidc_session_open_challenge_with_rendered_message(
+    human: &[u8],
+    dwallet: &Address,
+    primary_slot: &[u8; 34],
+    eph_pk: &[u8; 32],
+    not_after_unix_ts: u64,
+    jwt_digest: &[u8; 32],
+    jwk_registry: &Address,
+    oidc_verifier_version: u32,
+    session_nonce: u64,
 ) -> [u8; 32] {
+    let h_len = human_len_le(human);
     let not_after_le = not_after_unix_ts.to_le_bytes();
     let ver_le = oidc_verifier_version.to_le_bytes();
     let nonce_le = session_nonce.to_le_bytes();
     hashv(&[
         DOMAIN,
         OP_OIDC_SESSION_OPEN,
+        &h_len,
+        human,
         dwallet.as_array().as_slice(),
         primary_slot,
         eph_pk,
@@ -422,6 +918,7 @@ pub fn oidc_session_open_challenge(
 /// `next_use_nonce` (single-use, replay-blocked by the PDA's monotonic nonce),
 /// and the OIDC primary slot.
 #[inline]
+#[allow(clippy::too_many_arguments)]
 pub fn oidc_primary_use_challenge(
     session: &Address,
     dwallet: &Address,
@@ -433,13 +930,56 @@ pub fn oidc_primary_use_challenge(
     message_approval_bump: u8,
     use_nonce: u64,
     primary_slot: &[u8; 34],
+) -> Result<[u8; 32], HumanMessageError> {
+    let mut msg = [0u8; MAX_HUMAN_MESSAGE_BYTES];
+    let len = human_message::oidc_primary_use_message(
+        &mut msg,
+        session,
+        dwallet,
+        message_digest,
+        metadata_digest,
+        user_pubkey,
+        signature_scheme,
+    )?;
+    Ok(oidc_primary_use_challenge_with_rendered_message(
+        &msg[..len],
+        session,
+        dwallet,
+        message_approval,
+        message_digest,
+        metadata_digest,
+        user_pubkey,
+        signature_scheme,
+        message_approval_bump,
+        use_nonce,
+        primary_slot,
+    ))
+}
+
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub fn oidc_primary_use_challenge_with_rendered_message(
+    human: &[u8],
+    session: &Address,
+    dwallet: &Address,
+    message_approval: &Address,
+    message_digest: &[u8; 32],
+    metadata_digest: &[u8; 32],
+    user_pubkey: &[u8; 32],
+    signature_scheme: u16,
+    message_approval_bump: u8,
+    use_nonce: u64,
+    primary_slot: &[u8; 34],
 ) -> [u8; 32] {
+    let h_len = human_len_le(human);
     let scheme_le = signature_scheme.to_le_bytes();
     let bump = [message_approval_bump];
     let nonce_le = use_nonce.to_le_bytes();
     hashv(&[
         DOMAIN,
         OP_OIDC_PRIMARY_USE,
+        &h_len,
+        human,
         session.as_array().as_slice(),
         dwallet.as_array().as_slice(),
         message_approval.as_array().as_slice(),

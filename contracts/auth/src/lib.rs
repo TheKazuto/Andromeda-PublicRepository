@@ -42,6 +42,7 @@
 pub mod admin;
 pub mod challenge;
 pub mod hash;
+pub mod human_message;
 pub mod precompile;
 
 use hash::hashv;
@@ -106,7 +107,10 @@ pub fn id_len_for_scheme(scheme: u8) -> Result<usize, AuthError> {
 
 /// Builds a canonical 34-byte member slot from `(scheme, identifier)` with
 /// zero padding. Errors if the identifier length does not match the scheme.
-pub fn build_member_slot(scheme: u8, identifier: &[u8]) -> Result<[u8; MEMBER_SLOT_LEN], AuthError> {
+pub fn build_member_slot(
+    scheme: u8,
+    identifier: &[u8],
+) -> Result<[u8; MEMBER_SLOT_LEN], AuthError> {
     let expected = id_len_for_scheme(scheme)?;
     if identifier.len() != expected {
         return Err(AuthError::InvalidIdentifierLen);
@@ -254,8 +258,8 @@ fn verify_webauthn(
     let mut challenge_b64 = [0u8; 43];
     encode_base64url_nopad_32(challenge, &mut challenge_b64);
     let needle = b"\"challenge\":\"";
-    let key_pos = find_subslice(client_data_json, needle)
-        .ok_or(AuthError::InvalidWebAuthnPayload)?;
+    let key_pos =
+        find_subslice(client_data_json, needle).ok_or(AuthError::InvalidWebAuthnPayload)?;
     let value_start = key_pos
         .checked_add(needle.len())
         .ok_or(AuthError::InvalidWebAuthnPayload)?;
@@ -307,8 +311,7 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 
 /// base64url no-pad encoding of exactly 32 input bytes → 43 output bytes.
 fn encode_base64url_nopad_32(input: &[u8; 32], out: &mut [u8; 43]) {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut o = 0usize;
     let mut i = 0usize;
     while i + 3 <= 30 {

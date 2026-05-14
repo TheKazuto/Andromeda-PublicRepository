@@ -100,7 +100,9 @@ pub fn check_sysvar_address(addr: &Address) -> Result<(), PrecompileError> {
 
 #[inline]
 fn read_u16_le(buf: &[u8], offset: usize) -> Result<u16, PrecompileError> {
-    let end = offset.checked_add(2).ok_or(PrecompileError::SysvarTooShort)?;
+    let end = offset
+        .checked_add(2)
+        .ok_or(PrecompileError::SysvarTooShort)?;
     if end > buf.len() {
         return Err(PrecompileError::SysvarTooShort);
     }
@@ -116,8 +118,11 @@ fn read_u8(buf: &[u8], offset: usize) -> Result<u8, PrecompileError> {
 }
 
 #[inline]
+#[allow(clippy::needless_lifetimes)]
 fn read_slice<'a>(buf: &'a [u8], offset: usize, len: usize) -> Result<&'a [u8], PrecompileError> {
-    let end = offset.checked_add(len).ok_or(PrecompileError::SysvarTooShort)?;
+    let end = offset
+        .checked_add(len)
+        .ok_or(PrecompileError::SysvarTooShort)?;
     if end > buf.len() {
         return Err(PrecompileError::SysvarTooShort);
     }
@@ -127,6 +132,7 @@ fn read_slice<'a>(buf: &'a [u8], offset: usize, len: usize) -> Result<&'a [u8], 
 /// Iterates over instructions in `sysvar_data` looking for the body of the
 /// `i`-th instruction. Returns `(program_id_slice, data_slice)` for that
 /// instruction body, or `None` if `i` is out of range.
+#[allow(clippy::type_complexity)]
 fn read_ix_body(sysvar_data: &[u8], i: usize) -> Result<Option<(&[u8], &[u8])>, PrecompileError> {
     if sysvar_data.len() < 2 {
         return Err(PrecompileError::SysvarTooShort);
@@ -164,9 +170,12 @@ pub fn verify_ed25519(
     expected_message: &[u8],
     sysvar_data: &[u8],
 ) -> Result<(), PrecompileError> {
-    find_long_record(sysvar_data, &ED25519_PRECOMPILE_ID, ED25519_PUBKEY_LEN, |pk, msg| {
-        pk == expected_pubkey.as_slice() && msg == expected_message
-    })
+    find_long_record(
+        sysvar_data,
+        &ED25519_PRECOMPILE_ID,
+        ED25519_PUBKEY_LEN,
+        |pk, msg| pk == expected_pubkey.as_slice() && msg == expected_message,
+    )
 }
 
 /// Verifies a Secp256r1 precompile invocation in the same transaction signed
@@ -176,9 +185,12 @@ pub fn verify_secp256r1(
     expected_message: &[u8],
     sysvar_data: &[u8],
 ) -> Result<(), PrecompileError> {
-    find_long_record(sysvar_data, &SECP256R1_PRECOMPILE_ID, SECP256R1_PUBKEY_LEN, |pk, msg| {
-        pk == expected_pubkey.as_slice() && msg == expected_message
-    })
+    find_long_record(
+        sysvar_data,
+        &SECP256R1_PRECOMPILE_ID,
+        SECP256R1_PUBKEY_LEN,
+        |pk, msg| pk == expected_pubkey.as_slice() && msg == expected_message,
+    )
 }
 
 /// Verifies a Secp256k1 precompile invocation in the same transaction signed
@@ -189,9 +201,12 @@ pub fn verify_secp256k1(
     expected_message: &[u8],
     sysvar_data: &[u8],
 ) -> Result<(), PrecompileError> {
-    find_short_record(sysvar_data, &SECP256K1_PRECOMPILE_ID, SECP256K1_ETH_ADDR_LEN, |addr, msg| {
-        addr == expected_eth_address.as_slice() && msg == expected_message
-    })
+    find_short_record(
+        sysvar_data,
+        &SECP256K1_PRECOMPILE_ID,
+        SECP256K1_ETH_ADDR_LEN,
+        |addr, msg| addr == expected_eth_address.as_slice() && msg == expected_message,
+    )
 }
 
 fn find_long_record<F>(
@@ -313,7 +328,11 @@ where
             {
                 return Err(PrecompileError::CrossInstructionUnsupported);
             }
-            let _signature = read_slice(data, signature_offset, SECP256K1_SIG_LEN + SECP256K1_RECID_LEN)?;
+            let _signature = read_slice(
+                data,
+                signature_offset,
+                SECP256K1_SIG_LEN + SECP256K1_RECID_LEN,
+            )?;
             let eth_address = read_slice(data, eth_address_offset, eth_addr_len)?;
             let message = read_slice(data, message_data_offset, message_data_size)?;
             if predicate(eth_address, message) {
