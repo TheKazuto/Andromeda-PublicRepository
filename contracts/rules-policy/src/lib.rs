@@ -64,8 +64,8 @@ use andromeda_auth::{
     WEBAUTHN_AUTH_DATA_MAX, WEBAUTHN_CLIENT_DATA_JSON_MAX,
 };
 use andromeda_oidc_verifier as oidc_verifier;
-use ika_dwallet_quasar::DWalletContext;
 use andromeda_policy_shared::validate_ika_cpi_accounts;
+use ika_dwallet_quasar::DWalletContext;
 use quasar_lang::prelude::*;
 use solana_address::Address;
 
@@ -250,7 +250,10 @@ mod oidc_jwk {
             let mut modulus_n = [0u8; MODULUS_LEN];
             modulus_n.copy_from_slice(&data[base + EO_MODULUS..base + EO_MODULUS + MODULUS_LEN]);
             let exponent_e = read_u32(&data[base + EO_EXPONENT..base + EO_EXPONENT + 4]);
-            return Some(ActiveJwk { modulus_n, exponent_e });
+            return Some(ActiveJwk {
+                modulus_n,
+                exponent_e,
+            });
         }
         None
     }
@@ -298,11 +301,15 @@ mod rules_policy_program {
             allowed_destinations_some,
             current_ts,
         )?;
-        ctx.accounts.program.emit_event(&PolicyDeployed {
-            policy: policy_addr,
-            dwallet: dwallet_addr,
-            ts: current_ts,
-        }, &ctx.accounts.event_authority, EventAuthority::BUMP)?;
+        ctx.accounts.program.emit_event(
+            &PolicyDeployed {
+                policy: policy_addr,
+                dwallet: dwallet_addr,
+                ts: current_ts,
+            },
+            &ctx.accounts.event_authority,
+            EventAuthority::BUMP,
+        )?;
         Ok(())
     }
 
@@ -326,11 +333,15 @@ mod rules_policy_program {
         let current_ts: i64 = ctx.accounts.clock.unix_timestamp.into();
         let policy_addr = *ctx.accounts.policy.address();
         let request_hash = Address::from(message_digest);
-        ctx.accounts.program.emit_event(&SignatureRequested {
-            policy: policy_addr,
-            request_hash,
-            ts: current_ts,
-        }, &ctx.accounts.event_authority, EventAuthority::BUMP)?;
+        ctx.accounts.program.emit_event(
+            &SignatureRequested {
+                policy: policy_addr,
+                request_hash,
+                ts: current_ts,
+            },
+            &ctx.accounts.event_authority,
+            EventAuthority::BUMP,
+        )?;
         ctx.accounts.recover(
             message_digest,
             metadata_digest,
@@ -340,11 +351,15 @@ mod rules_policy_program {
             cpi_authority_bump,
             expected_nonce,
         )?;
-        ctx.accounts.program.emit_event(&SignatureApproved {
-            policy: policy_addr,
-            request_hash,
-            ts: current_ts,
-        }, &ctx.accounts.event_authority, EventAuthority::BUMP)?;
+        ctx.accounts.program.emit_event(
+            &SignatureApproved {
+                policy: policy_addr,
+                request_hash,
+                ts: current_ts,
+            },
+            &ctx.accounts.event_authority,
+            EventAuthority::BUMP,
+        )?;
         Ok(())
     }
 
@@ -439,17 +454,25 @@ mod rules_policy_program {
         let current_ts: i64 = ctx.accounts.clock.unix_timestamp.into();
         let policy_addr = *ctx.accounts.policy.address();
         let request_hash = Address::from(ctx.accounts.session.message_digest);
-        ctx.accounts.program.emit_event(&SignatureRequested {
-            policy: policy_addr,
-            request_hash,
-            ts: current_ts,
-        }, &ctx.accounts.event_authority, EventAuthority::BUMP)?;
+        ctx.accounts.program.emit_event(
+            &SignatureRequested {
+                policy: policy_addr,
+                request_hash,
+                ts: current_ts,
+            },
+            &ctx.accounts.event_authority,
+            EventAuthority::BUMP,
+        )?;
         ctx.accounts.finalize(cpi_authority_bump, current_ts)?;
-        ctx.accounts.program.emit_event(&SignatureApproved {
-            policy: policy_addr,
-            request_hash,
-            ts: current_ts,
-        }, &ctx.accounts.event_authority, EventAuthority::BUMP)?;
+        ctx.accounts.program.emit_event(
+            &SignatureApproved {
+                policy: policy_addr,
+                request_hash,
+                ts: current_ts,
+            },
+            &ctx.accounts.event_authority,
+            EventAuthority::BUMP,
+        )?;
         Ok(())
     }
 
@@ -844,6 +867,13 @@ pub enum RulesPolicyError {
     NotOidcPrimary,
     /// `oidc_jwt_staging_close` was called before `created_at + STAGING_TTL`.
     StagingNotExpired,
+    /// Clear-signing renderer failed: rendered message overflows
+    /// `MAX_HUMAN_MESSAGE_BYTES`, the slot layout is invalid, or a non-ASCII
+    /// byte slipped into a template. Should be unreachable for well-formed
+    /// inputs; treat as `AuthFailed`-equivalent (the approver's signature
+    /// could not be validated because the canonical hash could not be
+    /// derived from the typed params).
+    ClearSigningRenderFailed,
 }
 
 // ── Accounts: RulesPolicy ───────────────────────────────────────
@@ -1194,7 +1224,10 @@ impl RecoverAsPrimary {
         expected_nonce: u64,
     ) -> Result<(), ProgramError> {
         let policy_nonce: u64 = self.policy.next_primary_recover_nonce.into();
-        require!(expected_nonce == policy_nonce, RulesPolicyError::InvalidNonce);
+        require!(
+            expected_nonce == policy_nonce,
+            RulesPolicyError::InvalidNonce
+        );
 
         let dwallet_addr = *self.dwallet_account.address();
         let message_approval_addr = *self.message_approval.address();
@@ -1209,7 +1242,8 @@ impl RecoverAsPrimary {
             message_approval_bump,
             policy_nonce,
             &primary_slot,
-        );
+        )
+        .map_err(|_| RulesPolicyError::ClearSigningRenderFailed)?;
 
         check_sysvar_addr(self.instructions_sysvar.address())?;
         let sysvar_view = self.instructions_sysvar.to_account_view();
@@ -1318,7 +1352,8 @@ impl QuorumSessionOpen {
             expires_at,
             session_nonce,
             &primary_slot,
-        );
+        )
+        .map_err(|_| RulesPolicyError::ClearSigningRenderFailed)?;
 
         check_sysvar_addr(self.instructions_sysvar.address())?;
         let sysvar_view = self.instructions_sysvar.to_account_view();
@@ -1332,7 +1367,10 @@ impl QuorumSessionOpen {
         let payer_addr = *self.payer.address();
         let threshold = self.policy.quorum_threshold;
         let member_count = self.policy.member_count;
-        require!(member_count >= threshold, RulesPolicyError::InvalidThreshold);
+        require!(
+            member_count >= threshold,
+            RulesPolicyError::InvalidThreshold
+        );
         let mut members_snapshot = [0u8; MEMBERS_BYTES];
         members_snapshot.copy_from_slice(&self.policy.members_flat);
 
@@ -1415,7 +1453,23 @@ impl QuorumSessionContribute {
         validate_slot(&slot).map_err(|_| RulesPolicyError::InvalidMemberSlot)?;
 
         let session_addr = *self.session.address();
-        let challenge = quorum_contribute_challenge(&session_addr, &slot);
+        let amount: u64 = self.session.amount.into();
+        let signature_scheme: u16 = self.session.signature_scheme.into();
+        let expires_at_i64: i64 = self.session.expires_at.into();
+        let challenge = quorum_contribute_challenge(
+            &session_addr,
+            &slot,
+            &self.session.dwallet,
+            amount,
+            &self.session.destination,
+            &self.session.message_digest,
+            &self.session.metadata_digest,
+            &self.session.user_pubkey,
+            signature_scheme,
+            self.session.message_approval_bump,
+            expires_at_i64,
+        )
+        .map_err(|_| RulesPolicyError::ClearSigningRenderFailed)?;
 
         check_sysvar_addr(self.instructions_sysvar.address())?;
         let sysvar_view = self.instructions_sysvar.to_account_view();
@@ -1623,14 +1677,23 @@ pub struct AdminAction {
 impl AdminAction {
     fn run<F>(&mut self, expected_nonce: u64, build_challenge: F) -> Result<(), ProgramError>
     where
-        F: FnOnce(&Address, &Address, &[u8; MEMBER_SLOT_LEN], u64) -> [u8; 32],
+        F: FnOnce(
+            &Address,
+            &Address,
+            &[u8; MEMBER_SLOT_LEN],
+            u64,
+        ) -> Result<[u8; 32], auth::human_message::HumanMessageError>,
     {
         let policy_nonce: u64 = self.policy.next_admin_nonce.into();
-        require!(expected_nonce == policy_nonce, RulesPolicyError::InvalidNonce);
+        require!(
+            expected_nonce == policy_nonce,
+            RulesPolicyError::InvalidNonce
+        );
         let dwallet_addr = *self.dwallet_account.address();
         let policy_addr = *self.policy.address();
         let primary_slot = self.policy.primary_slot;
-        let challenge = build_challenge(&dwallet_addr, &policy_addr, &primary_slot, policy_nonce);
+        let challenge = build_challenge(&dwallet_addr, &policy_addr, &primary_slot, policy_nonce)
+            .map_err(|_| RulesPolicyError::ClearSigningRenderFailed)?;
         check_sysvar_addr(self.instructions_sysvar.address())?;
         let sysvar_view = self.instructions_sysvar.to_account_view();
         let sysvar_data_ref = sysvar_view
@@ -1682,9 +1745,7 @@ impl AdminAction {
                 let last = (count - 1) * MEMBER_SLOT_LEN;
                 if i != count - 1 {
                     let mut tail = [0u8; MEMBER_SLOT_LEN];
-                    tail.copy_from_slice(
-                        &self.policy.members_flat[last..last + MEMBER_SLOT_LEN],
-                    );
+                    tail.copy_from_slice(&self.policy.members_flat[last..last + MEMBER_SLOT_LEN]);
                     self.policy.members_flat[off..off + MEMBER_SLOT_LEN].copy_from_slice(&tail);
                 }
                 self.policy.members_flat[last..last + MEMBER_SLOT_LEN]
@@ -1745,8 +1806,7 @@ impl AdminAction {
                     tail.copy_from_slice(&self.policy.allowed_destinations_flat[last..last + 32]);
                     self.policy.allowed_destinations_flat[off..off + 32].copy_from_slice(&tail);
                 }
-                self.policy.allowed_destinations_flat[last..last + 32]
-                    .copy_from_slice(&[0u8; 32]);
+                self.policy.allowed_destinations_flat[last..last + 32].copy_from_slice(&[0u8; 32]);
                 self.policy.allowed_destinations_count = (count - 1) as u8;
                 return Ok(());
             }
@@ -2184,11 +2244,17 @@ impl OidcSessionOpen {
         // 1. staging belongs to this dWallet (has_one already pinned it to this
         //    policy; the policy PDA already pinned (dwallet, init_authority)).
         let dwallet_addr = *self.dwallet_account.address();
-        require!(self.staging.dwallet == dwallet_addr, RulesPolicyError::InvalidJwt);
+        require!(
+            self.staging.dwallet == dwallet_addr,
+            RulesPolicyError::InvalidJwt
+        );
 
         // 2. primary must be an OIDC slot `[4, addr_seed, 0]`.
         let primary_slot = self.policy.primary_slot;
-        require!(primary_slot[0] == SCHEME_OIDC_JWT, RulesPolicyError::NotOidcPrimary);
+        require!(
+            primary_slot[0] == SCHEME_OIDC_JWT,
+            RulesPolicyError::NotOidcPrimary
+        );
         validate_oidc_slot(&primary_slot).map_err(|_| RulesPolicyError::NotOidcPrimary)?;
 
         // 3. verifier-version pin (also bound into the open challenge below).
@@ -2230,7 +2296,10 @@ impl OidcSessionOpen {
         //    auth decision yet — `verify` does the RSA check before trusting
         //    the claims.
         let jwt_len: usize = u16::from(self.staging.jwt_len) as usize;
-        require!(jwt_len > 0 && jwt_len <= MAX_JWT_LEN, RulesPolicyError::InvalidJwt);
+        require!(
+            jwt_len > 0 && jwt_len <= MAX_JWT_LEN,
+            RulesPolicyError::InvalidJwt
+        );
         let parsed = {
             let jwt = &self.staging.jwt_bytes[..jwt_len];
             oidc_verifier::verify(oidc_verifier::VerifyOidcInput {
@@ -2289,7 +2358,8 @@ impl OidcSessionOpen {
             &jwk_registry_addr,
             oidc_verifier_version,
             session_nonce,
-        );
+        )
+        .map_err(|_| RulesPolicyError::ClearSigningRenderFailed)?;
         {
             check_sysvar_addr(self.instructions_sysvar.address())?;
             let sysvar_view = self.instructions_sysvar.to_account_view();
@@ -2411,7 +2481,10 @@ impl RecoverAsPrimaryOidcSession {
 
         // 2. use-nonce.
         let use_nonce: u64 = self.session.next_use_nonce.into();
-        require!(expected_use_nonce == use_nonce, RulesPolicyError::InvalidNonce);
+        require!(
+            expected_use_nonce == use_nonce,
+            RulesPolicyError::InvalidNonce
+        );
 
         // 2b. policy primary must still be `[4, session.addr_seed, 0]` — a
         //     rotation/revoke of the primary after the open invalidates the
@@ -2419,7 +2492,10 @@ impl RecoverAsPrimaryOidcSession {
         let addr_seed = self.session.addr_seed;
         let expected_primary = oidc_primary_slot(&addr_seed);
         let primary_slot = self.policy.primary_slot;
-        require!(primary_slot == expected_primary, RulesPolicyError::NotOidcPrimary);
+        require!(
+            primary_slot == expected_primary,
+            RulesPolicyError::NotOidcPrimary
+        );
 
         // 2c. session's JWK must still be ACTIVE in the same registry — an
         //     emergency `revoke_jwk` (or expiry past grace) kills the session.
@@ -2458,7 +2534,8 @@ impl RecoverAsPrimaryOidcSession {
             message_approval_bump,
             use_nonce,
             &expected_primary,
-        );
+        )
+        .map_err(|_| RulesPolicyError::ClearSigningRenderFailed)?;
         {
             check_sysvar_addr(self.instructions_sysvar.address())?;
             let sysvar_view = self.instructions_sysvar.to_account_view();
@@ -2530,7 +2607,10 @@ impl OidcSessionClose {
         let closed_at: i64 = self.session.closed_at.into();
         require!(closed_at == 0, RulesPolicyError::SessionFinalizable);
         let expires_at: i64 = self.session.expires_at.into();
-        require!(current_ts >= expires_at, RulesPolicyError::SessionFinalizable);
+        require!(
+            current_ts >= expires_at,
+            RulesPolicyError::SessionFinalizable
+        );
         let dest_addr = *self.rent_destination.address();
         require!(
             dest_addr == self.session.payer_for_close,
