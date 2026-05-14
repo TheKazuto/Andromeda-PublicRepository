@@ -31,6 +31,14 @@ import (
 	"github.com/shinkalabs/andromeda-gateway/internal/auth"
 )
 
+// hashOnly extracts the challenge hash from a `*Challenge` tuple,
+// propagating render errors. The humanMessage and ClearSigning envelope
+// are already surfaced upstream via the `/challenge` endpoint; instruction
+// builders only need the 32-byte hash to wire into the precompile.
+func hashOnly(hash [32]byte, _ string, _ auth.ClearSigning, err error) ([32]byte, error) {
+	return hash, err
+}
+
 // ── Account-meta helpers ────────────────────────────────────────
 
 type accountRole int
@@ -246,21 +254,24 @@ func BuildAllowlistAdmin(reg *Registry, in AllowlistAdminInput) ([]solana.Instru
 	w.Bytes32(in.InitAuthorityHash)
 	switch in.Action {
 	case AllowlistAddDestination:
-		challenge = auth.AllowlistAddDestinationChallenge(in.Dwallet, policyPda, in.Destination, in.ExpectedNonce, in.OwnerSlot)
+		challenge, err = hashOnly(auth.AllowlistAddDestinationChallenge(in.Dwallet, policyPda, in.Destination, in.ExpectedNonce, in.OwnerSlot))
 		w.Bytes32(in.Destination)
 		w.U64(in.ExpectedNonce)
 	case AllowlistRemoveDestination:
-		challenge = auth.AllowlistRemoveDestinationChallenge(in.Dwallet, policyPda, in.Destination, in.ExpectedNonce, in.OwnerSlot)
+		challenge, err = hashOnly(auth.AllowlistRemoveDestinationChallenge(in.Dwallet, policyPda, in.Destination, in.ExpectedNonce, in.OwnerSlot))
 		w.Bytes32(in.Destination)
 		w.U64(in.ExpectedNonce)
 	case AllowlistPauseAction:
-		challenge = auth.AllowlistPauseChallenge(in.Dwallet, policyPda, in.ExpectedNonce, in.OwnerSlot)
+		challenge, err = hashOnly(auth.AllowlistPauseChallenge(in.Dwallet, policyPda, in.ExpectedNonce, in.OwnerSlot))
 		w.U64(in.ExpectedNonce)
 	case AllowlistResumeAction:
-		challenge = auth.AllowlistResumeChallenge(in.Dwallet, policyPda, in.ExpectedNonce, in.OwnerSlot)
+		challenge, err = hashOnly(auth.AllowlistResumeChallenge(in.Dwallet, policyPda, in.ExpectedNonce, in.OwnerSlot))
 		w.U64(in.ExpectedNonce)
 	default:
 		return nil, fmt.Errorf("invalid AllowlistAdminAction %d", in.Action)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("allowlist clear-signing: %w", err)
 	}
 
 	preIx, err := auth.BuildCredentialPrecompile(in.OwnerSlot, challenge, in.OwnerSig.Signature, in.OwnerSig.WebauthnAuthData, in.OwnerSig.WebauthnClientDataJSON)
@@ -364,18 +375,21 @@ func BuildVelocityAdmin(reg *Registry, in VelocityAdminInput) ([]solana.Instruct
 	w.Bytes32(in.InitAuthorityHash)
 	switch in.Action {
 	case VelocityUpdateWindow:
-		challenge = auth.VelocityUpdateWindowChallenge(in.Dwallet, policyPda, in.MaxSigsPerWindow, in.WindowSlots, in.ExpectedNonce, in.OwnerSlot)
+		challenge, err = hashOnly(auth.VelocityUpdateWindowChallenge(in.Dwallet, policyPda, in.MaxSigsPerWindow, in.WindowSlots, in.ExpectedNonce, in.OwnerSlot))
 		w.U32(in.MaxSigsPerWindow)
 		w.U64(in.WindowSlots)
 		w.U64(in.ExpectedNonce)
 	case VelocityPauseAction:
-		challenge = auth.VelocityPauseChallenge(in.Dwallet, policyPda, in.ExpectedNonce, in.OwnerSlot)
+		challenge, err = hashOnly(auth.VelocityPauseChallenge(in.Dwallet, policyPda, in.ExpectedNonce, in.OwnerSlot))
 		w.U64(in.ExpectedNonce)
 	case VelocityResumeAction:
-		challenge = auth.VelocityResumeChallenge(in.Dwallet, policyPda, in.ExpectedNonce, in.OwnerSlot)
+		challenge, err = hashOnly(auth.VelocityResumeChallenge(in.Dwallet, policyPda, in.ExpectedNonce, in.OwnerSlot))
 		w.U64(in.ExpectedNonce)
 	default:
 		return nil, fmt.Errorf("invalid VelocityAdminAction %d", in.Action)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("velocity clear-signing: %w", err)
 	}
 	preIx, err := auth.BuildCredentialPrecompile(in.OwnerSlot, challenge, in.OwnerSig.Signature, in.OwnerSig.WebauthnAuthData, in.OwnerSig.WebauthnClientDataJSON)
 	if err != nil {
@@ -482,20 +496,23 @@ func BuildTimeLockAdmin(reg *Registry, in TimeLockAdminInput) ([]solana.Instruct
 	w.Bytes32(in.InitAuthorityHash)
 	switch in.Action {
 	case TimeLockUpdateWindow:
-		challenge = auth.TimeLockUpdateWindowChallenge(in.Dwallet, policyPda, in.Mode, in.StartSlot, in.EndSlot, in.RecurringPeriodSlots, in.ExpectedNonce, in.OwnerSlot)
+		challenge, err = hashOnly(auth.TimeLockUpdateWindowChallenge(in.Dwallet, policyPda, in.Mode, in.StartSlot, in.EndSlot, in.RecurringPeriodSlots, in.ExpectedNonce, in.OwnerSlot))
 		w.U8(in.Mode)
 		w.U64(in.StartSlot)
 		w.U64(in.EndSlot)
 		w.U64(in.RecurringPeriodSlots)
 		w.U64(in.ExpectedNonce)
 	case TimeLockPauseAction:
-		challenge = auth.TimeLockPauseChallenge(in.Dwallet, policyPda, in.ExpectedNonce, in.OwnerSlot)
+		challenge, err = hashOnly(auth.TimeLockPauseChallenge(in.Dwallet, policyPda, in.ExpectedNonce, in.OwnerSlot))
 		w.U64(in.ExpectedNonce)
 	case TimeLockResumeAction:
-		challenge = auth.TimeLockResumeChallenge(in.Dwallet, policyPda, in.ExpectedNonce, in.OwnerSlot)
+		challenge, err = hashOnly(auth.TimeLockResumeChallenge(in.Dwallet, policyPda, in.ExpectedNonce, in.OwnerSlot))
 		w.U64(in.ExpectedNonce)
 	default:
 		return nil, fmt.Errorf("invalid TimeLockAdminAction %d", in.Action)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("time-lock clear-signing: %w", err)
 	}
 	preIx, err := auth.BuildCredentialPrecompile(in.OwnerSlot, challenge, in.OwnerSig.Signature, in.OwnerSig.WebauthnAuthData, in.OwnerSig.WebauthnClientDataJSON)
 	if err != nil {

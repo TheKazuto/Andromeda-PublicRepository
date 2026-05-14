@@ -135,6 +135,11 @@ func NewServer(d Deps) *Server {
 	if d.PolicyService != nil && d.Config != nil {
 		d.PolicyService.WithSDKArtifacts(d.Config.SDKBaseURL, d.Config.SDKVersionTag)
 	}
+	// Wire the audit recorder so every successful policy admin submit
+	// appends a clear-signed governance event to the per-tenant chain.
+	if d.PolicyService != nil && d.Audit != nil {
+		d.PolicyService.WithAuditRecorder(d.Audit)
+	}
 	// Wire the encrypt-backend client for Confidential Workflows. Reuses the
 	// same internal-network creds the upstream registry already has.
 	if d.PolicyService != nil && d.Config != nil &&

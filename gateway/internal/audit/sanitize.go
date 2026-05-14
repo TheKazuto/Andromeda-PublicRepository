@@ -14,7 +14,11 @@ package audit
 
 // maxStringValueBytes caps a single string field. The audit chain is for
 // "did this happen, by whom, against what" — not full request bodies.
-const maxStringValueBytes = 512
+// Bumped 512 → 1024 on 2026-05-14 so clear-signing v2 `human_message`
+// values (capped at 768 by the renderer) survive intact in the immutable
+// log; truncating them would defeat the audit guarantee that the message
+// the approver actually read is preserved end-to-end.
+const maxStringValueBytes = 1024
 
 // maxPayloadKeys caps total fan-out per record.
 const maxPayloadKeys = 32
@@ -37,6 +41,25 @@ var globalAllowlist = map[string]struct{}{
 	"next_status":     {},
 }
 
+// clearSigningKeys is the set of keys produced by
+// `audit.BuildClearSigningPayload`. It is mixed into the per-event
+// allowlist for every governance event that goes through clear-signing
+// v2 (admin actions on the 7 policies + rules-policy recovery / OIDC
+// flows). The renderer guarantees these values are safe to persist:
+//
+//   * `human_message` is plain ASCII (≤768 bytes) rendered from typed
+//     params — never caller-supplied.
+//   * `fields_hash_base64` is sha256 of RFC 8785 JCS canonical JSON of a
+//     curated `fields` map (hashes, addresses, decimal numbers only).
+//   * The other three are constants / opaque hashes / op tags.
+var clearSigningKeys = map[string]struct{}{
+	"clear_signing_version": {},
+	"operation":             {},
+	"challenge_hash_base64": {},
+	"human_message":         {},
+	"fields_hash_base64":    {},
+}
+
 // perEventAllowlist extends the global set with event-specific keys. When
 // the event_type is not in this map, only globalAllowlist applies (which
 // is the safe default for events introduced after this file).
@@ -52,22 +75,22 @@ var perEventAllowlist = map[string]map[string]struct{}{
 	EventDWalletPresignDone:  keys("dwallet_address", "tx_signature"),
 
 	EventPolicyDeployed:         keys("policy_id", "dwallet_address", "tx_signature"),
-	EventPolicyUpdated:          keys("policy_id", "dwallet_address", "tx_signature", "operation"),
-	EventPolicyPaused:           keys("policy_id", "dwallet_address"),
-	EventPolicyResumed:          keys("policy_id", "dwallet_address"),
-	EventPolicyRevoked:          keys("policy_id", "dwallet_address"),
+	EventPolicyUpdated:          withClearSigning(keys("policy_id", "dwallet_address", "tx_signature", "operation")),
+	EventPolicyPaused:           withClearSigning(keys("policy_id", "dwallet_address")),
+	EventPolicyResumed:          withClearSigning(keys("policy_id", "dwallet_address")),
+	EventPolicyRevoked:          withClearSigning(keys("policy_id", "dwallet_address")),
 	EventPolicyRequestApproved:  keys("policy_id", "dwallet_address", "request_id"),
 	EventPolicyRequestRejected:  keys("policy_id", "dwallet_address", "request_id", "reason"),
 	EventPolicySimulateExecuted: keys("policy_id", "dwallet_address", "outcome"),
 
-	EventRecoveryPrimaryUsed:   keys("dwallet_address", "policy_id", "tx_signature", "scheme"),
-	EventRecoveryQuorumUsed:    keys("dwallet_address", "policy_id", "tx_signature", "session_address", "members_used"),
-	EventRecoveryPolicyChanged: keys("dwallet_address", "policy_id", "operation"),
+	EventRecoveryPrimaryUsed:   withClearSigning(keys("dwallet_address", "policy_id", "tx_signature", "scheme")),
+	EventRecoveryQuorumUsed:    withClearSigning(keys("dwallet_address", "policy_id", "tx_signature", "session_address", "members_used")),
+	EventRecoveryPolicyChanged: withClearSigning(keys("dwallet_address", "policy_id", "operation")),
 
 	// Login Social — OIDC primary recovery. Hashes only, never the raw sub/JWT.
 	EventRecoveryOidcStaged: keys("dwallet_address", "policy_id", "tx_signature", "staging_address"),
-	EventRecoveryOidcOpened: keys("dwallet_address", "policy_id", "tx_signature", "session_address", "provider", "issuer_hash", "audience_hash", "subject_hash"),
-	EventRecoveryOidcUsed:   keys("dwallet_address", "policy_id", "tx_signature", "session_address"),
+	EventRecoveryOidcOpened: withClearSigning(keys("dwallet_address", "policy_id", "tx_signature", "session_address", "provider", "issuer_hash", "audience_hash", "subject_hash")),
+	EventRecoveryOidcUsed:   withClearSigning(keys("dwallet_address", "policy_id", "tx_signature", "session_address")),
 	EventRecoveryOidcClosed: keys("dwallet_address", "policy_id", "tx_signature", "session_address"),
 	EventOidcTokenValidated: keys("provider", "issuer_hash", "audience_hash", "subject_hash", "outcome"),
 	EventOidcTokenRejected:  keys("provider", "outcome"),
@@ -163,6 +186,20 @@ func clampValue(v any) any {
 func keys(items ...string) map[string]struct{} {
 	out := make(map[string]struct{}, len(items))
 	for _, k := range items {
+		out[k] = struct{}{}
+	}
+	return out
+}
+
+// withClearSigning returns a copy of `base` that also accepts every key
+// emitted by `audit.BuildClearSigningPayload`. Use on governance events
+// that flow through clear-signing v2.
+func withClearSigning(base map[string]struct{}) map[string]struct{} {
+	out := make(map[string]struct{}, len(base)+len(clearSigningKeys))
+	for k := range base {
+		out[k] = struct{}{}
+	}
+	for k := range clearSigningKeys {
 		out[k] = struct{}{}
 	}
 	return out

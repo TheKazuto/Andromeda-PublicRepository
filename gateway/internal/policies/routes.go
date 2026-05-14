@@ -16,6 +16,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"github.com/shinkalabs/andromeda-gateway/internal/audit"
 	"github.com/shinkalabs/andromeda-gateway/internal/auth"
 	"github.com/shinkalabs/andromeda-gateway/internal/gasponsor"
 	"github.com/shinkalabs/andromeda-gateway/internal/httpx"
@@ -33,9 +34,22 @@ type Service struct {
 	SDKBaseURL         string
 	SDKVersionTag      string
 	ConfidentialClient ConfidentialSignClient
+	// AuditRecorder appends governance events (admin actions on the 7
+	// policy templates) to the per-tenant ed25519-signed audit chain.
+	// Optional — nil disables governance auditing. Wired by the api
+	// server when a Recorder is available.
+	AuditRecorder *audit.Recorder
 	// Logger is used to record upstream failure details server-side without
 	// leaking them in HTTP responses. Optional; nil → slog.Default().
 	Logger *slog.Logger
+}
+
+// WithAuditRecorder wires the per-tenant audit chain. The recorder MUST
+// already be initialised by the api server. Without it, admin actions
+// still execute but no governance event is appended to the audit log.
+func (s *Service) WithAuditRecorder(rec *audit.Recorder) *Service {
+	s.AuditRecorder = rec
+	return s
 }
 
 // WithLogger wires a structured logger for upstream failures.
@@ -572,13 +586,15 @@ func (s *Service) adminChallenge(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid_policy_pda", err.Error())
 		return
 	}
-	challenge, err := computeAdminChallenge(template, req, dwallet, policyPda, ownerSlot)
+	result, err := computeAdminChallenge(template, req, dwallet, policyPda, ownerSlot)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "challenge_failed", err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"challenge_base64": base64.StdEncoding.EncodeToString(challenge[:]),
+		"challenge_base64": base64.StdEncoding.EncodeToString(result.Hash[:]),
+		"human_message":    result.HumanMessage,
+		"clear_signing":    result.ClearSigning,
 		"expected_nonce":   req.ExpectedNonce,
 	})
 }
@@ -651,6 +667,21 @@ func (s *Service) adminSubmit(w http.ResponseWriter, r *http.Request) {
 		Sponsor:           sponsor,
 	}
 
+	// Re-render the clear-signing challenge from the same typed params so
+	// the audit log captures the exact `humanMessage` the approver read.
+	// Cheap (microseconds) and removes any chance of the submit path
+	// trusting a caller-supplied message.
+	policyPda, err := resolvePolicyPDAForAdmin(s.Registry, template, dwallet, initAuthorityHash, req.SessionIndex)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_policy_pda", err.Error())
+		return
+	}
+	cs, err := computeAdminChallenge(template, req.adminChallengeRequest, dwallet, policyPda, ownerSlot)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "challenge_failed", err.Error())
+		return
+	}
+
 	ixs, err := dispatchAdminSubmit(s.Registry, template, req, ctx, ownerSig)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "build_failed", err.Error())
@@ -661,7 +692,70 @@ func (s *Service) adminSubmit(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "send_failed", err.Error())
 		return
 	}
+
+	s.appendGovernanceAudit(r, template, req.Action, dwallet, policyPda, txSig.String(), cs)
+
 	writeJSON(w, http.StatusOK, map[string]any{"tx_signature": txSig.String()})
+}
+
+// policyEventTypeFor maps an admin action to the canonical audit event
+// type. Pause/resume/revoke get dedicated events; everything else falls
+// under the catch-all `policy.updated`.
+func policyEventTypeFor(action string) string {
+	switch action {
+	case "pause":
+		return audit.EventPolicyPaused
+	case "resume":
+		return audit.EventPolicyResumed
+	case "revoke":
+		return audit.EventPolicyRevoked
+	default:
+		return audit.EventPolicyUpdated
+	}
+}
+
+// appendGovernanceAudit emits an audit chain entry for a successful admin
+// submit. Failures are logged but never propagated to the HTTP response —
+// the on-chain tx already landed and the caller does not need to be told
+// the audit append failed (rare, and the chain has its own retries / repair).
+func (s *Service) appendGovernanceAudit(
+	r *http.Request,
+	template, action string,
+	dwallet, policy solana.PublicKey,
+	txSig string,
+	cs AdminChallengeResult,
+) {
+	if s.AuditRecorder == nil || s.ResolveAPIKeyID == nil {
+		return
+	}
+	apiKeyID, err := s.ResolveAPIKeyID(r)
+	if err != nil {
+		return
+	}
+	csPayload, err := audit.BuildClearSigningPayload(cs.Hash, cs.HumanMessage, cs.ClearSigning)
+	if err != nil {
+		s.log().Warn("audit: build clear-signing payload failed", "err", err)
+		return
+	}
+	payload := csPayload.AsMap()
+	payload["policy_id"] = policy.String()
+	payload["dwallet_address"] = dwallet.String()
+	payload["tx_signature"] = txSig
+	if policyEventTypeFor(action) == audit.EventPolicyUpdated {
+		// Surface the action verbatim so reviewers can filter by it.
+		payload["operation"] = template + "." + action
+	}
+	ev := audit.Event{
+		APIKeyID:     apiKeyID,
+		EventType:    policyEventTypeFor(action),
+		ResourceType: audit.ResourcePolicy,
+		ResourceID:   policy.String(),
+		Actor:        apiKeyID.String(),
+		Payload:      payload,
+	}
+	if _, err := s.AuditRecorder.Append(r.Context(), ev); err != nil {
+		s.log().Warn("audit: append governance event failed", "err", err, "template", template, "action", action)
+	}
 }
 
 // ── request_signature ──────────────────────────────────────────
