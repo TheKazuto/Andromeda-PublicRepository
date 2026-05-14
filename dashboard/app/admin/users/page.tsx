@@ -104,7 +104,15 @@ export default function AdminCustomersPage() {
             user={user}
             onGranted={() => setMessage("Credit granted.")}
           />
-          <KeysPanel keys={keys} />
+          <KeysPanel
+            keys={keys}
+            user={user}
+            onMinted={async () => {
+              const list = await adminCustomers.listKeys(user.id).catch(() => null);
+              if (list) setKeys(list.items);
+              setMessage("API key minted.");
+            }}
+          />
         </>
       )}
     </main>
@@ -328,10 +336,120 @@ function CreditsPanel({
   );
 }
 
-function KeysPanel({ keys }: { keys: AdminUserAPIKey[] }) {
+function KeysPanel({
+  keys,
+  user,
+  onMinted,
+}: {
+  keys: AdminUserAPIKey[];
+  user: AdminUser;
+  onMinted: () => Promise<void>;
+}) {
+  const [name, setName] = useState("");
+  const [scopeRead, setScopeRead] = useState(true);
+  const [scopeWrite, setScopeWrite] = useState(true);
+  const [scopeAdmin, setScopeAdmin] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [revealed, setRevealed] = useState<string | null>(null);
+
+  async function onMint(e: React.FormEvent) {
+    e.preventDefault();
+    setErr(null);
+    setRevealed(null);
+    const scopes: Array<"read" | "write" | "admin"> = [];
+    if (scopeRead) scopes.push("read");
+    if (scopeWrite) scopes.push("write");
+    if (scopeAdmin) scopes.push("admin");
+    if (scopes.length === 0) {
+      setErr("Pick at least one scope.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const resp = await adminCustomers.mintKey({
+        userId: user.id,
+        name: name.trim() || "Admin-minted key",
+        scopes,
+      });
+      setRevealed(resp.key);
+      setName("");
+      await onMinted();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Mint failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <section className="card p-5">
       <h3 className="text-sm font-semibold text-snow mb-4">API keys</h3>
+      <form onSubmit={onMint} className="mb-5 flex flex-wrap items-end gap-3">
+        <div className="flex-1 min-w-[200px]">
+          <label className="block text-[11px] uppercase tracking-wider text-slate-400 mb-1">
+            Name
+          </label>
+          <input
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="Smoke E2E key"
+            className="input-base w-full"
+          />
+        </div>
+        <div>
+          <label className="block text-[11px] uppercase tracking-wider text-slate-400 mb-1">
+            Scopes
+          </label>
+          <div className="flex items-center gap-3 text-xs text-snow">
+            <label className="inline-flex items-center gap-1">
+              <input
+                type="checkbox"
+                checked={scopeRead}
+                onChange={(e) => setScopeRead(e.target.checked)}
+              />
+              read
+            </label>
+            <label className="inline-flex items-center gap-1">
+              <input
+                type="checkbox"
+                checked={scopeWrite}
+                onChange={(e) => setScopeWrite(e.target.checked)}
+              />
+              write
+            </label>
+            <label className="inline-flex items-center gap-1">
+              <input
+                type="checkbox"
+                checked={scopeAdmin}
+                onChange={(e) => setScopeAdmin(e.target.checked)}
+              />
+              admin
+            </label>
+          </div>
+        </div>
+        <button type="submit" disabled={busy} className="btn-primary">
+          {busy ? "Minting…" : "Mint key"}
+        </button>
+      </form>
+      {err && <div className="mb-3 text-xs text-ember-soft">{err}</div>}
+      {revealed && (
+        <div className="mb-4 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2">
+          <div className="text-[11px] uppercase tracking-wider text-emerald-200 mb-1">
+            Key — shown once
+          </div>
+          <code className="block text-xs font-mono text-emerald-100 break-all">
+            {revealed}
+          </code>
+          <button
+            type="button"
+            onClick={() => navigator.clipboard.writeText(revealed)}
+            className="mt-2 text-[11px] text-emerald-300 hover:text-emerald-100"
+          >
+            Copy to clipboard
+          </button>
+        </div>
+      )}
       <table className="min-w-full text-sm">
         <thead className="text-[11px] uppercase tracking-wider text-slate-400 border-b border-white/[0.06]">
           <tr>

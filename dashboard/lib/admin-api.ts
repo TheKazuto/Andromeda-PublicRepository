@@ -410,6 +410,16 @@ export const adminCustomers = {
     adminApi<AdminUser>("/admin/users", { method: "POST", body }),
   listKeys: (userId: string) =>
     adminApi<{ items: AdminUserAPIKey[] }>(`/admin/users/${encodeURIComponent(userId)}/api-keys`),
+  /**
+   * Mints a fresh API key on behalf of `userId` with explicit scopes. The
+   * returned `key` is shown ONCE — store it immediately. Backend route:
+   * `POST /admin/api-keys` (handleAdminCreateKey).
+   */
+  mintKey: (body: { userId: string; name: string; scopes: Array<"read" | "write" | "admin" | "*"> }) =>
+    adminApi<{ key: string; item: AdminUserAPIKey }>("/admin/api-keys", {
+      method: "POST",
+      body,
+    }),
   getSubscription: (userId: string) =>
     adminApi<AdminUserSubscription>(
       `/admin/users/${encodeURIComponent(userId)}/subscription`
