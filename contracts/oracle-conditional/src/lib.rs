@@ -20,12 +20,13 @@ pub mod challenges;
 
 use andromeda_auth::admin::verify_owner_admin;
 use andromeda_auth::hash::hashv;
+use andromeda_auth::human_message::HumanMessageError;
 use andromeda_auth::precompile::check_sysvar_address;
 use andromeda_auth::{
     validate_slot, verify_signature, AuthError, VerifyInput, MEMBER_SLOT_LEN, SCHEME_WEBAUTHN,
 };
-use ika_dwallet_quasar::DWalletContext;
 use andromeda_policy_shared::validate_ika_cpi_accounts;
+use ika_dwallet_quasar::DWalletContext;
 use quasar_lang::prelude::*;
 use solana_address::Address;
 
@@ -104,11 +105,15 @@ mod oracle_conditional {
             max_age_slots,
             max_confidence_bps,
         )?;
-        ctx.accounts.program.emit_event(&PolicyDeployed {
-            policy: policy_addr,
-            dwallet: dwallet_addr,
-            ts: current_ts,
-        }, &ctx.accounts.event_authority, EventAuthority::BUMP)?;
+        ctx.accounts.program.emit_event(
+            &PolicyDeployed {
+                policy: policy_addr,
+                dwallet: dwallet_addr,
+                ts: current_ts,
+            },
+            &ctx.accounts.event_authority,
+            EventAuthority::BUMP,
+        )?;
         Ok(())
     }
 
@@ -131,11 +136,15 @@ mod oracle_conditional {
         let current_ts: i64 = ctx.accounts.clock.unix_timestamp.into();
         let policy_addr = *ctx.accounts.policy.address();
         let request_hash = Address::from(message_digest);
-        ctx.accounts.program.emit_event(&SignatureRequested {
-            policy: policy_addr,
-            request_hash,
-            ts: current_ts,
-        }, &ctx.accounts.event_authority, EventAuthority::BUMP)?;
+        ctx.accounts.program.emit_event(
+            &SignatureRequested {
+                policy: policy_addr,
+                request_hash,
+                ts: current_ts,
+            },
+            &ctx.accounts.event_authority,
+            EventAuthority::BUMP,
+        )?;
         ctx.accounts.request(
             message_digest,
             metadata_digest,
@@ -145,11 +154,15 @@ mod oracle_conditional {
             cpi_authority_bump,
             current_slot,
         )?;
-        ctx.accounts.program.emit_event(&SignatureApproved {
-            policy: policy_addr,
-            request_hash,
-            ts: current_ts,
-        }, &ctx.accounts.event_authority, EventAuthority::BUMP)?;
+        ctx.accounts.program.emit_event(
+            &SignatureApproved {
+                policy: policy_addr,
+                request_hash,
+                ts: current_ts,
+            },
+            &ctx.accounts.event_authority,
+            EventAuthority::BUMP,
+        )?;
         Ok(())
     }
 
@@ -186,10 +199,14 @@ mod oracle_conditional {
         let current_ts: i64 = ctx.accounts.clock.unix_timestamp.into();
         let policy_addr = *ctx.accounts.policy.address();
         ctx.accounts.pause(expected_nonce)?;
-        ctx.accounts.program.emit_event(&PolicyPaused {
-            policy: policy_addr,
-            ts: current_ts,
-        }, &ctx.accounts.event_authority, EventAuthority::BUMP)?;
+        ctx.accounts.program.emit_event(
+            &PolicyPaused {
+                policy: policy_addr,
+                ts: current_ts,
+            },
+            &ctx.accounts.event_authority,
+            EventAuthority::BUMP,
+        )?;
         Ok(())
     }
 
@@ -203,10 +220,14 @@ mod oracle_conditional {
         let current_ts: i64 = ctx.accounts.clock.unix_timestamp.into();
         let policy_addr = *ctx.accounts.policy.address();
         ctx.accounts.resume(expected_nonce)?;
-        ctx.accounts.program.emit_event(&PolicyResumed {
-            policy: policy_addr,
-            ts: current_ts,
-        }, &ctx.accounts.event_authority, EventAuthority::BUMP)?;
+        ctx.accounts.program.emit_event(
+            &PolicyResumed {
+                policy: policy_addr,
+                ts: current_ts,
+            },
+            &ctx.accounts.event_authority,
+            EventAuthority::BUMP,
+        )?;
         Ok(())
     }
 }
@@ -257,14 +278,21 @@ pub enum OracleError {
     AuthFailed,
     InvalidOwnerSlot,
     UnsupportedScheme,
-    OracleAccountInvalid,        // discriminator / size / verification_level mismatch
-    OracleVerificationPartial,   // Pull V2 partial-verified update — rejected
-    PriceTooUncertain,           // Audit M1: conf/|price| > max_confidence_bps/10000
+    OracleAccountInvalid, // discriminator / size / verification_level mismatch
+    OracleVerificationPartial, // Pull V2 partial-verified update — rejected
+    PriceTooUncertain,    // Audit M1: conf/|price| > max_confidence_bps/10000
+    ClearSigningRenderFailed,
 }
 
 impl From<AuthError> for OracleError {
     fn from(_e: AuthError) -> Self {
         OracleError::AuthFailed
+    }
+}
+
+impl From<HumanMessageError> for OracleError {
+    fn from(_e: HumanMessageError) -> Self {
+        OracleError::ClearSigningRenderFailed
     }
 }
 
@@ -489,8 +517,7 @@ impl RequestSignature {
             //   ↔   conf * 10_000 <= price * bps
             // u128 fits since price/conf are u64-bounded, bps ≤ 65535.
             require!(
-                conf_u128.saturating_mul(10_000u128)
-                    <= price_u128.saturating_mul(bps_u128),
+                conf_u128.saturating_mul(10_000u128) <= price_u128.saturating_mul(bps_u128),
                 OracleError::PriceTooUncertain
             );
         }
@@ -507,7 +534,10 @@ impl RequestSignature {
             &user_pubkey,
             signature_scheme,
         );
-        require!(metadata_digest == expected_metadata_digest, OracleError::AuthFailed);
+        require!(
+            metadata_digest == expected_metadata_digest,
+            OracleError::AuthFailed
+        );
         require!(
             validate_ika_cpi_accounts(
                 &self.dwallet_program.to_account_view(),
@@ -562,13 +592,19 @@ pub struct AdminAction {
 impl AdminAction {
     fn run<F>(&mut self, expected_nonce: u64, build_challenge: F) -> Result<(), ProgramError>
     where
-        F: FnOnce(&Address, &Address, &[u8; MEMBER_SLOT_LEN], u64) -> [u8; 32],
+        F: FnOnce(
+            &Address,
+            &Address,
+            &[u8; MEMBER_SLOT_LEN],
+            u64,
+        ) -> Result<[u8; 32], HumanMessageError>,
     {
         let dwallet_addr = *self.dwallet_account.address();
         let policy_addr = *self.policy.address();
         let owner_slot = self.policy.owner_slot;
         let on_chain_nonce: u64 = self.policy.next_admin_nonce.into();
-        let challenge = build_challenge(&dwallet_addr, &policy_addr, &owner_slot, on_chain_nonce);
+        let challenge = build_challenge(&dwallet_addr, &policy_addr, &owner_slot, on_chain_nonce)
+            .map_err(OracleError::from)?;
 
         check_sysvar_addr(self.instructions_sysvar.address())?;
         let sysvar_view = self.instructions_sysvar.to_account_view();
@@ -657,8 +693,14 @@ fn map_auth_err(e: AuthError) -> OracleError {
 /// returned for relative-uncertainty enforcement at the call site.
 #[inline(always)]
 fn parse_pyth_pull_v2(data: &[u8]) -> Result<(i64, u64, u64), ProgramError> {
-    require!(data.len() >= PYTH_PULL_FULL_LEN, OracleError::OracleAccountInvalid);
-    require!(data[0..8] == PYTH_PULL_DISC, OracleError::OracleAccountInvalid);
+    require!(
+        data.len() >= PYTH_PULL_FULL_LEN,
+        OracleError::OracleAccountInvalid
+    );
+    require!(
+        data[0..8] == PYTH_PULL_DISC,
+        OracleError::OracleAccountInvalid
+    );
     let v = data[PYTH_VERIFICATION_OFFSET];
     if v != PYTH_VERIFICATION_FULL {
         return Err(OracleError::OracleVerificationPartial.into());
