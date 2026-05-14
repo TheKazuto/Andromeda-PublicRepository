@@ -61,8 +61,17 @@ pub fn lt_be(a: &[u8], b: &[u8]) -> bool {
 }
 
 // ── modexp: syscall on SBF, num-bigint on the host ─────────────
+//
+// SBF code paths are gated on the `oidc-rsa` cargo feature. When OFF (e.g.
+// when targeting a Solana cluster where the `sol_big_mod_exp` feature gate
+// is not yet active), `rsa2048_modexp` returns a sentinel buffer of all
+// `0xFF` bytes — the canonical EMSA-PKCS1-v1_5 encoded message starts with
+// `0x00 0x01`, so the constant-time `eq_256` comparison will never match,
+// making every RSA verify reject. Login Social via OIDC is unavailable
+// until the syscall lights up and the program is redeployed with the
+// feature on.
 
-#[cfg(target_os = "solana")]
+#[cfg(all(target_os = "solana", feature = "oidc-rsa"))]
 #[repr(C)]
 struct BigModExpParams {
     base: *const u8,
@@ -73,17 +82,17 @@ struct BigModExpParams {
     modulus_len: u64,
 }
 
-#[cfg(target_os = "solana")]
+#[cfg(all(target_os = "solana", feature = "oidc-rsa"))]
 extern "C" {
     fn sol_big_mod_exp(params: *const u8, result: *mut u8) -> u64;
 }
 
 /// `recovered = base^65537 mod modulus`, all big-endian, all exactly 256 bytes.
 pub fn rsa2048_modexp(base: &[u8; RSA_BYTES], modulus: &[u8; RSA_BYTES]) -> [u8; RSA_BYTES] {
-    const EXP: [u8; 3] = [0x01, 0x00, 0x01]; // 65537, big-endian
     let mut result = [0u8; RSA_BYTES];
-    #[cfg(target_os = "solana")]
+    #[cfg(all(target_os = "solana", feature = "oidc-rsa"))]
     {
+        const EXP: [u8; 3] = [0x01, 0x00, 0x01]; // 65537, big-endian
         let params = BigModExpParams {
             base: base.as_ptr(),
             base_len: RSA_BYTES as u64,
@@ -96,8 +105,23 @@ pub fn rsa2048_modexp(base: &[u8; RSA_BYTES], modulus: &[u8; RSA_BYTES]) -> [u8;
             sol_big_mod_exp(&params as *const BigModExpParams as *const u8, result.as_mut_ptr());
         }
     }
+    #[cfg(all(target_os = "solana", not(feature = "oidc-rsa")))]
+    {
+        // Stub: every byte is 0xFF, so the EMSA-PKCS1-v1_5 expected block
+        // (which starts with 0x00 0x01) never matches. RSA verification
+        // always rejects — Login Social via OIDC is unavailable until the
+        // program is rebuilt with `oidc-rsa` on. `base` / `modulus` are
+        // marked as deliberately unused.
+        let _ = base;
+        let _ = modulus;
+        for slot in result.iter_mut() {
+            *slot = 0xFF;
+        }
+    }
     #[cfg(not(target_os = "solana"))]
     {
+        const EXP: [u8; 3] = [0x01, 0x00, 0x01];
+        let _ = EXP; // host implementation uses BigUint::from(65_537u32) below
         use num_bigint::BigUint;
         let b = BigUint::from_bytes_be(base);
         let e = BigUint::from(65_537u32);

@@ -8,6 +8,18 @@ license = "Apache-2.0 OR MIT"
 [lib]
 crate-type = ["lib"]
 
+[features]
+# `oidc-rsa` (default on) wires `rsa2048_modexp` to the `sol_big_mod_exp`
+# syscall on SBF. Turn OFF to build a no-RSA stub that returns a sentinel
+# buffer (RSA verification always fails) — useful for clusters where the
+# `sol_big_mod_exp` feature gate (`EBq48m8irRKuE7ZnMTLvLg2UuGSqhe8s8oMqnmja1fJw`)
+# is not yet active, so the ELF loader does not reject the program for an
+# unresolved syscall. Login Social via OIDC is unavailable while this is
+# off; flip it back on once the syscall is live in the target cluster and
+# redeploy.
+default = ["oidc-rsa"]
+oidc-rsa = []
+
 [dependencies]
 # The SBF build needs nothing — SHA-256 and big-mod-exp are runtime syscalls.
 
