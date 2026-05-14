@@ -14,11 +14,17 @@ default = []
 # implementation so host crates (e.g. sbf-tests) can validate canonical
 # challenge layouts against shared fixtures. NEVER enable in production SBF
 # builds — the Solana runtime ships `sol_sha256` and we want that path.
-host-test = ["dep:sha2"]
+host-test = ["dep:sha2", "dep:serde", "dep:serde_json"]
 
 [dependencies]
 solana-address = { version = "2.2.0", features = ["curve25519", "decode"] }
 sha2 = { version = "0.10", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+
+[[example]]
+name = "gen_challenge_vectors"
+required-features = ["host-test"]
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }
