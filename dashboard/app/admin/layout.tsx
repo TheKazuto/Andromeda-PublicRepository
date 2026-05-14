@@ -14,7 +14,12 @@ import {
 export default function AdminLayout({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const pathname = usePathname();
-  const isLoginPage = pathname === "/admin/login";
+  // `next.config.js` has `trailingSlash: true`, so usePathname returns
+  // `/admin/login/`. Normalise by stripping the trailing slash before the
+  // comparison — otherwise `isLoginPage` is always false and the login
+  // page itself triggers the auth flow (which then redirects back here).
+  const normalizedPathname = (pathname ?? "").replace(/\/+$/, "") || "/";
+  const isLoginPage = normalizedPathname === "/admin/login";
 
   const [me, setMe] = useState<AdminMe | null>(null);
   const [ready, setReady] = useState(isLoginPage);

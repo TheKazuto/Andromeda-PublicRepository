@@ -41,7 +41,10 @@ interface AdminSidebarProps {
 }
 
 export function AdminSidebar({ me }: AdminSidebarProps) {
-  const pathname = usePathname();
+  const rawPathname = usePathname();
+  // `next.config.js` uses `trailingSlash: true`; strip it so exact matches
+  // against the canonical paths in `NAV` still hit.
+  const pathname = (rawPathname ?? "").replace(/\/+$/, "") || "/";
   const router = useRouter();
 
   const items = NAV.filter((item) => {

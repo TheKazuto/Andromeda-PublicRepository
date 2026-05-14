@@ -30,7 +30,10 @@ const NAV: Item[] = [
 ];
 
 export function Sidebar() {
-  const pathname = usePathname();
+  const rawPathname = usePathname();
+  // `next.config.js` uses `trailingSlash: true`; strip so /dashboard/ still
+  // matches /dashboard exactly for "active link" highlighting.
+  const pathname = (rawPathname ?? "").replace(/\/+$/, "") || "/";
 
   return (
     <aside className="hidden md:flex md:w-60 lg:w-64 shrink-0 flex-col bg-charcoal border-r border-white/[0.05] sticky top-0 h-screen">
