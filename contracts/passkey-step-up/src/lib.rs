@@ -39,13 +39,14 @@ pub mod challenges;
 
 use andromeda_auth::admin::verify_owner_admin;
 use andromeda_auth::hash::hashv;
+use andromeda_auth::human_message::HumanMessageError;
 use andromeda_auth::precompile::check_sysvar_address;
 use andromeda_auth::{
     build_member_slot, validate_slot, verify_signature, AuthError, VerifyInput, MEMBER_SLOT_LEN,
     SCHEME_WEBAUTHN, WEBAUTHN_AUTH_DATA_MAX, WEBAUTHN_CLIENT_DATA_JSON_MAX,
 };
-use ika_dwallet_quasar::DWalletContext;
 use andromeda_policy_shared::validate_ika_cpi_accounts;
+use ika_dwallet_quasar::DWalletContext;
 use quasar_lang::prelude::*;
 use solana_address::Address;
 
@@ -79,11 +80,15 @@ mod passkey_step_up {
             threshold_amount,
             passkey_pubkey,
         )?;
-        ctx.accounts.program.emit_event(&PolicyDeployed {
-            policy: policy_addr,
-            dwallet: dwallet_addr,
-            ts: current_ts,
-        }, &ctx.accounts.event_authority, EventAuthority::BUMP)?;
+        ctx.accounts.program.emit_event(
+            &PolicyDeployed {
+                policy: policy_addr,
+                dwallet: dwallet_addr,
+                ts: current_ts,
+            },
+            &ctx.accounts.event_authority,
+            EventAuthority::BUMP,
+        )?;
         Ok(())
     }
 
@@ -106,11 +111,15 @@ mod passkey_step_up {
         let current_ts: i64 = ctx.accounts.clock.unix_timestamp.into();
         let policy_addr = *ctx.accounts.policy.address();
         let request_hash = Address::from(message_digest);
-        ctx.accounts.program.emit_event(&SignatureRequested {
-            policy: policy_addr,
-            request_hash,
-            ts: current_ts,
-        }, &ctx.accounts.event_authority, EventAuthority::BUMP)?;
+        ctx.accounts.program.emit_event(
+            &SignatureRequested {
+                policy: policy_addr,
+                request_hash,
+                ts: current_ts,
+            },
+            &ctx.accounts.event_authority,
+            EventAuthority::BUMP,
+        )?;
         ctx.accounts.request_below_threshold(
             message_digest,
             metadata_digest,
@@ -120,11 +129,15 @@ mod passkey_step_up {
             cpi_authority_bump,
             tx_amount,
         )?;
-        ctx.accounts.program.emit_event(&SignatureApproved {
-            policy: policy_addr,
-            request_hash,
-            ts: current_ts,
-        }, &ctx.accounts.event_authority, EventAuthority::BUMP)?;
+        ctx.accounts.program.emit_event(
+            &SignatureApproved {
+                policy: policy_addr,
+                request_hash,
+                ts: current_ts,
+            },
+            &ctx.accounts.event_authority,
+            EventAuthority::BUMP,
+        )?;
         Ok(())
     }
 
@@ -153,10 +166,14 @@ mod passkey_step_up {
         let current_ts: i64 = ctx.accounts.clock.unix_timestamp.into();
         let policy_addr = *ctx.accounts.policy.address();
         ctx.accounts.pause(expected_nonce)?;
-        ctx.accounts.program.emit_event(&PolicyPaused {
-            policy: policy_addr,
-            ts: current_ts,
-        }, &ctx.accounts.event_authority, EventAuthority::BUMP)?;
+        ctx.accounts.program.emit_event(
+            &PolicyPaused {
+                policy: policy_addr,
+                ts: current_ts,
+            },
+            &ctx.accounts.event_authority,
+            EventAuthority::BUMP,
+        )?;
         Ok(())
     }
 
@@ -170,10 +187,14 @@ mod passkey_step_up {
         let current_ts: i64 = ctx.accounts.clock.unix_timestamp.into();
         let policy_addr = *ctx.accounts.policy.address();
         ctx.accounts.resume(expected_nonce)?;
-        ctx.accounts.program.emit_event(&PolicyResumed {
-            policy: policy_addr,
-            ts: current_ts,
-        }, &ctx.accounts.event_authority, EventAuthority::BUMP)?;
+        ctx.accounts.program.emit_event(
+            &PolicyResumed {
+                policy: policy_addr,
+                ts: current_ts,
+            },
+            &ctx.accounts.event_authority,
+            EventAuthority::BUMP,
+        )?;
         Ok(())
     }
 
@@ -200,11 +221,15 @@ mod passkey_step_up {
         let current_ts: i64 = ctx.accounts.clock.unix_timestamp.into();
         let policy_addr = *ctx.accounts.policy.address();
         let request_hash = Address::from(message_digest);
-        ctx.accounts.program.emit_event(&SignatureRequested {
-            policy: policy_addr,
-            request_hash,
-            ts: current_ts,
-        }, &ctx.accounts.event_authority, EventAuthority::BUMP)?;
+        ctx.accounts.program.emit_event(
+            &SignatureRequested {
+                policy: policy_addr,
+                request_hash,
+                ts: current_ts,
+            },
+            &ctx.accounts.event_authority,
+            EventAuthority::BUMP,
+        )?;
         ctx.accounts.request_with_step_up(
             message_digest,
             metadata_digest,
@@ -219,11 +244,15 @@ mod passkey_step_up {
             webauthn_cdj_len,
             &webauthn_cdj,
         )?;
-        ctx.accounts.program.emit_event(&SignatureApproved {
-            policy: policy_addr,
-            request_hash,
-            ts: current_ts,
-        }, &ctx.accounts.event_authority, EventAuthority::BUMP)?;
+        ctx.accounts.program.emit_event(
+            &SignatureApproved {
+                policy: policy_addr,
+                request_hash,
+                ts: current_ts,
+            },
+            &ctx.accounts.event_authority,
+            EventAuthority::BUMP,
+        )?;
         Ok(())
     }
 }
@@ -239,11 +268,18 @@ pub enum PasskeyError {
     InvalidPasskeyLen,
     UnsupportedScheme,
     InvalidWebAuthnPayload,
+    ClearSigningRenderFailed,
 }
 
 impl From<AuthError> for PasskeyError {
     fn from(_e: AuthError) -> Self {
         PasskeyError::AuthFailed
+    }
+}
+
+impl From<HumanMessageError> for PasskeyError {
+    fn from(_e: HumanMessageError) -> Self {
+        PasskeyError::ClearSigningRenderFailed
     }
 }
 
@@ -423,7 +459,10 @@ impl RequestSignature {
             signature_scheme,
             None,
         );
-        require!(metadata_digest == expected_metadata_digest, PasskeyError::AuthFailed);
+        require!(
+            metadata_digest == expected_metadata_digest,
+            PasskeyError::AuthFailed
+        );
         require!(
             validate_ika_cpi_accounts(
                 &self.dwallet_program.to_account_view(),
@@ -538,7 +577,10 @@ impl RequestSignatureStepUp {
             signature_scheme,
             Some(on_chain_nonce),
         );
-        require!(metadata_digest == expected_metadata_digest, PasskeyError::AuthFailed);
+        require!(
+            metadata_digest == expected_metadata_digest,
+            PasskeyError::AuthFailed
+        );
         let challenge = challenges::step_up_challenge(
             &dwallet_addr,
             &message_approval_addr,
@@ -629,13 +671,19 @@ pub struct AdminAction {
 impl AdminAction {
     fn run<F>(&mut self, expected_nonce: u64, build_challenge: F) -> Result<(), ProgramError>
     where
-        F: FnOnce(&Address, &Address, &[u8; MEMBER_SLOT_LEN], u64) -> [u8; 32],
+        F: FnOnce(
+            &Address,
+            &Address,
+            &[u8; MEMBER_SLOT_LEN],
+            u64,
+        ) -> Result<[u8; 32], HumanMessageError>,
     {
         let dwallet_addr = *self.dwallet_account.address();
         let policy_addr = *self.policy.address();
         let owner_slot = self.policy.owner_slot;
         let on_chain_nonce: u64 = self.policy.next_admin_nonce.into();
-        let challenge = build_challenge(&dwallet_addr, &policy_addr, &owner_slot, on_chain_nonce);
+        let challenge = build_challenge(&dwallet_addr, &policy_addr, &owner_slot, on_chain_nonce)
+            .map_err(PasskeyError::from)?;
 
         check_sysvar_addr(self.instructions_sysvar.address())?;
         let sysvar_view = self.instructions_sysvar.to_account_view();
@@ -669,7 +717,14 @@ impl AdminAction {
             PasskeyError::InvalidPasskeyLen
         );
         self.run(expected_nonce, |dw, policy, owner, n| {
-            challenges::update_policy_challenge(dw, policy, threshold_amount, &passkey_pubkey, n, owner)
+            challenges::update_policy_challenge(
+                dw,
+                policy,
+                threshold_amount,
+                &passkey_pubkey,
+                n,
+                owner,
+            )
         })?;
         self.policy.threshold_amount = threshold_amount.into();
         self.policy.passkey_pubkey = passkey_pubkey;
