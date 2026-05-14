@@ -14,12 +14,13 @@ pub mod challenges;
 
 use andromeda_auth::admin::verify_owner_admin;
 use andromeda_auth::hash::hashv;
+use andromeda_auth::human_message::HumanMessageError;
 use andromeda_auth::precompile::check_sysvar_address;
 use andromeda_auth::{
     validate_slot, verify_signature, AuthError, VerifyInput, MEMBER_SLOT_LEN, SCHEME_WEBAUTHN,
 };
-use ika_dwallet_quasar::DWalletContext;
 use andromeda_policy_shared::validate_ika_cpi_accounts;
+use ika_dwallet_quasar::DWalletContext;
 use quasar_lang::prelude::*;
 use solana_address::Address;
 
@@ -57,11 +58,15 @@ mod time_lock {
             end_slot,
             recurring_period_slots,
         )?;
-        ctx.accounts.program.emit_event(&PolicyDeployed {
-            policy: policy_addr,
-            dwallet: dwallet_addr,
-            ts: current_ts,
-        }, &ctx.accounts.event_authority, EventAuthority::BUMP)?;
+        ctx.accounts.program.emit_event(
+            &PolicyDeployed {
+                policy: policy_addr,
+                dwallet: dwallet_addr,
+                ts: current_ts,
+            },
+            &ctx.accounts.event_authority,
+            EventAuthority::BUMP,
+        )?;
         Ok(())
     }
 
@@ -84,11 +89,15 @@ mod time_lock {
         let current_ts: i64 = ctx.accounts.clock.unix_timestamp.into();
         let policy_addr = *ctx.accounts.policy.address();
         let request_hash = Address::from(message_digest);
-        ctx.accounts.program.emit_event(&SignatureRequested {
-            policy: policy_addr,
-            request_hash,
-            ts: current_ts,
-        }, &ctx.accounts.event_authority, EventAuthority::BUMP)?;
+        ctx.accounts.program.emit_event(
+            &SignatureRequested {
+                policy: policy_addr,
+                request_hash,
+                ts: current_ts,
+            },
+            &ctx.accounts.event_authority,
+            EventAuthority::BUMP,
+        )?;
         ctx.accounts.request(
             message_digest,
             metadata_digest,
@@ -98,11 +107,15 @@ mod time_lock {
             cpi_authority_bump,
             current_slot,
         )?;
-        ctx.accounts.program.emit_event(&SignatureApproved {
-            policy: policy_addr,
-            request_hash,
-            ts: current_ts,
-        }, &ctx.accounts.event_authority, EventAuthority::BUMP)?;
+        ctx.accounts.program.emit_event(
+            &SignatureApproved {
+                policy: policy_addr,
+                request_hash,
+                ts: current_ts,
+            },
+            &ctx.accounts.event_authority,
+            EventAuthority::BUMP,
+        )?;
         Ok(())
     }
 
@@ -118,8 +131,13 @@ mod time_lock {
         recurring_period_slots: u64,
         expected_nonce: u64,
     ) -> Result<(), ProgramError> {
-        ctx.accounts
-            .update(mode, start_slot, end_slot, recurring_period_slots, expected_nonce)
+        ctx.accounts.update(
+            mode,
+            start_slot,
+            end_slot,
+            recurring_period_slots,
+            expected_nonce,
+        )
     }
 
     /// Audit C2 (Opção 4) + C1 fixes.
@@ -132,10 +150,14 @@ mod time_lock {
         let current_ts: i64 = ctx.accounts.clock.unix_timestamp.into();
         let policy_addr = *ctx.accounts.policy.address();
         ctx.accounts.pause(expected_nonce)?;
-        ctx.accounts.program.emit_event(&PolicyPaused {
-            policy: policy_addr,
-            ts: current_ts,
-        }, &ctx.accounts.event_authority, EventAuthority::BUMP)?;
+        ctx.accounts.program.emit_event(
+            &PolicyPaused {
+                policy: policy_addr,
+                ts: current_ts,
+            },
+            &ctx.accounts.event_authority,
+            EventAuthority::BUMP,
+        )?;
         Ok(())
     }
 
@@ -149,10 +171,14 @@ mod time_lock {
         let current_ts: i64 = ctx.accounts.clock.unix_timestamp.into();
         let policy_addr = *ctx.accounts.policy.address();
         ctx.accounts.resume(expected_nonce)?;
-        ctx.accounts.program.emit_event(&PolicyResumed {
-            policy: policy_addr,
-            ts: current_ts,
-        }, &ctx.accounts.event_authority, EventAuthority::BUMP)?;
+        ctx.accounts.program.emit_event(
+            &PolicyResumed {
+                policy: policy_addr,
+                ts: current_ts,
+            },
+            &ctx.accounts.event_authority,
+            EventAuthority::BUMP,
+        )?;
         Ok(())
     }
 }
@@ -202,11 +228,18 @@ pub enum TimeLockError {
     AuthFailed,
     InvalidOwnerSlot,
     UnsupportedScheme,
+    ClearSigningRenderFailed,
 }
 
 impl From<AuthError> for TimeLockError {
     fn from(_e: AuthError) -> Self {
         TimeLockError::AuthFailed
+    }
+}
+
+impl From<HumanMessageError> for TimeLockError {
+    fn from(_e: HumanMessageError) -> Self {
+        TimeLockError::ClearSigningRenderFailed
     }
 }
 
@@ -291,10 +324,7 @@ impl InitPolicy {
         require!(mode <= 1, TimeLockError::InvalidMode);
         require!(end_slot > start_slot, TimeLockError::InvalidWindow);
         if mode == 1 {
-            require!(
-                recurring_period_slots > 0,
-                TimeLockError::InvalidWindow
-            );
+            require!(recurring_period_slots > 0, TimeLockError::InvalidWindow);
             require!(
                 end_slot - start_slot <= recurring_period_slots,
                 TimeLockError::InvalidWindow
@@ -413,7 +443,10 @@ impl RequestSignature {
             signature_scheme,
             current_slot,
         );
-        require!(metadata_digest == expected_metadata_digest, TimeLockError::AuthFailed);
+        require!(
+            metadata_digest == expected_metadata_digest,
+            TimeLockError::AuthFailed
+        );
         require!(
             validate_ika_cpi_accounts(
                 &self.dwallet_program.to_account_view(),
@@ -468,13 +501,19 @@ pub struct AdminAction {
 impl AdminAction {
     fn run<F>(&mut self, expected_nonce: u64, build_challenge: F) -> Result<(), ProgramError>
     where
-        F: FnOnce(&Address, &Address, &[u8; MEMBER_SLOT_LEN], u64) -> [u8; 32],
+        F: FnOnce(
+            &Address,
+            &Address,
+            &[u8; MEMBER_SLOT_LEN],
+            u64,
+        ) -> Result<[u8; 32], HumanMessageError>,
     {
         let dwallet_addr = *self.dwallet_account.address();
         let policy_addr = *self.policy.address();
         let owner_slot = self.policy.owner_slot;
         let on_chain_nonce: u64 = self.policy.next_admin_nonce.into();
-        let challenge = build_challenge(&dwallet_addr, &policy_addr, &owner_slot, on_chain_nonce);
+        let challenge = build_challenge(&dwallet_addr, &policy_addr, &owner_slot, on_chain_nonce)
+            .map_err(TimeLockError::from)?;
 
         check_sysvar_addr(self.instructions_sysvar.address())?;
         let sysvar_view = self.instructions_sysvar.to_account_view();
@@ -508,10 +547,7 @@ impl AdminAction {
         require!(mode <= 1, TimeLockError::InvalidMode);
         require!(end_slot > start_slot, TimeLockError::InvalidWindow);
         if mode == 1 {
-            require!(
-                recurring_period_slots > 0,
-                TimeLockError::InvalidWindow
-            );
+            require!(recurring_period_slots > 0, TimeLockError::InvalidWindow);
             require!(
                 end_slot - start_slot <= recurring_period_slots,
                 TimeLockError::InvalidWindow
