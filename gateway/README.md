@@ -110,6 +110,98 @@ bodies are capped at 25 MiB.
 Full machine-readable catalogue of the proxied routes in `internal/routes/routes.go`; everything
 (including the gateway-native endpoints above) is in `/openapi.json`.
 
+### Clear Signing v2 (shipped 2026-05-14)
+
+Every governance challenge — primary recovery, quorum open/contribute, the
+12 rules-policy admin actions, OIDC open/use, and admin actions across the
+7 other policy templates — returns a deterministic human-readable text
+that the on-chain program recomputes from the same typed parameters and
+embeds (length-prefixed `u16 LE`) into the SHA-256 the credential signs.
+A compromised gateway cannot swap destination, member, amount, nonce or
+session without the approver seeing the swap in the text they are about
+to sign.
+
+**Wire format on-chain.**
+
+```
+challenge = sha256(
+    DOMAIN              // e.g. "andromeda::allowlist-destinations::v2"
+    || op_tag           // e.g. "add-destination"
+    || human_len_u16_le // 2 bytes, little-endian
+    || human_message    // plain ASCII, ≤ 768 bytes
+    || dwallet || policy || nonce_le || owner_slot || extras...
+)
+```
+
+`MAX_HUMAN_MESSAGE_BYTES = 768`. ASCII only (`0x20..=0x7E`).
+
+**Gateway response shape (`POST /v1/policies/{template}/admin/challenge`).**
+
+```json
+{
+  "challenge_base64": "u0guEFzHirl5Nt4+TVq3Okjctoi5Vkk+oSmxJFKmAIk=",
+  "human_message": "Pause allowlist policy 4xyz... for dWallet 9abc...",
+  "clear_signing": {
+    "version": "policy-clear-v1",
+    "operation": "allowlist.pause",
+    "fields": {
+      "dwallet": "9abc...",
+      "policy": "4xyz...",
+      "expected_nonce": "0"
+    }
+  },
+  "expected_nonce": 0
+}
+```
+
+* `human_message` — the exact ASCII text the approver MUST see before
+  signing. Plain text, no locale, no truncation.
+* `clear_signing.version` — `policy-clear-v1` for the 7 policy admin
+  challenges served here; `rules-policy-clear-v1` for the rules-policy
+  challenges served by `ika-backend`.
+* `clear_signing.operation` — canonical op tag, e.g. `allowlist.pause`,
+  `velocity.update_window`, `oracle.update_bounds`, `fhe.rotate_authority`,
+  `session_keys.close_session`, `passkey.update_policy`,
+  `time_lock.update_window`.
+* `clear_signing.fields` — curated map of typed parameters (Solana
+  addresses base58, hashes hex, integers as decimal strings). No PII, no
+  secrets.
+
+**Templates with clear signing (40 total).** 7 policies × ~3 admin ops
+(plus the 17 from rules-policy in ika-backend):
+`allowlist-destinations` (`add/remove_destination, pause, resume`),
+`velocity-guard` (`update_window, pause, resume`),
+`time-lock` (`update_window, pause, resume`),
+`oracle-conditional` (`update_bounds, pause, resume`),
+`passkey-step-up` (`update_policy, pause, resume`),
+`session-keys` (`revoke, add/remove_allowed_program, close_session`),
+`fhe-gated` (`rotate_authority, pause, resume`).
+
+Flows preserved at v1 (no clear signing): each policy's `init`,
+`request-signature` runtime digest, `passkey-step-up::step-up` (WebAuthn
+already binds the challenge into `clientDataJSON`), `fhe-gated::decision`
+(signed by a Vault Transit KMS key, not a human),
+`session-keys::create-session` (init flow).
+
+**`/admin/submit` never trusts caller text.** The handler recomputes the
+challenge from the same typed parameters in the body and ignores any
+`human_message` the caller passed. If the on-chain SHA-256 doesn't match
+what the precompile validated, the transaction fails.
+
+**Audit trail.** Every successful admin submit appends one entry to the
+per-tenant ed25519-signed audit chain. The payload includes
+`clear_signing_version`, `operation`, `challenge_hash_base64`,
+`human_message` (≤ 768 bytes, verbatim), and `fields_hash_base64` —
+sha256 of RFC 8785 JSON Canonicalization Scheme over `clear_signing.fields`,
+so two entries with identical typed parameters always produce the same
+hash regardless of map key order.
+
+**No SDK required.** Clients call the gateway directly over HTTP /
+MCP-tool, render `human_message` to the user, take the off-chain
+signature with any wallet (EVM / Sui / Bitcoin / Cosmos / NEAR / Aptos /
+Solana / passkey), and POST it back to `/admin/submit`. The gateway pays
+the Solana fee.
+
 **Error envelope.** Every gateway-native error response is `{"error": "<message>", "code": "<snake_case>"}` —
 flat, two string fields, uniform across `/v1/policies/*`, `/v1/webhooks/*`, `/v1/audit/*`,
 `/v1/future-sign/*` and the proxy layer. (Errors *forwarded* from an engine keep that engine's body
@@ -212,7 +304,7 @@ service and the gift observer moved to the `backend/` service (architecture spli
 ### Audit signing
 | Var | Notes |
 |-----|-------|
-| `ANDROMEDA_AUDIT_SIGNER` | `env` (default, dev) or `vault` (HashiCorp Vault Transit, ed25519). In `production` with `env`, a loud warning is logged — migrate to `vault` (see `docs/AUDIT_KMS.md`). |
+| `ANDROMEDA_AUDIT_SIGNER` | `env` (default, dev) or `vault` (HashiCorp Vault Transit, ed25519). In `production` with `env`, a loud warning is logged — migrate to `vault`. With `vault`: the gateway never holds the private key; each audit entry is signed via Vault Transit `sign/<key-name>/sha2-256` calls (`andromeda-audit` key, ed25519). Required envs: `VAULT_ADDR`, `VAULT_TOKEN` (short-TTL, auto-renewed), `VAULT_AUDIT_KEY_NAME` (defaults to `andromeda-audit`). Per-tenant public key is exposed at `/v1/audit/public-key` so external verifiers can replay the chain. |
 | `ANDROMEDA_AUDIT_PRIVATE_KEY` | Base64 ed25519 (32-byte seed or 64-byte key). Used only when signer = `env`. Falls back to an ephemeral key if empty in dev. |
 | `ANDROMEDA_AUDIT_VAULT_{ADDR,TOKEN,KEY_NAME,PUBKEY_B64}` | Required (all-or-nothing) when signer = `vault`. Every signature is locally re-verified against `PUBKEY_B64`. |
 
