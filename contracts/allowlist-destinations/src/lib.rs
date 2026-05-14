@@ -16,12 +16,13 @@ pub mod challenges;
 
 use andromeda_auth::admin::verify_owner_admin;
 use andromeda_auth::hash::hashv;
+use andromeda_auth::human_message::HumanMessageError;
 use andromeda_auth::precompile::check_sysvar_address;
 use andromeda_auth::{
     validate_slot, verify_signature, AuthError, VerifyInput, MEMBER_SLOT_LEN, SCHEME_WEBAUTHN,
 };
-use ika_dwallet_quasar::DWalletContext;
 use andromeda_policy_shared::validate_ika_cpi_accounts;
+use ika_dwallet_quasar::DWalletContext;
 use quasar_lang::prelude::*;
 use solana_address::Address;
 
@@ -51,12 +52,17 @@ mod allowlist_destinations {
         let current_ts: i64 = ctx.accounts.clock.unix_timestamp.into();
         let policy_addr = *ctx.accounts.policy.address();
         let dwallet_addr = *ctx.accounts.dwallet_account.address();
-        ctx.accounts.create(init_authority_slot, init_authority_hash, owner_slot)?;
-        ctx.accounts.program.emit_event(&PolicyDeployed {
-            policy: policy_addr,
-            dwallet: dwallet_addr,
-            ts: current_ts,
-        }, &ctx.accounts.event_authority, EventAuthority::BUMP)?;
+        ctx.accounts
+            .create(init_authority_slot, init_authority_hash, owner_slot)?;
+        ctx.accounts.program.emit_event(
+            &PolicyDeployed {
+                policy: policy_addr,
+                dwallet: dwallet_addr,
+                ts: current_ts,
+            },
+            &ctx.accounts.event_authority,
+            EventAuthority::BUMP,
+        )?;
         Ok(())
     }
 
@@ -76,11 +82,15 @@ mod allowlist_destinations {
         let current_ts: i64 = ctx.accounts.clock.unix_timestamp.into();
         let policy_addr = *ctx.accounts.policy.address();
         let request_hash = Address::from(message_digest);
-        ctx.accounts.program.emit_event(&SignatureRequested {
-            policy: policy_addr,
-            request_hash,
-            ts: current_ts,
-        }, &ctx.accounts.event_authority, EventAuthority::BUMP)?;
+        ctx.accounts.program.emit_event(
+            &SignatureRequested {
+                policy: policy_addr,
+                request_hash,
+                ts: current_ts,
+            },
+            &ctx.accounts.event_authority,
+            EventAuthority::BUMP,
+        )?;
         ctx.accounts.request(
             message_digest,
             metadata_digest,
@@ -90,11 +100,15 @@ mod allowlist_destinations {
             cpi_authority_bump,
             destination,
         )?;
-        ctx.accounts.program.emit_event(&SignatureApproved {
-            policy: policy_addr,
-            request_hash,
-            ts: current_ts,
-        }, &ctx.accounts.event_authority, EventAuthority::BUMP)?;
+        ctx.accounts.program.emit_event(
+            &SignatureApproved {
+                policy: policy_addr,
+                request_hash,
+                ts: current_ts,
+            },
+            &ctx.accounts.event_authority,
+            EventAuthority::BUMP,
+        )?;
         Ok(())
     }
 
@@ -120,10 +134,14 @@ mod allowlist_destinations {
         let current_ts: i64 = ctx.accounts.clock.unix_timestamp.into();
         let policy_addr = *ctx.accounts.policy.address();
         ctx.accounts.pause(expected_nonce)?;
-        ctx.accounts.program.emit_event(&PolicyPaused {
-            policy: policy_addr,
-            ts: current_ts,
-        }, &ctx.accounts.event_authority, EventAuthority::BUMP)?;
+        ctx.accounts.program.emit_event(
+            &PolicyPaused {
+                policy: policy_addr,
+                ts: current_ts,
+            },
+            &ctx.accounts.event_authority,
+            EventAuthority::BUMP,
+        )?;
         Ok(())
     }
 
@@ -137,10 +155,14 @@ mod allowlist_destinations {
         let current_ts: i64 = ctx.accounts.clock.unix_timestamp.into();
         let policy_addr = *ctx.accounts.policy.address();
         ctx.accounts.resume(expected_nonce)?;
-        ctx.accounts.program.emit_event(&PolicyResumed {
-            policy: policy_addr,
-            ts: current_ts,
-        }, &ctx.accounts.event_authority, EventAuthority::BUMP)?;
+        ctx.accounts.program.emit_event(
+            &PolicyResumed {
+                policy: policy_addr,
+                ts: current_ts,
+            },
+            &ctx.accounts.event_authority,
+            EventAuthority::BUMP,
+        )?;
         Ok(())
     }
 
@@ -166,11 +188,18 @@ pub enum AllowlistError {
     AuthFailed,
     InvalidOwnerSlot,
     UnsupportedScheme,
+    ClearSigningRenderFailed,
 }
 
 impl From<AuthError> for AllowlistError {
     fn from(_e: AuthError) -> Self {
         AllowlistError::AuthFailed
+    }
+}
+
+impl From<HumanMessageError> for AllowlistError {
+    fn from(_e: HumanMessageError) -> Self {
+        AllowlistError::ClearSigningRenderFailed
     }
 }
 
@@ -284,11 +313,8 @@ impl InitPolicy {
 
         // Audit C2 (Opção 4): verify init precompile signature.
         let dwallet_addr = *self.dwallet_account.address();
-        let challenge = challenges::init_policy_challenge(
-            &dwallet_addr,
-            &init_authority_slot,
-            &owner_slot,
-        );
+        let challenge =
+            challenges::init_policy_challenge(&dwallet_addr, &init_authority_slot, &owner_slot);
         check_sysvar_addr(self.instructions_sysvar.address())?;
         let sysvar_view = self.instructions_sysvar.to_account_view();
         let sysvar_data_ref = sysvar_view
@@ -383,7 +409,10 @@ impl RequestSignature {
             &user_pubkey,
             signature_scheme,
         );
-        require!(metadata_digest == expected_metadata_digest, AllowlistError::AuthFailed);
+        require!(
+            metadata_digest == expected_metadata_digest,
+            AllowlistError::AuthFailed
+        );
         require!(
             validate_ika_cpi_accounts(
                 &self.dwallet_program.to_account_view(),
@@ -438,13 +467,19 @@ pub struct AdminAction {
 impl AdminAction {
     fn run<F>(&mut self, expected_nonce: u64, build_challenge: F) -> Result<(), ProgramError>
     where
-        F: FnOnce(&Address, &Address, &[u8; MEMBER_SLOT_LEN], u64) -> [u8; 32],
+        F: FnOnce(
+            &Address,
+            &Address,
+            &[u8; MEMBER_SLOT_LEN],
+            u64,
+        ) -> Result<[u8; 32], HumanMessageError>,
     {
         let dwallet_addr = *self.dwallet_account.address();
         let policy_addr = *self.policy.address();
         let owner_slot = self.policy.owner_slot;
         let on_chain_nonce: u64 = self.policy.next_admin_nonce.into();
-        let challenge = build_challenge(&dwallet_addr, &policy_addr, &owner_slot, on_chain_nonce);
+        let challenge = build_challenge(&dwallet_addr, &policy_addr, &owner_slot, on_chain_nonce)
+            .map_err(AllowlistError::from)?;
 
         check_sysvar_addr(self.instructions_sysvar.address())?;
         let sysvar_view = self.instructions_sysvar.to_account_view();
@@ -467,11 +502,7 @@ impl AdminAction {
     }
 
     #[inline(always)]
-    pub fn add(
-        &mut self,
-        destination: [u8; 32],
-        expected_nonce: u64,
-    ) -> Result<(), ProgramError> {
+    pub fn add(&mut self, destination: [u8; 32], expected_nonce: u64) -> Result<(), ProgramError> {
         self.run(expected_nonce, |dw, policy, owner, n| {
             challenges::add_destination_challenge(dw, policy, &destination, n, owner)
         })?;
