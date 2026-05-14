@@ -40,7 +40,17 @@ describe('recovery/primary routes', () => {
   })
 
   it('POST /primary/challenge — happy path', async () => {
-    adapter.prepareRecoverAsPrimary.mockResolvedValueOnce({ challenge: new Uint8Array(32).fill(3), expectedNonce: 5n, primaryScheme: 0 })
+    adapter.prepareRecoverAsPrimary.mockResolvedValueOnce({
+      challenge: new Uint8Array(32).fill(3),
+      humanMessage: 'Recover dWallet ... for message ... metadata ... scheme 5 user ...',
+      clearSigning: {
+        version: 'rules-policy-clear-v1',
+        operation: 'primary-recover',
+        fields: { signatureScheme: 5, expectedNonce: '5' },
+      },
+      expectedNonce: 5n,
+      primaryScheme: 0,
+    })
     const res = await request(app)
       .post('/primary/challenge')
       .send({
@@ -54,6 +64,9 @@ describe('recovery/primary routes', () => {
     expect(res.body.success).toBe(true)
     expect(res.body.data.expectedNonce).toBe('5')
     expect(res.body.data.primaryScheme).toBe(0)
+    expect(res.body.data.humanMessage).toMatch(/^Recover dWallet /)
+    expect(res.body.data.clearSigning.version).toBe('rules-policy-clear-v1')
+    expect(res.body.data.clearSigning.operation).toBe('primary-recover')
     expect(adapter.prepareRecoverAsPrimary).toHaveBeenCalledOnce()
   })
 
@@ -105,13 +118,22 @@ describe('recovery/quorum routes', () => {
   })
 
   it('POST /quorum/session/open/challenge — happy path', async () => {
-    adapter.prepareQuorumSessionOpen.mockResolvedValueOnce({ challenge: new Uint8Array(32), expectedSessionNonce: 1n, primaryScheme: 1, sessionAddress: ADDR })
+    adapter.prepareQuorumSessionOpen.mockResolvedValueOnce({
+      challenge: new Uint8Array(32),
+      humanMessage: 'Open quorum session for dWallet ...',
+      clearSigning: { version: 'rules-policy-clear-v1', operation: 'quorum-session-open', fields: {} },
+      expectedSessionNonce: 1n,
+      primaryScheme: 1,
+      sessionAddress: ADDR,
+    })
     const res = await request(app)
       .post('/quorum/session/open/challenge')
       .send({ dwalletAddress: ADDR, initAuthorityHashBase64: HASH32, messageDigestBase64: DIGEST32, userPubkeyBase64: PUBKEY32, signatureScheme: 0, expiresAtSec: 1_900_000_000 })
     expect(res.status).toBe(200)
     expect(res.body.data.sessionAddress).toBe(ADDR)
     expect(res.body.data.expectedSessionNonce).toBe('1')
+    expect(res.body.data.humanMessage).toMatch(/^Open quorum session /)
+    expect(res.body.data.clearSigning.operation).toBe('quorum-session-open')
   })
 
   it('POST /quorum/session/open — happy path', async () => {
@@ -124,13 +146,20 @@ describe('recovery/quorum routes', () => {
   })
 
   it('POST /quorum/session/contribute/challenge — happy path', async () => {
-    adapter.prepareQuorumContribute.mockResolvedValueOnce({ challenge: new Uint8Array(32), memberSlot: { scheme: 0, identifier: new Uint8Array(32).fill(2) } })
+    adapter.prepareQuorumContribute.mockResolvedValueOnce({
+      challenge: new Uint8Array(32),
+      humanMessage: 'Contribute to quorum session ...',
+      clearSigning: { version: 'rules-policy-clear-v1', operation: 'quorum-contribute', fields: {} },
+      memberSlot: { scheme: 0, identifier: new Uint8Array(32).fill(2) },
+    })
     const res = await request(app)
       .post('/quorum/session/contribute/challenge')
       .send({ sessionAddress: ADDR, dwalletAddress: ADDR, initAuthorityHashBase64: HASH32, memberIndex: 0 })
     expect(res.status).toBe(200)
     expect(res.body.data.memberScheme).toBe(0)
     expect(res.body.data.memberIdentifierBase64).toBe(b64of(32, 2))
+    expect(res.body.data.humanMessage).toMatch(/^Contribute to quorum session/)
+    expect(res.body.data.clearSigning.operation).toBe('quorum-contribute')
   })
 
   it('POST /quorum/session/contribute — happy path (member out of range surfaces as 400)', async () => {

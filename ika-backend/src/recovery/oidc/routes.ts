@@ -234,6 +234,8 @@ export function buildOidcRecoveryRouter(config: AppConfig): Router {
       return res.json(
         ok({
           challengeBase64: b64(out.challenge),
+          humanMessage: out.humanMessage,
+          clearSigning: out.clearSigning,
           expectedSessionNonce: out.expectedSessionNonce.toString(),
           sessionAddress: out.sessionAddress,
           jwkRegistryAddress: out.jwkRegistryAddress,
@@ -302,6 +304,8 @@ export function buildOidcRecoveryRouter(config: AppConfig): Router {
       return res.json(
         ok({
           challengeBase64: b64(out.challenge),
+          humanMessage: out.humanMessage,
+          clearSigning: out.clearSigning,
           expectedUseNonce: out.expectedUseNonce.toString(),
           sessionExpiresAt: out.sessionExpiresAt,
         }),

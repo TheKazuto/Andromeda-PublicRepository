@@ -14,6 +14,8 @@
 
 import type { Address } from '@solana/kit'
 
+import type { ClearSigning } from '../clear_signing.js'
+
 // ── Member slot ─────────────────────────────────────────────────
 
 export interface MemberSlot {
@@ -75,6 +77,9 @@ export interface QuorumSessionState {
   sessionNonce: bigint
   messageDigest: Uint8Array
   metadataDigest: Uint8Array
+  userPubkey: Uint8Array
+  signatureScheme: number
+  messageApprovalBump: number
   amount: bigint
   destination: Uint8Array
   membersSnapshot: MemberSlot[]
@@ -135,6 +140,8 @@ export interface PrimaryChallengeInput extends InitAuthorityHashCarrier {
 
 export interface PrimaryChallengeOutput {
   challenge: Uint8Array
+  humanMessage: string
+  clearSigning: ClearSigning
   expectedNonce: bigint
   primaryScheme: number
 }
@@ -171,6 +178,8 @@ export interface OpenSessionInput extends InitAuthorityHashCarrier {
 
 export interface OpenSessionChallenge {
   challenge: Uint8Array
+  humanMessage: string
+  clearSigning: ClearSigning
   expectedSessionNonce: bigint
   primaryScheme: number
   sessionAddress: Address
@@ -194,6 +203,8 @@ export interface ContributeChallengeInput extends InitAuthorityHashCarrier {
 
 export interface ContributeChallengeOutput {
   challenge: Uint8Array
+  humanMessage: string
+  clearSigning: ClearSigning
   memberSlot: MemberSlot
 }
 
@@ -246,6 +257,8 @@ export interface AdminChallengeInput extends InitAuthorityHashCarrier {
 
 export interface AdminChallengeOutput {
   challenge: Uint8Array
+  humanMessage: string
+  clearSigning: ClearSigning
   expectedNonce: bigint
 }
 

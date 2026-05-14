@@ -51,7 +51,7 @@ export async function prepareQuorumSessionOpen(
   const sessionPda = await findQuorumSessionPda(programId, dwallet, decoded.nextSessionNonce)
   const messageApproval = await findMessageApprovalPda(ctx.ikaProgramId, dwallet, input.messageDigest)
   const expiresAt = BigInt(Math.floor(input.expiresAt.getTime() / 1000))
-  const challenge = quorumSessionOpenChallenge({
+  const result = quorumSessionOpenChallenge({
     dwallet: addressBytes(input.dwalletAddress),
     messageDigest: input.messageDigest,
     metadataDigest: input.metadataDigest,
@@ -65,7 +65,9 @@ export async function prepareQuorumSessionOpen(
     primarySlot: decoded.primarySlot.raw,
   })
   return {
-    challenge,
+    challenge: result.hash,
+    humanMessage: result.humanMessage,
+    clearSigning: result.clearSigning,
     expectedSessionNonce: decoded.nextSessionNonce,
     primaryScheme: decoded.primarySlot.scheme,
     sessionAddress: sessionPda.address,
@@ -93,7 +95,7 @@ export async function submitQuorumSessionOpen(
   const sessionPda = await findQuorumSessionPda(programId, dwallet, decoded.nextSessionNonce)
   const expiresAt = BigInt(Math.floor(input.expiresAt.getTime() / 1000))
 
-  const challenge = quorumSessionOpenChallenge({
+  const { hash: challenge } = quorumSessionOpenChallenge({
     dwallet: addressBytes(input.dwalletAddress),
     messageDigest: input.messageDigest,
     metadataDigest: input.metadataDigest,
@@ -152,11 +154,25 @@ export async function prepareQuorumContribute(
     throw new Error('memberIndex out of range for session snapshot')
   }
   const slot = session.membersSnapshot[input.memberIndex]!
-  const challenge = quorumContributeChallenge({
+  const result = quorumContributeChallenge({
     session: addressBytes(input.sessionAddress),
     memberSlot: memberSlotToCanonical(slot),
+    dwallet: addressBytes(session.dwalletAddress),
+    amount: session.amount,
+    destination: session.destination,
+    messageDigest: session.messageDigest,
+    metadataDigest: session.metadataDigest,
+    userPubkey: session.userPubkey,
+    signatureScheme: session.signatureScheme,
+    messageApprovalBump: session.messageApprovalBump,
+    expiresAt: BigInt(Math.floor(session.expiresAt.getTime() / 1000)),
   })
-  return { challenge, memberSlot: slot }
+  return {
+    challenge: result.hash,
+    humanMessage: result.humanMessage,
+    clearSigning: result.clearSigning,
+    memberSlot: slot,
+  }
 }
 
 export async function submitQuorumContribute(
@@ -177,9 +193,18 @@ export async function submitQuorumContribute(
   }
 
   const slot = session.membersSnapshot[input.memberIndex]!
-  const challenge = quorumContributeChallenge({
+  const { hash: challenge } = quorumContributeChallenge({
     session: addressBytes(input.sessionAddress),
     memberSlot: memberSlotToCanonical(slot),
+    dwallet: addressBytes(session.dwalletAddress),
+    amount: session.amount,
+    destination: session.destination,
+    messageDigest: session.messageDigest,
+    metadataDigest: session.metadataDigest,
+    userPubkey: session.userPubkey,
+    signatureScheme: session.signatureScheme,
+    messageApprovalBump: session.messageApprovalBump,
+    expiresAt: BigInt(Math.floor(session.expiresAt.getTime() / 1000)),
   })
 
   const precompileIx = buildCredentialPrecompile(

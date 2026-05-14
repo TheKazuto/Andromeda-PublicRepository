@@ -35,7 +35,7 @@ export async function prepareRecoverAsPrimary(
     messageDigest: input.messageDigest,
     metadataDigest: input.metadataDigest,
   })
-  const challenge = primaryRecoverChallenge({
+  const result = primaryRecoverChallenge({
     dwallet: addressBytes(input.dwalletAddress),
     messageApproval: addressBytes(messageApproval.address),
     messageDigest: input.messageDigest,
@@ -47,7 +47,9 @@ export async function prepareRecoverAsPrimary(
     primarySlot: decoded.primarySlot.raw,
   })
   return {
-    challenge,
+    challenge: result.hash,
+    humanMessage: result.humanMessage,
+    clearSigning: result.clearSigning,
     expectedNonce: decoded.nextPrimaryRecoverNonce,
     primaryScheme: decoded.primarySlot.scheme,
   }
@@ -87,7 +89,7 @@ export async function submitRecoverAsPrimary(
     metadataDigest: input.metadataDigest,
   })
 
-  const challenge = primaryRecoverChallenge({
+  const { hash: challenge } = primaryRecoverChallenge({
     dwallet: addressBytes(input.dwalletAddress),
     messageApproval: addressBytes(messageApproval.address),
     messageDigest: input.messageDigest,

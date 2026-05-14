@@ -43,6 +43,7 @@ import {
   type OidcSessionAccountData,
 } from '../../../clients/rulesPolicy/index.js'
 import { oidcPrimaryUseChallenge, oidcSessionOpenChallenge } from '../../challenge.js'
+import type { ClearSigning } from '../../clear_signing.js'
 import { oidcPrimarySlotBytes } from '../../../oidc/derive.js'
 import { addrDecoder, addressBytes, sha256, type SolanaCtx } from './internal.js'
 import { fetchPolicyAccount } from './state.js'
@@ -143,6 +144,8 @@ export interface OidcOpenPrepareInput {
 }
 export interface OidcOpenPrepareOutput {
   challenge: Uint8Array
+  humanMessage: string
+  clearSigning: ClearSigning
   expectedSessionNonce: bigint
   sessionAddress: Address
   jwkRegistryAddress: Address
@@ -176,6 +179,8 @@ export interface OidcUsePrepareInput {
 }
 export interface OidcUsePrepareOutput {
   challenge: Uint8Array
+  humanMessage: string
+  clearSigning: ClearSigning
   expectedUseNonce: bigint
   /** Session expiry, unix seconds. */
   sessionExpiresAt: number
@@ -247,7 +252,7 @@ export async function prepareOidcSessionOpen(
   const primarySlot = assertOidcPrimary(decoded.primarySlot.raw, input.addrSeed)
   const policyPda = await findRulesPolicyPda(ctx.programId, dwallet, input.initAuthorityHash)
   const { address: jwkRegistry, bump: jwkRegistryBump } = await resolveCanonicalJwkRegistry(ctx)
-  const challenge = oidcSessionOpenChallenge({
+  const result = oidcSessionOpenChallenge({
     dwallet: addressBytes(dwallet),
     primarySlot,
     ephPk: input.ephPk,
@@ -264,7 +269,9 @@ export async function prepareOidcSessionOpen(
     decoded.nextOidcSessionNonce,
   )
   return {
-    challenge,
+    challenge: result.hash,
+    humanMessage: result.humanMessage,
+    clearSigning: result.clearSigning,
     expectedSessionNonce: decoded.nextOidcSessionNonce,
     sessionAddress: sessionPda.address,
     jwkRegistryAddress: jwkRegistry,
@@ -294,7 +301,7 @@ export async function submitOidcSessionOpen(
     input.expectedSessionNonce,
   )
   const eventAuthorityPda = await findEventAuthorityPda(ctx.programId)
-  const challenge = oidcSessionOpenChallenge({
+  const { hash: challenge } = oidcSessionOpenChallenge({
     dwallet: addressBytes(dwallet),
     primarySlot,
     ephPk: input.ephPk,
@@ -357,7 +364,7 @@ export async function prepareOidcUse(ctx: SolanaCtx, input: OidcUsePrepareInput)
     messageDigest: input.messageDigest,
     metadataDigest: input.metadataDigest,
   })
-  const challenge = oidcPrimaryUseChallenge({
+  const result = oidcPrimaryUseChallenge({
     session: addressBytes(input.sessionAddress),
     dwallet: addressBytes(input.dwalletAddress),
     messageApproval: addressBytes(messageApproval.address),
@@ -369,7 +376,13 @@ export async function prepareOidcUse(ctx: SolanaCtx, input: OidcUsePrepareInput)
     useNonce: session.nextUseNonce,
     primarySlot,
   })
-  return { challenge, expectedUseNonce: session.nextUseNonce, sessionExpiresAt: expiresAt }
+  return {
+    challenge: result.hash,
+    humanMessage: result.humanMessage,
+    clearSigning: result.clearSigning,
+    expectedUseNonce: session.nextUseNonce,
+    sessionExpiresAt: expiresAt,
+  }
 }
 
 export async function submitOidcUse(ctx: SolanaCtx, input: OidcUseSubmitInput): Promise<OidcUseSubmitResult> {
@@ -394,7 +407,7 @@ export async function submitOidcUse(ctx: SolanaCtx, input: OidcUseSubmitInput): 
     messageDigest: input.messageDigest,
     metadataDigest: input.metadataDigest,
   })
-  const challenge = oidcPrimaryUseChallenge({
+  const { hash: challenge } = oidcPrimaryUseChallenge({
     session: addressBytes(input.sessionAddress),
     dwallet: addressBytes(input.dwalletAddress),
     messageApproval: addressBytes(messageApproval.address),

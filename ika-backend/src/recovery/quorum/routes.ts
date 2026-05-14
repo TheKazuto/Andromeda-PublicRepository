@@ -103,6 +103,8 @@ export function buildQuorumRouter(_config: AppConfig): Router {
       res.json(
         ok({
           challengeBase64: Buffer.from(result.challenge).toString('base64'),
+          humanMessage: result.humanMessage,
+          clearSigning: result.clearSigning,
           expectedSessionNonce: result.expectedSessionNonce.toString(),
           primaryScheme: result.primaryScheme,
           sessionAddress: result.sessionAddress,
@@ -153,6 +155,8 @@ export function buildQuorumRouter(_config: AppConfig): Router {
       res.json(
         ok({
           challengeBase64: Buffer.from(result.challenge).toString('base64'),
+          humanMessage: result.humanMessage,
+          clearSigning: result.clearSigning,
           memberScheme: result.memberSlot.scheme,
           memberIdentifierBase64: Buffer.from(result.memberSlot.identifier).toString('base64'),
         }),

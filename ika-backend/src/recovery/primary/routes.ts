@@ -80,6 +80,8 @@ export function buildPrimaryRouter(): Router {
       res.json(
         ok({
           challengeBase64: Buffer.from(result.challenge).toString('base64'),
+          humanMessage: result.humanMessage,
+          clearSigning: result.clearSigning,
           expectedNonce: result.expectedNonce.toString(),
           primaryScheme: result.primaryScheme,
         }),

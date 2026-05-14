@@ -1,22 +1,67 @@
 /**
  * Mirrors `contracts/auth/src/challenge.rs` byte-for-byte.
  *
- * Every credential — primary OR quorum member — signs the bytes returned by
- * one of these functions. The on-chain handler recomputes the same hash from
- * the same inputs and requires a matching precompile invocation in the
- * transaction. Domain separation + per-operation tags + nonce + member-id
- * binding cover replay across programs / operations / time / members.
+ * Every credential — primary OR quorum member OR OIDC ephemeral — signs the
+ * bytes returned by one of these functions. The on-chain handler recomputes
+ * the same hash from the same inputs and requires a matching precompile
+ * invocation in the transaction.
+ *
+ * Clear-signing v2 wire format (rules-policy DOMAIN bumped to v2):
+ *
+ * ```text
+ * challenge = sha256(
+ *   DOMAIN || op_tag
+ *   || human_len_u16_le || human_message_bytes
+ *   || canonical_typed_params...
+ * )
+ * ```
+ *
+ * Each `*Challenge()` function renders the human message internally from
+ * the same typed parameters and returns `{ hash, humanMessage, clearSigning }`.
+ * Callers MUST surface `humanMessage` to the approver before signing.
+ *
+ * `OP_INIT` stays at `DOMAIN_INIT_V1` (no clear signing — single-shot,
+ * PDA-bound).
  *
  * Frozen golden vectors: `src/recovery/__tests__/challenge_vectors.json`
  * (asserted by `challenge-vectors.test.ts`). Any edit here that changes a
- * hash must update those vectors AND the Rust mirror in the same commit.
+ * hash MUST update those vectors AND the Rust + Go mirrors in the same
+ * commit.
  */
 
 import { createHash } from 'node:crypto'
+import {
+  adminAddDestinationMessage,
+  adminAddMemberMessage,
+  adminProposeCooldownMessage,
+  adminProposeDailyLimitMessage,
+  adminProposeQuorumThresholdMessage,
+  adminRemoveDestinationMessage,
+  adminRemoveMemberMessage,
+  adminRevokeMessage,
+  adminSetCooldownImmediateMessage,
+  adminSetDailyLimitImmediateMessage,
+  adminSetPrimaryMessage,
+  adminSetQuorumThresholdImmediateMessage,
+  base58Encode32,
+  CLEAR_SIGNING_VERSION_RULES_POLICY,
+  type ClearSigning,
+  HumanMessageError,
+  MAX_HUMAN_MESSAGE_BYTES,
+  oidcPrimaryUseMessage,
+  oidcSessionOpenMessage,
+  primaryRecoverMessage,
+  quorumContributeMessage,
+  quorumSessionOpenMessage,
+} from './clear_signing.js'
 
 const enc = new TextEncoder()
 
-export const DOMAIN = enc.encode('andromeda::rules-policy::v1')
+/** Clear-signing v2 domain (all 17 ops below). */
+export const DOMAIN = enc.encode('andromeda::rules-policy::v2')
+
+/** Init-flow domain (preserved at v1 — no clear signing). */
+export const DOMAIN_INIT_V1 = enc.encode('andromeda::rules-policy::v1')
 
 // Init flow tag (Audit C2 / Opção 4)
 export const OP_INIT = enc.encode('init')
@@ -26,8 +71,7 @@ export const OP_PRIMARY_RECOVER = enc.encode('primary-recover')
 export const OP_QUORUM_SESSION_OPEN = enc.encode('quorum-session-open')
 export const OP_QUORUM_CONTRIBUTE = enc.encode('quorum-contribute')
 
-// OIDC (Login Social) flow tags — both challenges are signed by the user's
-// ephemeral Ed25519 key.
+// OIDC (Login Social) flow tags
 export const OP_OIDC_SESSION_OPEN = enc.encode('oidc-session-open')
 export const OP_OIDC_PRIMARY_USE = enc.encode('oidc-primary-use')
 
@@ -65,6 +109,10 @@ function u32Le(v: number): Uint8Array {
   return out
 }
 
+function u16Le(v: number): Uint8Array {
+  return new Uint8Array([v & 0xff, (v >> 8) & 0xff])
+}
+
 function u8Bytes(v: number): Uint8Array {
   return new Uint8Array([v & 0xff])
 }
@@ -75,17 +123,37 @@ function hashv(parts: Uint8Array[]): Uint8Array {
   return new Uint8Array(h.digest())
 }
 
+function humanLenLe(human: string): Uint8Array {
+  const len = enc.encode(human).length
+  if (len > MAX_HUMAN_MESSAGE_BYTES) {
+    throw new HumanMessageError('BufferTooSmall')
+  }
+  return u16Le(len)
+}
+
+function humanBytes(human: string): Uint8Array {
+  return enc.encode(human)
+}
+
+// ── Public result shape ────────────────────────────────────────
+
+export interface ChallengeResult {
+  hash: Uint8Array
+  humanMessage: string
+  clearSigning: ClearSigning
+}
+
 // ── Init (Audit C2 / Opção 4) ──────────────────────────────────
 
 /**
  * Init challenge for rules-policy. The init_authority signs this exactly
- * once when creating the policy. Mirrors `contracts/auth/src/challenge.rs::
- * rules_policy_init_challenge`.
+ * once when creating the policy. Preserved at `DOMAIN_INIT_V1` (no clear
+ * signing — init is single-shot per `(dwallet, init_authority_hash)`).
  */
 export function rulesPolicyInitChallenge(input: {
-  dwallet: Uint8Array // 32 bytes
-  initAuthoritySlot: Uint8Array // 34 bytes
-  primarySlot: Uint8Array // 34 bytes
+  dwallet: Uint8Array
+  initAuthoritySlot: Uint8Array
+  primarySlot: Uint8Array
   quorumThreshold: number
   dailyLimitSome: boolean
   dailyLimit: bigint
@@ -93,7 +161,7 @@ export function rulesPolicyInitChallenge(input: {
   allowedDestinationsSome: boolean
 }): Uint8Array {
   return hashv([
-    DOMAIN,
+    DOMAIN_INIT_V1,
     OP_INIT,
     input.dwallet,
     input.initAuthoritySlot,
@@ -117,32 +185,57 @@ export function initAuthorityHashFromSlot(slot: Uint8Array): Uint8Array {
   return hashv([slot])
 }
 
-// ── Recovery ────────────────────────────────────────────────────
+// ── Recovery (clear-signing v2) ─────────────────────────────────
 
 export function primaryRecoverChallenge(input: {
-  dwallet: Uint8Array // 32 bytes
-  messageApproval: Uint8Array // 32 bytes
-  messageDigest: Uint8Array // 32 bytes
-  metadataDigest: Uint8Array // 32 bytes
-  userPubkey: Uint8Array // 32 bytes
+  dwallet: Uint8Array
+  messageApproval: Uint8Array
+  messageDigest: Uint8Array
+  metadataDigest: Uint8Array
+  userPubkey: Uint8Array
   signatureScheme: number
   messageApprovalBump: number
   nonce: bigint
-  primarySlot: Uint8Array // 34 bytes
-}): Uint8Array {
-  return hashv([
+  primarySlot: Uint8Array
+}): ChallengeResult {
+  const humanMessage = primaryRecoverMessage({
+    dwallet: input.dwallet,
+    messageDigest: input.messageDigest,
+    metadataDigest: input.metadataDigest,
+    userPubkey: input.userPubkey,
+    signatureScheme: input.signatureScheme,
+  })
+  const hash = hashv([
     DOMAIN,
     OP_PRIMARY_RECOVER,
+    humanLenLe(humanMessage),
+    humanBytes(humanMessage),
     input.dwallet,
     input.messageApproval,
     input.messageDigest,
     input.metadataDigest,
     input.userPubkey,
-    new Uint8Array([input.signatureScheme & 0xff, (input.signatureScheme >> 8) & 0xff]),
+    u16Le(input.signatureScheme),
     u8Bytes(input.messageApprovalBump),
     u64Le(input.nonce),
     input.primarySlot,
   ])
+  return {
+    hash,
+    humanMessage,
+    clearSigning: {
+      version: CLEAR_SIGNING_VERSION_RULES_POLICY,
+      operation: 'primary-recover',
+      fields: {
+        dwallet: base58Encode32(input.dwallet),
+        messageDigestHex: bytesToHex(input.messageDigest),
+        metadataDigestHex: bytesToHex(input.metadataDigest),
+        userPubkeyHex: bytesToHex(input.userPubkey),
+        signatureScheme: input.signatureScheme,
+        expectedNonce: input.nonce.toString(),
+      },
+    },
+  }
 }
 
 export function quorumSessionOpenChallenge(input: {
@@ -153,19 +246,30 @@ export function quorumSessionOpenChallenge(input: {
   signatureScheme: number
   messageApprovalBump: number
   amount: bigint
-  destination: Uint8Array // 32 bytes
+  destination: Uint8Array
   expiresAt: bigint
   sessionNonce: bigint
   primarySlot: Uint8Array
-}): Uint8Array {
-  return hashv([
+}): ChallengeResult {
+  const humanMessage = quorumSessionOpenMessage({
+    dwallet: input.dwallet,
+    amount: input.amount,
+    destination: input.destination,
+    messageDigest: input.messageDigest,
+    metadataDigest: input.metadataDigest,
+    signatureScheme: input.signatureScheme,
+    expiresAtUnix: input.expiresAt,
+  })
+  const hash = hashv([
     DOMAIN,
     OP_QUORUM_SESSION_OPEN,
+    humanLenLe(humanMessage),
+    humanBytes(humanMessage),
     input.dwallet,
     input.messageDigest,
     input.metadataDigest,
     input.userPubkey,
-    new Uint8Array([input.signatureScheme & 0xff, (input.signatureScheme >> 8) & 0xff]),
+    u16Le(input.signatureScheme),
     u8Bytes(input.messageApprovalBump),
     u64Le(input.amount),
     input.destination,
@@ -173,38 +277,116 @@ export function quorumSessionOpenChallenge(input: {
     u64Le(input.sessionNonce),
     input.primarySlot,
   ])
+  return {
+    hash,
+    humanMessage,
+    clearSigning: {
+      version: CLEAR_SIGNING_VERSION_RULES_POLICY,
+      operation: 'quorum-session-open',
+      fields: {
+        dwallet: base58Encode32(input.dwallet),
+        amount: input.amount.toString(),
+        destinationHex: bytesToHex(input.destination),
+        messageDigestHex: bytesToHex(input.messageDigest),
+        metadataDigestHex: bytesToHex(input.metadataDigest),
+        signatureScheme: input.signatureScheme,
+        expiresAtUnix: input.expiresAt.toString(),
+        sessionNonce: input.sessionNonce.toString(),
+      },
+    },
+  }
 }
-
-export function quorumContributeChallenge(input: {
-  session: Uint8Array // 32 bytes (session PDA address)
-  memberSlot: Uint8Array // 34 bytes
-}): Uint8Array {
-  return hashv([DOMAIN, OP_QUORUM_CONTRIBUTE, input.session, input.memberSlot])
-}
-
-// ── OIDC (Login Social) ────────────────────────────────────────
-//
-// Mirrors `contracts/auth/src/challenge.rs::oidc_session_open_challenge` and
-// `::oidc_primary_use_challenge` byte-for-byte. See `loginsocial.md` §6.5.
 
 /**
- * Signed by the user's ephemeral Ed25519 key to open an `OidcSession`.
- * `jwtDigest` = sha256(`header.payload`) (the JWS signing input) — binds the
- * open to that exact JWT. `oidcVerifierVersion` = `OIDC_VERIFIER_V1` (1).
+ * Quorum-contribute v2 hashes the full session snapshot used in
+ * `approve_message`, so that adulterating any field of the session
+ * invalidates every member's signature.
  */
+export function quorumContributeChallenge(input: {
+  session: Uint8Array
+  memberSlot: Uint8Array
+  dwallet: Uint8Array
+  amount: bigint
+  destination: Uint8Array
+  messageDigest: Uint8Array
+  metadataDigest: Uint8Array
+  userPubkey: Uint8Array
+  signatureScheme: number
+  messageApprovalBump: number
+  expiresAt: bigint
+}): ChallengeResult {
+  const humanMessage = quorumContributeMessage({
+    session: input.session,
+    memberSlot: input.memberSlot,
+    dwallet: input.dwallet,
+    amount: input.amount,
+    destination: input.destination,
+    messageDigest: input.messageDigest,
+    metadataDigest: input.metadataDigest,
+    userPubkey: input.userPubkey,
+    signatureScheme: input.signatureScheme,
+    expiresAtUnix: input.expiresAt,
+  })
+  const hash = hashv([
+    DOMAIN,
+    OP_QUORUM_CONTRIBUTE,
+    humanLenLe(humanMessage),
+    humanBytes(humanMessage),
+    input.session,
+    input.memberSlot,
+    input.dwallet,
+    u64Le(input.amount),
+    input.destination,
+    input.messageDigest,
+    input.metadataDigest,
+    input.userPubkey,
+    u16Le(input.signatureScheme),
+    u8Bytes(input.messageApprovalBump),
+    i64Le(input.expiresAt),
+  ])
+  return {
+    hash,
+    humanMessage,
+    clearSigning: {
+      version: CLEAR_SIGNING_VERSION_RULES_POLICY,
+      operation: 'quorum-contribute',
+      fields: {
+        session: base58Encode32(input.session),
+        dwallet: base58Encode32(input.dwallet),
+        amount: input.amount.toString(),
+        destinationHex: bytesToHex(input.destination),
+        messageDigestHex: bytesToHex(input.messageDigest),
+        metadataDigestHex: bytesToHex(input.metadataDigest),
+        userPubkeyHex: bytesToHex(input.userPubkey),
+        signatureScheme: input.signatureScheme,
+        expiresAtUnix: input.expiresAt.toString(),
+      },
+    },
+  }
+}
+
+// ── OIDC (Login Social, clear-signing v2) ──────────────────────
+
 export function oidcSessionOpenChallenge(input: {
-  dwallet: Uint8Array // 32 bytes
-  primarySlot: Uint8Array // 34 bytes = [4, addr_seed(32), 0]
-  ephPk: Uint8Array // 32 bytes
+  dwallet: Uint8Array
+  primarySlot: Uint8Array
+  ephPk: Uint8Array
   notAfterUnixTs: bigint
-  jwtDigest: Uint8Array // 32 bytes
-  jwkRegistry: Uint8Array // 32 bytes
+  jwtDigest: Uint8Array
+  jwkRegistry: Uint8Array
   oidcVerifierVersion: number
   sessionNonce: bigint
-}): Uint8Array {
-  return hashv([
+}): ChallengeResult {
+  const humanMessage = oidcSessionOpenMessage({
+    dwallet: input.dwallet,
+    notAfterUnixTs: input.notAfterUnixTs,
+    ephPk: input.ephPk,
+  })
+  const hash = hashv([
     DOMAIN,
     OP_OIDC_SESSION_OPEN,
+    humanLenLe(humanMessage),
+    humanBytes(humanMessage),
     input.dwallet,
     input.primarySlot,
     input.ephPk,
@@ -214,52 +396,114 @@ export function oidcSessionOpenChallenge(input: {
     u32Le(input.oidcVerifierVersion),
     u64Le(input.sessionNonce),
   ])
+  return {
+    hash,
+    humanMessage,
+    clearSigning: {
+      version: CLEAR_SIGNING_VERSION_RULES_POLICY,
+      operation: 'oidc-session-open',
+      fields: {
+        dwallet: base58Encode32(input.dwallet),
+        ephPkHex: bytesToHex(input.ephPk),
+        notAfterUnixTs: input.notAfterUnixTs.toString(),
+        oidcVerifierVersion: input.oidcVerifierVersion,
+        sessionNonce: input.sessionNonce.toString(),
+      },
+    },
+  }
 }
 
-/**
- * Signed by the user's ephemeral Ed25519 key for each signature authorized
- * through an open `OidcSession`. `session` = the `OidcSession` PDA address;
- * `useNonce` = the session's `next_use_nonce` at the time of use.
- */
 export function oidcPrimaryUseChallenge(input: {
-  session: Uint8Array // 32 bytes (OidcSession PDA address)
-  dwallet: Uint8Array // 32 bytes
-  messageApproval: Uint8Array // 32 bytes
-  messageDigest: Uint8Array // 32 bytes
-  metadataDigest: Uint8Array // 32 bytes
-  userPubkey: Uint8Array // 32 bytes
+  session: Uint8Array
+  dwallet: Uint8Array
+  messageApproval: Uint8Array
+  messageDigest: Uint8Array
+  metadataDigest: Uint8Array
+  userPubkey: Uint8Array
   signatureScheme: number
   messageApprovalBump: number
   useNonce: bigint
-  primarySlot: Uint8Array // 34 bytes
-}): Uint8Array {
-  return hashv([
+  primarySlot: Uint8Array
+}): ChallengeResult {
+  const humanMessage = oidcPrimaryUseMessage({
+    session: input.session,
+    dwallet: input.dwallet,
+    messageDigest: input.messageDigest,
+    metadataDigest: input.metadataDigest,
+    userPubkey: input.userPubkey,
+    signatureScheme: input.signatureScheme,
+  })
+  const hash = hashv([
     DOMAIN,
     OP_OIDC_PRIMARY_USE,
+    humanLenLe(humanMessage),
+    humanBytes(humanMessage),
     input.session,
     input.dwallet,
     input.messageApproval,
     input.messageDigest,
     input.metadataDigest,
     input.userPubkey,
-    new Uint8Array([input.signatureScheme & 0xff, (input.signatureScheme >> 8) & 0xff]),
+    u16Le(input.signatureScheme),
     u8Bytes(input.messageApprovalBump),
     u64Le(input.useNonce),
     input.primarySlot,
   ])
+  return {
+    hash,
+    humanMessage,
+    clearSigning: {
+      version: CLEAR_SIGNING_VERSION_RULES_POLICY,
+      operation: 'oidc-primary-use',
+      fields: {
+        session: base58Encode32(input.session),
+        dwallet: base58Encode32(input.dwallet),
+        messageDigestHex: bytesToHex(input.messageDigest),
+        metadataDigestHex: bytesToHex(input.metadataDigest),
+        userPubkeyHex: bytesToHex(input.userPubkey),
+        signatureScheme: input.signatureScheme,
+        useNonce: input.useNonce.toString(),
+      },
+    },
+  }
 }
 
-// ── Admin ───────────────────────────────────────────────────────
+// ── Admin (primary signs, clear-signing v2) ────────────────────
 
-function adminHash(
+function adminHashWithHuman(
   opTag: Uint8Array,
+  humanMessage: string,
   dwallet: Uint8Array,
   policy: Uint8Array,
   nonce: bigint,
-  primarySlot: Uint8Array,
+  ownerSlot: Uint8Array,
   extras: Uint8Array[],
 ): Uint8Array {
-  return hashv([DOMAIN, opTag, dwallet, policy, u64Le(nonce), primarySlot, ...extras])
+  return hashv([
+    DOMAIN,
+    opTag,
+    humanLenLe(humanMessage),
+    humanBytes(humanMessage),
+    dwallet,
+    policy,
+    u64Le(nonce),
+    ownerSlot,
+    ...extras,
+  ])
+}
+
+function adminFields(
+  dwallet: Uint8Array,
+  policy: Uint8Array,
+  nonce: bigint,
+  extra: Record<string, string | number | boolean> = {},
+): Record<string, string | number | boolean> {
+  return {
+    dwallet: base58Encode32(dwallet),
+    policy: base58Encode32(policy),
+    expectedNonce: nonce.toString(),
+    ...extra,
+  }
 }
 
 export function adminAddMemberChallenge(input: {
@@ -268,10 +512,32 @@ export function adminAddMemberChallenge(input: {
   newMemberSlot: Uint8Array
   nonce: bigint
   primarySlot: Uint8Array
-}): Uint8Array {
-  return adminHash(OP_ADMIN_ADD_MEMBER, input.dwallet, input.policy, input.nonce, input.primarySlot, [
-    input.newMemberSlot,
-  ])
+}): ChallengeResult {
+  const humanMessage = adminAddMemberMessage({
+    newMemberSlot: input.newMemberSlot,
+    policy: input.policy,
+    dwallet: input.dwallet,
+  })
+  const hash = adminHashWithHuman(
+    OP_ADMIN_ADD_MEMBER,
+    humanMessage,
+    input.dwallet,
+    input.policy,
+    input.nonce,
+    input.primarySlot,
+    [input.newMemberSlot],
+  )
+  return {
+    hash,
+    humanMessage,
+    clearSigning: {
+      version: CLEAR_SIGNING_VERSION_RULES_POLICY,
+      operation: 'admin-add-member',
+      fields: adminFields(input.dwallet, input.policy, input.nonce, {
+        newMemberSlotHex: bytesToHex(input.newMemberSlot),
+      }),
+    },
+  }
 }
 
 export function adminRemoveMemberChallenge(input: {
@@ -280,10 +546,32 @@ export function adminRemoveMemberChallenge(input: {
   memberSlotToRemove: Uint8Array
   nonce: bigint
   primarySlot: Uint8Array
-}): Uint8Array {
-  return adminHash(OP_ADMIN_REMOVE_MEMBER, input.dwallet, input.policy, input.nonce, input.primarySlot, [
-    input.memberSlotToRemove,
-  ])
+}): ChallengeResult {
+  const humanMessage = adminRemoveMemberMessage({
+    memberSlot: input.memberSlotToRemove,
+    policy: input.policy,
+    dwallet: input.dwallet,
+  })
+  const hash = adminHashWithHuman(
+    OP_ADMIN_REMOVE_MEMBER,
+    humanMessage,
+    input.dwallet,
+    input.policy,
+    input.nonce,
+    input.primarySlot,
+    [input.memberSlotToRemove],
+  )
+  return {
+    hash,
+    humanMessage,
+    clearSigning: {
+      version: CLEAR_SIGNING_VERSION_RULES_POLICY,
+      operation: 'admin-remove-member',
+      fields: adminFields(input.dwallet, input.policy, input.nonce, {
+        memberSlotHex: bytesToHex(input.memberSlotToRemove),
+      }),
+    },
+  }
 }
 
 export function adminAddDestinationChallenge(input: {
@@ -292,10 +580,32 @@ export function adminAddDestinationChallenge(input: {
   destination: Uint8Array
   nonce: bigint
   primarySlot: Uint8Array
-}): Uint8Array {
-  return adminHash(OP_ADMIN_ADD_DESTINATION, input.dwallet, input.policy, input.nonce, input.primarySlot, [
-    input.destination,
-  ])
+}): ChallengeResult {
+  const humanMessage = adminAddDestinationMessage({
+    destination: input.destination,
+    policy: input.policy,
+    dwallet: input.dwallet,
+  })
+  const hash = adminHashWithHuman(
+    OP_ADMIN_ADD_DESTINATION,
+    humanMessage,
+    input.dwallet,
+    input.policy,
+    input.nonce,
+    input.primarySlot,
+    [input.destination],
+  )
+  return {
+    hash,
+    humanMessage,
+    clearSigning: {
+      version: CLEAR_SIGNING_VERSION_RULES_POLICY,
+      operation: 'admin-add-destination',
+      fields: adminFields(input.dwallet, input.policy, input.nonce, {
+        destinationHex: bytesToHex(input.destination),
+      }),
+    },
+  }
 }
 
 export function adminRemoveDestinationChallenge(input: {
@@ -304,10 +614,32 @@ export function adminRemoveDestinationChallenge(input: {
   destination: Uint8Array
   nonce: bigint
   primarySlot: Uint8Array
-}): Uint8Array {
-  return adminHash(OP_ADMIN_REMOVE_DESTINATION, input.dwallet, input.policy, input.nonce, input.primarySlot, [
-    input.destination,
-  ])
+}): ChallengeResult {
+  const humanMessage = adminRemoveDestinationMessage({
+    destination: input.destination,
+    policy: input.policy,
+    dwallet: input.dwallet,
+  })
+  const hash = adminHashWithHuman(
+    OP_ADMIN_REMOVE_DESTINATION,
+    humanMessage,
+    input.dwallet,
+    input.policy,
+    input.nonce,
+    input.primarySlot,
+    [input.destination],
+  )
+  return {
+    hash,
+    humanMessage,
+    clearSigning: {
+      version: CLEAR_SIGNING_VERSION_RULES_POLICY,
+      operation: 'admin-remove-destination',
+      fields: adminFields(input.dwallet, input.policy, input.nonce, {
+        destinationHex: bytesToHex(input.destination),
+      }),
+    },
+  }
 }
 
 export function adminRevokeChallenge(input: {
@@ -315,8 +647,26 @@ export function adminRevokeChallenge(input: {
   policy: Uint8Array
   nonce: bigint
   primarySlot: Uint8Array
-}): Uint8Array {
-  return adminHash(OP_ADMIN_REVOKE, input.dwallet, input.policy, input.nonce, input.primarySlot, [])
+}): ChallengeResult {
+  const humanMessage = adminRevokeMessage({ policy: input.policy, dwallet: input.dwallet })
+  const hash = adminHashWithHuman(
+    OP_ADMIN_REVOKE,
+    humanMessage,
+    input.dwallet,
+    input.policy,
+    input.nonce,
+    input.primarySlot,
+    [],
+  )
+  return {
+    hash,
+    humanMessage,
+    clearSigning: {
+      version: CLEAR_SIGNING_VERSION_RULES_POLICY,
+      operation: 'admin-revoke',
+      fields: adminFields(input.dwallet, input.policy, input.nonce),
+    },
+  }
 }
 
 export function adminSetPrimaryChallenge(input: {
@@ -325,15 +675,32 @@ export function adminSetPrimaryChallenge(input: {
   newPrimarySlot: Uint8Array
   nonce: bigint
   currentPrimarySlot: Uint8Array
-}): Uint8Array {
-  return adminHash(
+}): ChallengeResult {
+  const humanMessage = adminSetPrimaryMessage({
+    newPrimarySlot: input.newPrimarySlot,
+    policy: input.policy,
+    dwallet: input.dwallet,
+  })
+  const hash = adminHashWithHuman(
     OP_ADMIN_SET_PRIMARY,
+    humanMessage,
     input.dwallet,
     input.policy,
     input.nonce,
     input.currentPrimarySlot,
     [input.newPrimarySlot],
   )
+  return {
+    hash,
+    humanMessage,
+    clearSigning: {
+      version: CLEAR_SIGNING_VERSION_RULES_POLICY,
+      operation: 'admin-set-primary',
+      fields: adminFields(input.dwallet, input.policy, input.nonce, {
+        newPrimarySlotHex: bytesToHex(input.newPrimarySlot),
+      }),
+    },
+  }
 }
 
 export function adminSetQuorumThresholdImmediateChallenge(input: {
@@ -342,15 +709,32 @@ export function adminSetQuorumThresholdImmediateChallenge(input: {
   newThreshold: number
   nonce: bigint
   primarySlot: Uint8Array
-}): Uint8Array {
-  return adminHash(
+}): ChallengeResult {
+  const humanMessage = adminSetQuorumThresholdImmediateMessage({
+    newThreshold: input.newThreshold,
+    policy: input.policy,
+    dwallet: input.dwallet,
+  })
+  const hash = adminHashWithHuman(
     OP_ADMIN_SET_QUORUM_THRESHOLD_IMMEDIATE,
+    humanMessage,
     input.dwallet,
     input.policy,
     input.nonce,
     input.primarySlot,
     [u8Bytes(input.newThreshold)],
   )
+  return {
+    hash,
+    humanMessage,
+    clearSigning: {
+      version: CLEAR_SIGNING_VERSION_RULES_POLICY,
+      operation: 'admin-set-qt-immediate',
+      fields: adminFields(input.dwallet, input.policy, input.nonce, {
+        newThreshold: input.newThreshold,
+      }),
+    },
+  }
 }
 
 export function adminSetDailyLimitImmediateChallenge(input: {
@@ -360,15 +744,34 @@ export function adminSetDailyLimitImmediateChallenge(input: {
   newLimit: bigint
   nonce: bigint
   primarySlot: Uint8Array
-}): Uint8Array {
-  return adminHash(
+}): ChallengeResult {
+  const humanMessage = adminSetDailyLimitImmediateMessage({
+    newSome: input.newSome,
+    newLimit: input.newLimit,
+    policy: input.policy,
+    dwallet: input.dwallet,
+  })
+  const hash = adminHashWithHuman(
     OP_ADMIN_SET_DAILY_LIMIT_IMMEDIATE,
+    humanMessage,
     input.dwallet,
     input.policy,
     input.nonce,
     input.primarySlot,
     [u8Bytes(input.newSome ? 1 : 0), u64Le(input.newLimit)],
   )
+  return {
+    hash,
+    humanMessage,
+    clearSigning: {
+      version: CLEAR_SIGNING_VERSION_RULES_POLICY,
+      operation: 'admin-set-dl-immediate',
+      fields: adminFields(input.dwallet, input.policy, input.nonce, {
+        newSome: input.newSome,
+        newLimit: input.newLimit.toString(),
+      }),
+    },
+  }
 }
 
 export function adminSetCooldownImmediateChallenge(input: {
@@ -377,15 +780,32 @@ export function adminSetCooldownImmediateChallenge(input: {
   newCooldownSeconds: bigint
   nonce: bigint
   primarySlot: Uint8Array
-}): Uint8Array {
-  return adminHash(
+}): ChallengeResult {
+  const humanMessage = adminSetCooldownImmediateMessage({
+    newCooldownSeconds: input.newCooldownSeconds,
+    policy: input.policy,
+    dwallet: input.dwallet,
+  })
+  const hash = adminHashWithHuman(
     OP_ADMIN_SET_COOLDOWN_IMMEDIATE,
+    humanMessage,
     input.dwallet,
     input.policy,
     input.nonce,
     input.primarySlot,
     [u64Le(input.newCooldownSeconds)],
   )
+  return {
+    hash,
+    humanMessage,
+    clearSigning: {
+      version: CLEAR_SIGNING_VERSION_RULES_POLICY,
+      operation: 'admin-set-cd-immediate',
+      fields: adminFields(input.dwallet, input.policy, input.nonce, {
+        newCooldownSeconds: input.newCooldownSeconds.toString(),
+      }),
+    },
+  }
 }
 
 export function adminProposeQuorumThresholdChallenge(input: {
@@ -394,15 +814,32 @@ export function adminProposeQuorumThresholdChallenge(input: {
   newThreshold: number
   nonce: bigint
   primarySlot: Uint8Array
-}): Uint8Array {
-  return adminHash(
+}): ChallengeResult {
+  const humanMessage = adminProposeQuorumThresholdMessage({
+    newThreshold: input.newThreshold,
+    policy: input.policy,
+    dwallet: input.dwallet,
+  })
+  const hash = adminHashWithHuman(
     OP_ADMIN_PROPOSE_QUORUM_THRESHOLD,
+    humanMessage,
     input.dwallet,
     input.policy,
     input.nonce,
     input.primarySlot,
     [u8Bytes(input.newThreshold)],
   )
+  return {
+    hash,
+    humanMessage,
+    clearSigning: {
+      version: CLEAR_SIGNING_VERSION_RULES_POLICY,
+      operation: 'admin-propose-qt',
+      fields: adminFields(input.dwallet, input.policy, input.nonce, {
+        newThreshold: input.newThreshold,
+      }),
+    },
+  }
 }
 
 export function adminProposeDailyLimitChallenge(input: {
@@ -412,15 +849,34 @@ export function adminProposeDailyLimitChallenge(input: {
   newLimit: bigint
   nonce: bigint
   primarySlot: Uint8Array
-}): Uint8Array {
-  return adminHash(
+}): ChallengeResult {
+  const humanMessage = adminProposeDailyLimitMessage({
+    newSome: input.newSome,
+    newLimit: input.newLimit,
+    policy: input.policy,
+    dwallet: input.dwallet,
+  })
+  const hash = adminHashWithHuman(
     OP_ADMIN_PROPOSE_DAILY_LIMIT,
+    humanMessage,
     input.dwallet,
     input.policy,
     input.nonce,
     input.primarySlot,
     [u8Bytes(input.newSome ? 1 : 0), u64Le(input.newLimit)],
   )
+  return {
+    hash,
+    humanMessage,
+    clearSigning: {
+      version: CLEAR_SIGNING_VERSION_RULES_POLICY,
+      operation: 'admin-propose-dl',
+      fields: adminFields(input.dwallet, input.policy, input.nonce, {
+        newSome: input.newSome,
+        newLimit: input.newLimit.toString(),
+      }),
+    },
+  }
 }
 
 export function adminProposeCooldownChallenge(input: {
@@ -429,13 +885,41 @@ export function adminProposeCooldownChallenge(input: {
   newCooldownSeconds: bigint
   nonce: bigint
   primarySlot: Uint8Array
-}): Uint8Array {
-  return adminHash(
+}): ChallengeResult {
+  const humanMessage = adminProposeCooldownMessage({
+    newCooldownSeconds: input.newCooldownSeconds,
+    policy: input.policy,
+    dwallet: input.dwallet,
+  })
+  const hash = adminHashWithHuman(
     OP_ADMIN_PROPOSE_COOLDOWN,
+    humanMessage,
     input.dwallet,
     input.policy,
     input.nonce,
     input.primarySlot,
     [u64Le(input.newCooldownSeconds)],
   )
+  return {
+    hash,
+    humanMessage,
+    clearSigning: {
+      version: CLEAR_SIGNING_VERSION_RULES_POLICY,
+      operation: 'admin-propose-cd',
+      fields: adminFields(input.dwallet, input.policy, input.nonce, {
+        newCooldownSeconds: input.newCooldownSeconds.toString(),
+      }),
+    },
+  }
+}
+
+// ── Helpers ────────────────────────────────────────────────────
+
+function bytesToHex(b: Uint8Array): string {
+  let out = ''
+  for (const x of b) {
+    const h = x.toString(16)
+    out += h.length === 1 ? '0' + h : h
+  }
+  return out
 }

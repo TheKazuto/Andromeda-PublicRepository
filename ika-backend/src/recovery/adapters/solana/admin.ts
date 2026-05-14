@@ -35,6 +35,7 @@ import {
   adminSetPrimaryChallenge,
   adminSetQuorumThresholdImmediateChallenge,
 } from '../../challenge.js'
+import type { ChallengeResult } from '../../challenge.js'
 import type {
   AdminAction,
   AdminChallengeInput,
@@ -53,7 +54,7 @@ export function computeAdminChallenge(
   policy: Uint8Array,
   nonce: bigint,
   primarySlot: Uint8Array,
-): Uint8Array {
+): ChallengeResult {
   switch (action.type) {
     case 'add_member':
       return adminAddMemberChallenge({ dwallet, policy, newMemberSlot: memberSlotToCanonical(action.member), nonce, primarySlot })
@@ -128,14 +129,19 @@ export async function prepareAdminAction(ctx: SolanaCtx, input: AdminChallengeIn
   const dwallet = toAddress(input.dwalletAddress)
   const policyPda = await findRulesPolicyPda(ctx.programId, dwallet, input.initAuthorityHash)
   const decoded = await fetchPolicyAccount(ctx, dwallet, input.initAuthorityHash)
-  const challenge = computeAdminChallenge(
+  const result = computeAdminChallenge(
     input.action,
     addressBytes(input.dwalletAddress),
     addressBytes(policyPda.address),
     decoded.nextAdminNonce,
     decoded.primarySlot.raw,
   )
-  return { challenge, expectedNonce: decoded.nextAdminNonce }
+  return {
+    challenge: result.hash,
+    humanMessage: result.humanMessage,
+    clearSigning: result.clearSigning,
+    expectedNonce: decoded.nextAdminNonce,
+  }
 }
 
 export async function submitAdminAction(ctx: SolanaCtx, input: AdminSubmitInput): Promise<TxResult> {
@@ -151,7 +157,7 @@ export async function submitAdminAction(ctx: SolanaCtx, input: AdminSubmitInput)
     throw new Error('Primary cannot use WebAuthn scheme')
   }
 
-  const challenge = computeAdminChallenge(
+  const { hash: challenge } = computeAdminChallenge(
     input.action,
     addressBytes(input.dwalletAddress),
     addressBytes(policyPda.address),
