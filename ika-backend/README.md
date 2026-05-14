@@ -128,6 +128,88 @@ Off-chain schemes (separated by curve + message format + address encoding):
 
 Every on-chain flow: backend returns a 32-byte digest; user signs off-chain with any credential; backend assembles the Solana tx and signs it as **gas sponsor** (`ANDROMEDA_GAS_SPONSOR_KEYPAIR`). User never needs a Solana wallet.
 
+#### Clear Signing v2 (shipped 2026-05-14)
+
+Every `/challenge` route in this backend returns a deterministic
+human-readable text alongside the 32-byte challenge bytes. The on-chain
+program recomputes the same text from the same typed parameters and
+embeds it (length-prefixed `u16 LE`) into the SHA-256 the credential
+signs — so a compromised backend cannot swap destination, member,
+amount, nonce or session without the approver seeing the swap in the
+text they are about to sign.
+
+**Wire format on-chain.**
+
+```
+challenge = sha256(
+    DOMAIN              // e.g. "andromeda::rules-policy::v2"
+    || op_tag           // e.g. "primary-recover" / "admin-add-member" / "oidc-session-open"
+    || human_len_u16_le // 2 bytes, little-endian length of the next field
+    || human_message    // plain ASCII, ≤ 768 bytes
+    || dwallet || ...   // remaining typed parameters
+)
+```
+
+`MAX_HUMAN_MESSAGE_BYTES = 768`. ASCII only (`0x20..=0x7E`). Bumped from
+the original 512 because `quorum-contribute` carries the full session
+snapshot plus the member-slot text in worst case.
+
+**API response shape.** Every `*/challenge` route returns:
+
+```json
+{
+  "data": {
+    "challengeBase64": "...",
+    "humanMessage": "Add member scheme:0;id:... to policy 4xyz... for dWallet 9abc...",
+    "clearSigning": {
+      "version": "rules-policy-clear-v1",
+      "operation": "admin-add-member",
+      "fields": {
+        "dwallet": "9abc...",
+        "policy": "4xyz...",
+        "expectedNonce": "7",
+        "newMemberSlotHex": "00ab..."
+      }
+    },
+    "expectedNonce": "7"
+  }
+}
+```
+
+* `humanMessage` — the exact ASCII text the approver MUST see before
+  signing. Plain text, no locale, no truncation.
+* `clearSigning.version` — `rules-policy-clear-v1` for every route in
+  this backend.
+* `clearSigning.operation` — canonical op tag (`primary-recover`,
+  `quorum-session-open`, `quorum-contribute`, the 12 `admin-*`,
+  `oidc-session-open`, `oidc-primary-use`).
+* `clearSigning.fields` — curated map of typed parameters (Solana
+  addresses base58, hashes hex, integers as decimal strings). Never the
+  raw JWT, never `sub` / `email` / PII.
+
+**Templates covered (17 ops).** Recovery: `primary-recover`,
+`quorum-session-open`, `quorum-contribute`. Admin (primary signs):
+`admin-add-member`, `admin-remove-member`, `admin-add-destination`,
+`admin-remove-destination`, `admin-revoke`, `admin-set-primary`,
+`admin-set-qt-immediate`, `admin-set-dl-immediate`,
+`admin-set-cd-immediate`, `admin-propose-qt`, `admin-propose-dl`,
+`admin-propose-cd`. OIDC: `oidc-session-open`, `oidc-primary-use`.
+
+Flows preserved at v1 (no clear signing) because they are single-shot,
+PDA-bound or non-human-signed: `OP_INIT` of every program,
+`request-signature` runtime digests, `passkey-step-up::step-up`
+(WebAuthn embeds its own `clientDataJSON.challenge`),
+`fhe-gated::decision` (signed by Vault Transit KMS, not a human),
+`session-keys::create-session`.
+
+**`submit` never trusts caller-supplied text.** Every `/submit` route
+ignores any `humanMessage` in the body and recomputes the challenge from
+the same typed params it received. If the on-chain hash doesn't match,
+the precompile fails and the transaction reverts.
+
+**OIDC privacy.** OIDC templates use addresses, 32-byte hashes, and the
+ephemeral pubkey. Never the JWT, the raw `sub`, the email, or the name.
+
 On-chain schemes (validated via Solana precompile, **zero attestor**):
 
 | Scheme | Identifier | Covers |
@@ -161,7 +243,27 @@ On-chain schemes (validated via Solana precompile, **zero attestor**):
 
 ### Recovery — Login Social (OIDC primary, scheme=4)
 
-`IKA_OIDC_ENABLED=true` mounts the OIDC routes. Identity is verified entirely on-chain (RSA-2048 over the provider's `id_token`, JWK registry, ephemeral Ed25519 binding — **zero attestor**). The OAuth handshake itself is brokered by `gateway/`'s `/v1/oauth/*` routes; this backend handles validation + the gas-sponsored recovery flow. Full spec in `loginsocial.md`.
+`IKA_OIDC_ENABLED=true` mounts the OIDC routes. Identity is verified entirely on-chain (RSA-2048 over the provider's `id_token`, JWK registry, ephemeral Ed25519 binding — **zero attestor**). The OAuth handshake itself is brokered by `gateway/`'s `/v1/oauth/*` routes; this backend handles validation + the gas-sponsored recovery flow.
+
+**Flow (devnet pre-alpha).**
+
+1. Client generates an ephemeral Ed25519 keypair on device.
+2. `POST /v1/oidc/nonce { ephPkBase64 }` → returns the canonical `oidcNonce` to embed in the OAuth `nonce`.
+3. Client runs the OAuth handshake (gateway's `/v1/oauth/*` routes) with `scope=openid` → receives `id_token`.
+4. `POST /v1/oidc/validate { idToken }` → off-chain pre-check (provider JWKS + claims + nonce shape). Returns `addrSeed` + `issuerHash` + `audienceHash` + `subjectHash`.
+5. `POST /v1/recovery/primary/oidc/stage` → stages the `id_token` into an on-chain `OidcJwtStaging` PDA.
+6. `POST /v1/recovery/primary/oidc/open/challenge` → returns the `oidc-session-open` challenge (with `humanMessage` + `clearSigning`). Client signs the 32 bytes with the ephemeral key.
+7. `POST /v1/recovery/primary/oidc/open` → on-chain: verifies RSA over the JWT + claims + JWK registry + the ephemeral signature → creates the short-lived `OidcSession` PDA (≤ 600 s).
+8. For each signature: `POST /v1/recovery/primary/oidc/use/challenge` → per-use challenge → client signs with ephemeral key → `POST /v1/recovery/primary/oidc/use/submit` → on-chain Ika `approve_message`.
+9. `POST /v1/recovery/primary/oidc/close` → close expired session (rent refund).
+
+**Cross-client identity.** `addrSeed = sha256("andromeda::oidc::addr::v1" || lp(iss) || lp(aud) || lp(sub))`. Same Google/Apple account → same `addrSeed` → same dWallet across apps on Andromeda. The `aud` portion uses a single global Andromeda OAuth client per environment so cross-app portability holds.
+
+**Required programs deployed on Solana.** `rules-policy` (with `scheme=4`/OidcJwt primary), `jwk-registry` (trust root for provider JWKs), `oidc-verifier` (RS256 on-chain via `sol_big_mod_exp`). Each `jwk-registry` triplet is `(issuerHash, audienceHash, kidHash) → modulus`. Off-chain rotator keeps the registry in sync with provider JWKS.
+
+**`sol_big_mod_exp` feature gate.** The on-chain RSA verify uses the Solana syscall `sol_big_mod_exp`. If the gate `EBq48m8irRKuE7ZnMTLvLg2UuGSqhe8s8oMqnmja1fJw` is `inactive` in the target cluster, the `rules-policy` program must be rebuilt with `cargo build-sbf --no-default-features` (forwards `--no-default-features` to `andromeda_oidc_verifier`, which then returns a sentinel buffer for every modexp). With the stub, OIDC opens/uses fail every signature comparison; primary recovery, quorum, admin actions are unaffected.
+
+**Privacy.** Never log JWTs, raw `sub`, email, or name. Audit log entries store only addresses + hashes + the rendered `humanMessage` (which by construction also uses only addresses + hashes).
 
 | Route | Purpose |
 |-------|---------|
@@ -175,7 +277,7 @@ On-chain schemes (validated via Solana precompile, **zero attestor**):
 | `POST /v1/recovery/primary/oidc/close` | Closes an expired session (rent refund). |
 | `POST /v1/recovery/primary/oidc/staging/close` | Reclaims an abandoned staging account. |
 
-The trust root for the JWKs lives in a separate on-chain `jwk-registry` program. The off-chain `jwk-rotator` worker (see [`jwk-rotator/README.md`](../jwk-rotator/README.md)) keeps it in sync with the provider JWKS.
+The trust root for the JWKs lives in a separate on-chain `jwk-registry` program. The off-chain `jwk-rotator/` worker (in the monorepo root) keeps it in sync with the provider JWKS via the `jwk-registry::propose` and `::commit` flow (proposal → timelock → commit), so a rogue provider key cannot be inserted instantly.
 
 ### Health
 - `GET /health` — liveness (no auth)
@@ -234,7 +336,7 @@ When `IKA_RECOVERY_POLICY_ENABLED=true`, the boot **refuses to start** unless `I
 
 ### Login Social — OIDC primary (opt-in — `IKA_OIDC_ENABLED=true`)
 
-Mounts `/v1/oidc/{nonce,validate}` + `/v1/recovery/primary/oidc/*`. Requires the policy recovery layer to also be on (`IKA_RECOVERY_POLICY_ENABLED=true`) and the `jwk-registry` program to be deployed + bootstrapped. Boot refuses to start if any required value is missing or if no provider is enabled. Full spec in `loginsocial.md` §6 / §9.
+Mounts `/v1/oidc/{nonce,validate}` + `/v1/recovery/primary/oidc/*`. Requires the policy recovery layer to also be on (`IKA_RECOVERY_POLICY_ENABLED=true`) and the `jwk-registry` program to be deployed + bootstrapped. Boot refuses to start if any required value is missing or if no provider is enabled.
 
 | Var | Default | Notes |
 |-----|---------|-------|
@@ -280,5 +382,3 @@ npm run dev          # tsx watch src/server.ts
 | `node scripts/gen-keypair.mjs <out-path>` | Generate a Solana keypair as a JSON byte array file + print its address (for `ANDROMEDA_GAS_SPONSOR_KEYPAIR`). |
 
 Supported curves: Ed25519 (Solana, NEAR, Aptos, Cosmos Ed25519), SECP256K1 (EVM, Bitcoin, Cosmos secp256k1), SECP256R1 (P-256, WebAuthn), Ristretto (Substrate/Polkadot).
-
-Full Recovery spec in `docs/RECOVERY.md`. Status in `docs/STATUS.md`. Roadmap in `PLAN.md`. Login Social plan + crypto spec in `loginsocial.md`; pre-deploy audit report in `docs/AUDIT_LOGINSOCIAL_2026_05.md`.
