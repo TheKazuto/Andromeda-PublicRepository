@@ -137,6 +137,62 @@ components:
         version: { type: string }
         description: { type: string }
 
+    ClearSigning:
+      type: object
+      required: [version, operation, fields]
+      description: |
+        Structured envelope returned alongside every clear-signed governance
+        challenge response. The on-chain handler does not consume this — it
+        recomputes `humanMessage` from typed params and validates the hash —
+        but the gateway surfaces it so callers can render the message to the
+        approver and audit the operation later.
+
+        `version` is one of:
+          * `policy-clear-v1` — admin actions on the 7 policy templates
+            (allowlist-destinations, velocity-guard, time-lock,
+            oracle-conditional, passkey-step-up, session-keys, fhe-gated)
+          * `rules-policy-clear-v1` — rules-policy recovery + admin + OIDC
+            flows handled by the ika-backend.
+
+        `operation` is the canonical op tag (e.g. `allowlist.add_destination`,
+        `admin-add-member`). `fields` is a curated map of typed parameters
+        (hashes, addresses and decimal numbers only — never PII).
+      properties:
+        version:
+          type: string
+          enum: [policy-clear-v1, rules-policy-clear-v1]
+        operation: { type: string, example: "allowlist.add_destination" }
+        fields:
+          type: object
+          additionalProperties: true
+
+    AdminChallengeResponse:
+      type: object
+      required: [challenge_base64, human_message, clear_signing, expected_nonce]
+      description: |
+        Response for `POST /v1/policies/{template}/admin/challenge`. The
+        caller MUST show `human_message` to the approver before asking for a
+        signature; the on-chain handler will recompute the same text and
+        reject the operation if the bytes the approver signed do not match.
+      properties:
+        challenge_base64:
+          type: string
+          description: Base64 of the 32-byte SHA-256 the owner must sign.
+        human_message:
+          type: string
+          maxLength: 768
+          description: |
+            Plain-ASCII text rendered from the typed parameters. Hard-capped
+            at 768 bytes. The on-chain program recomputes this exact string
+            and embeds it (length-prefixed `u16 LE`) into the challenge hash.
+          example: "Allow destination deadbeef... on allowlist policy 4xyz... for dWallet 9abc..."
+        clear_signing:
+          $ref: "#/components/schemas/ClearSigning"
+        expected_nonce:
+          type: integer
+          format: int64
+          description: Next expected admin nonce on the policy.
+
 paths:
   /health:
     get:
@@ -446,6 +502,84 @@ paths:
       tags: [Policies]
       parameters:
         - { name: template, in: path, required: true, schema: { type: string } }
+      responses: { "200": { description: OK } }
+
+  /v1/policies/{template}/admin/challenge:
+    post:
+      summary: Compute the clear-signed challenge for an admin action
+      description: |
+        Returns the canonical challenge bytes the policy owner must sign
+        off-chain. Response includes the human-readable text (`human_message`)
+        that the on-chain program will recompute from the same typed
+        parameters — show this text to the approver before asking for a
+        signature. The body MUST NOT echo `human_message` back to `/submit`;
+        the gateway recomputes it from the same params.
+      tags: [Policies]
+      parameters:
+        - { name: template, in: path, required: true, schema: { type: string, example: "allowlist-destinations" } }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [dwallet_address, owner_slot, init_authority_hash_base64, action, expected_nonce]
+              properties:
+                dwallet_address: { type: string }
+                owner_slot:
+                  type: object
+                  properties:
+                    scheme: { type: integer, minimum: 0, maximum: 3 }
+                    identifier_base64: { type: string }
+                init_authority_hash_base64: { type: string }
+                session_index: { type: integer, nullable: true, description: "Required for session-keys admin actions." }
+                action:
+                  type: string
+                  example: "add_destination"
+                  description: "Template-specific admin action tag."
+                expected_nonce: { type: integer, format: int64 }
+                destination_base64: { type: string }
+                max_sigs_per_window: { type: integer, nullable: true }
+                window_slots: { type: integer, format: int64, nullable: true }
+                mode: { type: integer, nullable: true }
+                start_slot: { type: integer, format: int64, nullable: true }
+                end_slot: { type: integer, format: int64, nullable: true }
+                recurring_period_slots: { type: integer, format: int64, nullable: true }
+                min_price: { type: integer, format: int64, nullable: true }
+                max_price: { type: integer, format: int64, nullable: true }
+                max_age_slots: { type: integer, format: int64, nullable: true }
+                max_confidence_bps: { type: integer, nullable: true }
+                threshold_amount: { type: integer, format: int64, nullable: true }
+                passkey_pubkey_base64: { type: string }
+                new_fhe_authority: { type: string }
+                allowed_program: { type: string }
+                recipient: { type: string }
+      responses:
+        "200":
+          description: Challenge bytes + clear-signing envelope
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AdminChallengeResponse" }
+        "400":
+          description: Validation error
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /v1/policies/{template}/admin/submit:
+    post:
+      summary: Submit a signed admin action
+      description: |
+        Submits the owner's off-chain signature over the challenge bytes
+        returned by `/admin/challenge`. The gateway recomputes the
+        challenge from the same typed parameters — it never trusts a
+        caller-supplied `human_message`. On success the gateway pays the
+        Solana fee and returns the confirmed `tx_signature`.
+      tags: [Policies]
+      parameters:
+        - { name: template, in: path, required: true, schema: { type: string } }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
       responses: { "200": { description: OK } }
 
   /v1/policies/{address}/request-signature:
