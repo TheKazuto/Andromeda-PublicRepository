@@ -14,12 +14,13 @@ pub mod challenges;
 
 use andromeda_auth::admin::verify_owner_admin;
 use andromeda_auth::hash::hashv;
+use andromeda_auth::human_message::HumanMessageError;
 use andromeda_auth::precompile::check_sysvar_address;
 use andromeda_auth::{
     validate_slot, verify_signature, AuthError, VerifyInput, MEMBER_SLOT_LEN, SCHEME_WEBAUTHN,
 };
-use ika_dwallet_quasar::DWalletContext;
 use andromeda_policy_shared::validate_ika_cpi_accounts;
+use ika_dwallet_quasar::DWalletContext;
 use quasar_lang::prelude::*;
 use solana_address::Address;
 
@@ -55,11 +56,15 @@ mod velocity_guard {
             window_slots,
             current_slot,
         )?;
-        ctx.accounts.program.emit_event(&PolicyDeployed {
-            policy: policy_addr,
-            dwallet: dwallet_addr,
-            ts: current_ts,
-        }, &ctx.accounts.event_authority, EventAuthority::BUMP)?;
+        ctx.accounts.program.emit_event(
+            &PolicyDeployed {
+                policy: policy_addr,
+                dwallet: dwallet_addr,
+                ts: current_ts,
+            },
+            &ctx.accounts.event_authority,
+            EventAuthority::BUMP,
+        )?;
         Ok(())
     }
 
@@ -81,11 +86,15 @@ mod velocity_guard {
         let current_ts: i64 = ctx.accounts.clock.unix_timestamp.into();
         let policy_addr = *ctx.accounts.policy.address();
         let request_hash = Address::from(message_digest);
-        ctx.accounts.program.emit_event(&SignatureRequested {
-            policy: policy_addr,
-            request_hash,
-            ts: current_ts,
-        }, &ctx.accounts.event_authority, EventAuthority::BUMP)?;
+        ctx.accounts.program.emit_event(
+            &SignatureRequested {
+                policy: policy_addr,
+                request_hash,
+                ts: current_ts,
+            },
+            &ctx.accounts.event_authority,
+            EventAuthority::BUMP,
+        )?;
         ctx.accounts.request(
             message_digest,
             metadata_digest,
@@ -95,11 +104,15 @@ mod velocity_guard {
             cpi_authority_bump,
             current_slot,
         )?;
-        ctx.accounts.program.emit_event(&SignatureApproved {
-            policy: policy_addr,
-            request_hash,
-            ts: current_ts,
-        }, &ctx.accounts.event_authority, EventAuthority::BUMP)?;
+        ctx.accounts.program.emit_event(
+            &SignatureApproved {
+                policy: policy_addr,
+                request_hash,
+                ts: current_ts,
+            },
+            &ctx.accounts.event_authority,
+            EventAuthority::BUMP,
+        )?;
         Ok(())
     }
 
@@ -127,10 +140,14 @@ mod velocity_guard {
         let current_ts: i64 = ctx.accounts.clock.unix_timestamp.into();
         let policy_addr = *ctx.accounts.policy.address();
         ctx.accounts.pause(expected_nonce)?;
-        ctx.accounts.program.emit_event(&PolicyPaused {
-            policy: policy_addr,
-            ts: current_ts,
-        }, &ctx.accounts.event_authority, EventAuthority::BUMP)?;
+        ctx.accounts.program.emit_event(
+            &PolicyPaused {
+                policy: policy_addr,
+                ts: current_ts,
+            },
+            &ctx.accounts.event_authority,
+            EventAuthority::BUMP,
+        )?;
         Ok(())
     }
 
@@ -144,10 +161,14 @@ mod velocity_guard {
         let current_ts: i64 = ctx.accounts.clock.unix_timestamp.into();
         let policy_addr = *ctx.accounts.policy.address();
         ctx.accounts.resume(expected_nonce)?;
-        ctx.accounts.program.emit_event(&PolicyResumed {
-            policy: policy_addr,
-            ts: current_ts,
-        }, &ctx.accounts.event_authority, EventAuthority::BUMP)?;
+        ctx.accounts.program.emit_event(
+            &PolicyResumed {
+                policy: policy_addr,
+                ts: current_ts,
+            },
+            &ctx.accounts.event_authority,
+            EventAuthority::BUMP,
+        )?;
         Ok(())
     }
 }
@@ -162,11 +183,18 @@ pub enum VelocityError {
     AuthFailed,
     InvalidOwnerSlot,
     UnsupportedScheme,
+    ClearSigningRenderFailed,
 }
 
 impl From<AuthError> for VelocityError {
     fn from(_e: AuthError) -> Self {
         VelocityError::AuthFailed
+    }
+}
+
+impl From<HumanMessageError> for VelocityError {
+    fn from(_e: HumanMessageError) -> Self {
+        VelocityError::ClearSigningRenderFailed
     }
 }
 
@@ -351,7 +379,10 @@ impl RequestSignature {
             signature_scheme,
             current_slot,
         );
-        require!(metadata_digest == expected_metadata_digest, VelocityError::AuthFailed);
+        require!(
+            metadata_digest == expected_metadata_digest,
+            VelocityError::AuthFailed
+        );
         require!(
             validate_ika_cpi_accounts(
                 &self.dwallet_program.to_account_view(),
@@ -409,13 +440,19 @@ pub struct AdminAction {
 impl AdminAction {
     fn run<F>(&mut self, expected_nonce: u64, build_challenge: F) -> Result<(), ProgramError>
     where
-        F: FnOnce(&Address, &Address, &[u8; MEMBER_SLOT_LEN], u64) -> [u8; 32],
+        F: FnOnce(
+            &Address,
+            &Address,
+            &[u8; MEMBER_SLOT_LEN],
+            u64,
+        ) -> Result<[u8; 32], HumanMessageError>,
     {
         let dwallet_addr = *self.dwallet_account.address();
         let policy_addr = *self.policy.address();
         let owner_slot = self.policy.owner_slot;
         let on_chain_nonce: u64 = self.policy.next_admin_nonce.into();
-        let challenge = build_challenge(&dwallet_addr, &policy_addr, &owner_slot, on_chain_nonce);
+        let challenge = build_challenge(&dwallet_addr, &policy_addr, &owner_slot, on_chain_nonce)
+            .map_err(VelocityError::from)?;
 
         check_sysvar_addr(self.instructions_sysvar.address())?;
         let sysvar_view = self.instructions_sysvar.to_account_view();
@@ -447,7 +484,14 @@ impl AdminAction {
         require!(max_sigs_per_window >= 1, VelocityError::InvalidLimit);
         require!(window_slots >= 1, VelocityError::InvalidWindow);
         self.run(expected_nonce, |dw, policy, owner, n| {
-            challenges::update_window_challenge(dw, policy, max_sigs_per_window, window_slots, n, owner)
+            challenges::update_window_challenge(
+                dw,
+                policy,
+                max_sigs_per_window,
+                window_slots,
+                n,
+                owner,
+            )
         })?;
         self.policy.max_sigs_per_window = max_sigs_per_window.into();
         self.policy.window_slots = window_slots.into();
