@@ -34,12 +34,13 @@ pub mod challenges;
 
 use andromeda_auth::admin::verify_owner_admin;
 use andromeda_auth::hash::hashv;
+use andromeda_auth::human_message::HumanMessageError;
 use andromeda_auth::precompile::{check_sysvar_address, verify_ed25519};
 use andromeda_auth::{
     validate_slot, verify_signature, AuthError, VerifyInput, MEMBER_SLOT_LEN, SCHEME_WEBAUTHN,
 };
-use ika_dwallet_quasar::DWalletContext;
 use andromeda_policy_shared::validate_ika_cpi_accounts;
+use ika_dwallet_quasar::DWalletContext;
 use quasar_lang::prelude::*;
 use solana_address::Address;
 
@@ -55,10 +56,9 @@ declare_id!("6NhfKThEydSHH6R7gBm94reo3simopRJmb4nDzkKU7np");
 const ALLOWED_FHE_AUTHORITIES: &[Address] = &[
     // andromeda-fhe (Vault Transit ed25519)
     Address::new_from_array([
-        0xa1, 0x0c, 0xe9, 0xf1, 0xf1, 0xe1, 0x08, 0x3d,
-        0x93, 0x63, 0xd6, 0x20, 0x9f, 0x7a, 0x91, 0x23,
-        0x84, 0x43, 0x9d, 0xed, 0xe2, 0x66, 0x59, 0x2b,
-        0x2d, 0x35, 0xbb, 0xa4, 0xc9, 0x1c, 0x9f, 0xec,
+        0xa1, 0x0c, 0xe9, 0xf1, 0xf1, 0xe1, 0x08, 0x3d, 0x93, 0x63, 0xd6, 0x20, 0x9f, 0x7a, 0x91,
+        0x23, 0x84, 0x43, 0x9d, 0xed, 0xe2, 0x66, 0x59, 0x2b, 0x2d, 0x35, 0xbb, 0xa4, 0xc9, 0x1c,
+        0x9f, 0xec,
     ]),
 ];
 
@@ -106,11 +106,15 @@ mod fhe_gated {
             fhe_authority,
             decision_max_age_slots,
         )?;
-        ctx.accounts.program.emit_event(&PolicyDeployed {
-            policy: policy_addr,
-            dwallet: dwallet_addr,
-            ts: current_ts,
-        }, &ctx.accounts.event_authority, EventAuthority::BUMP)?;
+        ctx.accounts.program.emit_event(
+            &PolicyDeployed {
+                policy: policy_addr,
+                dwallet: dwallet_addr,
+                ts: current_ts,
+            },
+            &ctx.accounts.event_authority,
+            EventAuthority::BUMP,
+        )?;
         Ok(())
     }
 
@@ -134,11 +138,15 @@ mod fhe_gated {
         let current_ts: i64 = ctx.accounts.clock.unix_timestamp.into();
         let policy_addr = *ctx.accounts.policy.address();
         let request_hash = Address::from(message_digest);
-        ctx.accounts.program.emit_event(&SignatureRequested {
-            policy: policy_addr,
-            request_hash,
-            ts: current_ts,
-        }, &ctx.accounts.event_authority, EventAuthority::BUMP)?;
+        ctx.accounts.program.emit_event(
+            &SignatureRequested {
+                policy: policy_addr,
+                request_hash,
+                ts: current_ts,
+            },
+            &ctx.accounts.event_authority,
+            EventAuthority::BUMP,
+        )?;
         ctx.accounts.request(
             message_digest,
             metadata_digest,
@@ -150,11 +158,15 @@ mod fhe_gated {
             decision_authorize,
             current_slot,
         )?;
-        ctx.accounts.program.emit_event(&SignatureApproved {
-            policy: policy_addr,
-            request_hash,
-            ts: current_ts,
-        }, &ctx.accounts.event_authority, EventAuthority::BUMP)?;
+        ctx.accounts.program.emit_event(
+            &SignatureApproved {
+                policy: policy_addr,
+                request_hash,
+                ts: current_ts,
+            },
+            &ctx.accounts.event_authority,
+            EventAuthority::BUMP,
+        )?;
         Ok(())
     }
 
@@ -180,10 +192,14 @@ mod fhe_gated {
         let current_ts: i64 = ctx.accounts.clock.unix_timestamp.into();
         let policy_addr = *ctx.accounts.policy.address();
         ctx.accounts.pause(expected_nonce)?;
-        ctx.accounts.program.emit_event(&PolicyPaused {
-            policy: policy_addr,
-            ts: current_ts,
-        }, &ctx.accounts.event_authority, EventAuthority::BUMP)?;
+        ctx.accounts.program.emit_event(
+            &PolicyPaused {
+                policy: policy_addr,
+                ts: current_ts,
+            },
+            &ctx.accounts.event_authority,
+            EventAuthority::BUMP,
+        )?;
         Ok(())
     }
 
@@ -197,10 +213,14 @@ mod fhe_gated {
         let current_ts: i64 = ctx.accounts.clock.unix_timestamp.into();
         let policy_addr = *ctx.accounts.policy.address();
         ctx.accounts.resume(expected_nonce)?;
-        ctx.accounts.program.emit_event(&PolicyResumed {
-            policy: policy_addr,
-            ts: current_ts,
-        }, &ctx.accounts.event_authority, EventAuthority::BUMP)?;
+        ctx.accounts.program.emit_event(
+            &PolicyResumed {
+                policy: policy_addr,
+                ts: current_ts,
+            },
+            &ctx.accounts.event_authority,
+            EventAuthority::BUMP,
+        )?;
         Ok(())
     }
 }
@@ -252,11 +272,18 @@ pub enum FHEError {
     UnsupportedScheme,
     InvalidFHEAuthority, // Audit M4: fhe_authority not in ALLOWED_FHE_AUTHORITIES
     InvalidMaxAge,       // Audit M3: decision_max_age_slots must be > 0
+    ClearSigningRenderFailed,
 }
 
 impl From<AuthError> for FHEError {
     fn from(_e: AuthError) -> Self {
         FHEError::AuthFailed
+    }
+}
+
+impl From<HumanMessageError> for FHEError {
+    fn from(_e: HumanMessageError) -> Self {
+        FHEError::ClearSigningRenderFailed
     }
 }
 
@@ -316,10 +343,7 @@ impl InitPolicy {
     ) -> Result<(), ProgramError> {
         // Audit C2 (Opção 4): hash<->slot consistency.
         let computed = init_authority_hash_from_slot(&init_authority_slot);
-        require!(
-            computed == init_authority_hash,
-            FHEError::InvalidOwnerSlot
-        );
+        require!(computed == init_authority_hash, FHEError::InvalidOwnerSlot);
         validate_slot(&init_authority_slot).map_err(|_| FHEError::InvalidOwnerSlot)?;
         require!(
             init_authority_slot[0] != SCHEME_WEBAUTHN,
@@ -353,9 +377,7 @@ impl InitPolicy {
         );
         check_sysvar_addr(self.instructions_sysvar.address())?;
         let sysvar_view = self.instructions_sysvar.to_account_view();
-        let sysvar_data_ref = sysvar_view
-            .try_borrow()
-            .map_err(|_| FHEError::AuthFailed)?;
+        let sysvar_data_ref = sysvar_view.try_borrow().map_err(|_| FHEError::AuthFailed)?;
         verify_signature(VerifyInput {
             member_slot: &init_authority_slot,
             challenge: &challenge,
@@ -433,7 +455,10 @@ impl RequestSignature {
 
         // Constraint 2: decision freshness.
         let max_age: u64 = self.policy.decision_max_age_slots.into();
-        require!(current_slot >= decision_created_slot, FHEError::DecisionStale);
+        require!(
+            current_slot >= decision_created_slot,
+            FHEError::DecisionStale
+        );
         let age = current_slot.saturating_sub(decision_created_slot);
         require!(age <= max_age, FHEError::DecisionStale);
 
@@ -450,9 +475,7 @@ impl RequestSignature {
 
         check_sysvar_addr(self.instructions_sysvar.address())?;
         let sysvar_view = self.instructions_sysvar.to_account_view();
-        let sysvar_data_ref = sysvar_view
-            .try_borrow()
-            .map_err(|_| FHEError::AuthFailed)?;
+        let sysvar_data_ref = sysvar_view.try_borrow().map_err(|_| FHEError::AuthFailed)?;
         verify_ed25519(&fhe_authority_bytes, &canonical, &sysvar_data_ref)
             .map_err(|_| FHEError::DecisionInvalidSignature)?;
         drop(sysvar_data_ref);
@@ -466,7 +489,10 @@ impl RequestSignature {
             &user_pubkey,
             signature_scheme,
         );
-        require!(metadata_digest == expected_metadata_digest, FHEError::AuthFailed);
+        require!(
+            metadata_digest == expected_metadata_digest,
+            FHEError::AuthFailed
+        );
         require!(
             validate_ika_cpi_accounts(
                 &self.dwallet_program.to_account_view(),
@@ -521,19 +547,23 @@ pub struct AdminAction {
 impl AdminAction {
     fn run<F>(&mut self, expected_nonce: u64, build_challenge: F) -> Result<(), ProgramError>
     where
-        F: FnOnce(&Address, &Address, &[u8; MEMBER_SLOT_LEN], u64) -> [u8; 32],
+        F: FnOnce(
+            &Address,
+            &Address,
+            &[u8; MEMBER_SLOT_LEN],
+            u64,
+        ) -> Result<[u8; 32], HumanMessageError>,
     {
         let dwallet_addr = *self.dwallet_account.address();
         let policy_addr = *self.policy.address();
         let owner_slot = self.policy.owner_slot;
         let on_chain_nonce: u64 = self.policy.next_admin_nonce.into();
-        let challenge = build_challenge(&dwallet_addr, &policy_addr, &owner_slot, on_chain_nonce);
+        let challenge = build_challenge(&dwallet_addr, &policy_addr, &owner_slot, on_chain_nonce)
+            .map_err(FHEError::from)?;
 
         check_sysvar_addr(self.instructions_sysvar.address())?;
         let sysvar_view = self.instructions_sysvar.to_account_view();
-        let sysvar_data_ref = sysvar_view
-            .try_borrow()
-            .map_err(|_| FHEError::AuthFailed)?;
+        let sysvar_data_ref = sysvar_view.try_borrow().map_err(|_| FHEError::AuthFailed)?;
 
         let new_nonce = verify_owner_admin(
             expected_nonce,
