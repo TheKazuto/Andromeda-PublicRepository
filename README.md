@@ -84,7 +84,7 @@ Capabilities beyond the core Ika and Encrypt primitives: the surrounding product
 - **Recovery layer (primary + M-of-N quorum).** Primary single-sig flow plus multi-tx PDA staging quorum. No bound on quorum size.
 - **Cross-chain recovery schemes.** 7 off-chain ownership-proof schemes plus 4 on-chain credential schemes, all validated by Solana precompiles. Zero attestor.
 - **On-chain RulesPolicy.** Quasar program that holds dWallet authority with the policy PDA seeded by an init-authority hash (front-running protected), the Solana clock as the only time source, and strict pattern matching on the WebAuthn challenge field.
-- **Clear signing on every governance approval.** 40 templates render a deterministic ASCII message the approver reads before signing; the on-chain program recomputes the same text and embeds it into the challenge hash, so a compromised gateway cannot swap destination, member, amount, nonce or session without the approver seeing the swap. See [`Gitbook/security/clear-signing.md`](Gitbook/security/clear-signing.md).
+- **Clear signing on every governance approval.** 40 templates render a deterministic ASCII message the approver reads before signing; the on-chain program recomputes the same text and embeds it into the challenge hash, so a compromised gateway cannot swap destination, member, amount, nonce or session without the approver seeing the swap.
 
 ### Policy templates
 - **8 Quasar policy templates.** rules-policy, allowlist-destinations, velocity-guard, time-lock, oracle-conditional, passkey-step-up, fhe-gated, session-keys. All audited, all wallet-agnostic.
