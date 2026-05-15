@@ -53,10 +53,3 @@ deepHealthRoutes.get('/cache', async (c) => {
   const ok = await cachePing();
   return c.json({ enabled: true, ok });
 });
-
-/**
- * Backwards-compatible alias kept for existing dashboards: `healthRoutes`
- * still serves the public surface so `app.route('/health', healthRoutes)`
- * keeps working without refactor in callers other than server.ts.
- */
-export const healthRoutes = publicHealthRoutes;

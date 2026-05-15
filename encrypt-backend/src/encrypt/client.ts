@@ -98,10 +98,6 @@ function normalizeGrpcUrl(url: string): string {
   return url.replace(/^https?:\/\//, '');
 }
 
-export async function getEncryptClient(): Promise<RawEncryptClient> {
-  return loadClient();
-}
-
 export async function callCreateInput(args: CreateInputArgs): Promise<CreateInputResult> {
   const client = await loadClient();
   try {

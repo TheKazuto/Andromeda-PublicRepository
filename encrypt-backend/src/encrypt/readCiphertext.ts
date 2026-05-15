@@ -16,7 +16,7 @@
 import { callReadCiphertext } from './client.js';
 import { cacheGet, cacheSet, cacheKeys } from '../cache/redis.js';
 import { config } from '../config.js';
-import { encodeBase64, decodeBase64 } from '../lib/validation.js';
+import { encodeBase64 } from '../lib/validation.js';
 
 export type ReadCiphertextInput = {
   message: Uint8Array;
@@ -61,5 +61,3 @@ export async function readCiphertext(input: ReadCiphertextInput): Promise<ReadCi
 
   return { ...out, cached: false };
 }
-
-export { decodeBase64 };

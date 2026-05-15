@@ -108,11 +108,6 @@ export function prefetchBlockhash(): Promise<CachedBlockhash> {
   return getCachedBlockhash();
 }
 
-/** Test/ops hook: invalidate the in-process blockhash cache. */
-export function invalidateBlockhashCache(): void {
-  cachedBlockhash = null;
-}
-
 const DEFAULT_PRIORITY_FEE = BigInt(config.SOLANA_DEFAULT_PRIORITY_FEE_MICROLAMPORTS);
 
 /**

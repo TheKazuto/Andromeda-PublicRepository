@@ -39,14 +39,3 @@ export function decodeBase64Sized(input: string, size: number, field: string): U
 export function encodeBase64(input: Uint8Array | Readonly<Uint8Array>): string {
   return Buffer.from(input as Uint8Array).toString('base64');
 }
-
-// Helper: parse hex string into Uint8Array (zero-copy view).
-export function decodeHex(input: string): Uint8Array {
-  const clean = input.startsWith('0x') ? input.slice(2) : input;
-  const buf = Buffer.from(clean, 'hex');
-  return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
-}
-
-export function encodeHex(input: Uint8Array): string {
-  return Buffer.from(input).toString('hex');
-}

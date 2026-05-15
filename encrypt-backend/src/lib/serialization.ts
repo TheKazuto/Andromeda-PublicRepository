@@ -67,14 +67,3 @@ export class ByteWriter {
     return out;
   }
 }
-
-export function concatBytes(...arrays: Uint8Array[]): Uint8Array {
-  const totalLength = arrays.reduce((acc, a) => acc + a.length, 0);
-  const out = new Uint8Array(totalLength);
-  let offset = 0;
-  for (const arr of arrays) {
-    out.set(arr, offset);
-    offset += arr.length;
-  }
-  return out;
-}
