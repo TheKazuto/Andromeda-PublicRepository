@@ -92,6 +92,17 @@ func (s *Server) proxyHandler(route routes.Route) http.HandlerFunc {
 		if a != nil && a.User != nil {
 			r.Header.Set("X-Andromeda-User-Id", a.User.ID)
 		}
+		// Per-key allowlist of `scheme://host[:port]` origins. Already
+		// enforced for CORS by the auth middleware; we propagate the
+		// list to upstreams so passkey flows (Keyspring) can derive
+		// rpId / rpOrigin per tenant without a separate config surface.
+		// CSV — header omitted when the key has no restriction.
+		if a != nil && a.APIKey != nil {
+			r.Header.Set("X-Andromeda-Api-Key-Id", a.APIKey.ID)
+			if len(a.APIKey.AllowedOrigins) > 0 {
+				r.Header.Set("X-Andromeda-Allowed-Origins", strings.Join(a.APIKey.AllowedOrigins, ","))
+			}
+		}
 
 		rec := chimw.NewWrapResponseWriter(w, r.ProtoMajor)
 		target.Proxy.ServeHTTP(rec, r)
