@@ -72,8 +72,16 @@ pub const MAX_SCHEME: u8 = SCHEME_WEBAUTHN;
 pub const MEMBER_SLOT_LEN: usize = 34;
 
 /// Hard caps for WebAuthn payloads carried inside a `quorum_session_contribute`
-/// instruction. These bound the on-chain compute cost and stack usage.
-pub const WEBAUTHN_AUTH_DATA_MAX: usize = 64;
+/// instruction or a passkey-primary session flow. These bound the on-chain
+/// compute cost and stack usage.
+///
+/// `WEBAUTHN_AUTH_DATA_MAX` was raised from 64 to 192 in 2026-05-14 (Fase 0
+/// spike D13) after Samsung Pass (Android, AAGUID `53414d53554e47...`)
+/// returned `authData = 84 bytes` in `.get()` with PRF + ED flag active.
+/// The 192-byte cap leaves ~2.3x margin over the observed value to cover
+/// future authenticators with multiple active extensions without requiring
+/// another on-chain redeploy.
+pub const WEBAUTHN_AUTH_DATA_MAX: usize = 192;
 pub const WEBAUTHN_CLIENT_DATA_JSON_MAX: usize = 192;
 pub const WEBAUTHN_MESSAGE_MAX: usize = WEBAUTHN_AUTH_DATA_MAX + 32;
 

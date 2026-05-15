@@ -63,6 +63,14 @@ pub const OP_QUORUM_CONTRIBUTE: &[u8] = b"quorum-contribute";
 pub const OP_OIDC_SESSION_OPEN: &[u8] = b"oidc-session-open";
 pub const OP_OIDC_PRIMARY_USE: &[u8] = b"oidc-primary-use";
 
+// Passkey-primary session flow (D1 Opção A — `SCHEME_WEBAUTHN = 3`). Mirrors
+// the OIDC session pattern: open a short-lived session via WebAuthn
+// assertion + commit an ephemeral Ed25519 key, then authorize each use via
+// a fresh Ed25519 precompile signature from that ephemeral key. The
+// WebAuthn assertion itself is verified via the Secp256r1 precompile.
+pub const OP_PASSKEY_SESSION_OPEN: &[u8] = b"passkey-session-open";
+pub const OP_PASSKEY_PRIMARY_USE: &[u8] = b"passkey-primary-use";
+
 // Admin flow tags (primary signs)
 pub const OP_ADMIN_ADD_MEMBER: &[u8] = b"admin-add-member";
 pub const OP_ADMIN_REMOVE_MEMBER: &[u8] = b"admin-remove-member";
@@ -978,6 +986,162 @@ pub fn oidc_primary_use_challenge_with_rendered_message(
     hashv(&[
         DOMAIN,
         OP_OIDC_PRIMARY_USE,
+        &h_len,
+        human,
+        session.as_array().as_slice(),
+        dwallet.as_array().as_slice(),
+        message_approval.as_array().as_slice(),
+        message_digest,
+        metadata_digest,
+        user_pubkey,
+        &scheme_le,
+        &bump,
+        &nonce_le,
+        primary_slot,
+    ])
+}
+
+// ── Passkey-primary session flow (D1 Opção A) ───────────────────────────
+//
+// Mirrors the OIDC session pattern. Differences from OIDC:
+//
+//  * No JWT-side trust root (`jwk_registry`/`verifier_version`) — the
+//    WebAuthn assertion is self-contained and verified via the Secp256r1
+//    precompile + `clientDataJSON` parse.
+//  * `credential_id_hash` (`sha256(credentialId)`) takes the place of
+//    `jwt_digest` as the binding to a specific credential.
+//  * Primary slot is `[SCHEME_WEBAUTHN, credential_public_key(33), 0]` —
+//    the 33-byte compressed secp256r1 pubkey of the passkey credential.
+//
+// Both challenges embed the rendered human-readable message (clear signing
+// v2) and a domain tag (`OP_PASSKEY_SESSION_OPEN` / `OP_PASSKEY_PRIMARY_USE`)
+// so they cannot be replayed across operations.
+
+/// Returns the challenge hash that the user's WebAuthn passkey must sign at
+/// `passkey_session_open`. Binds the dWallet, the WebAuthn credential
+/// (`credential_id_hash` + `primary_slot` carrying the credential pubkey),
+/// the ephemeral Ed25519 key that will authorize subsequent uses, the
+/// effective expiry, and the policy's `next_passkey_session_nonce`.
+///
+/// Replay protection: the policy nonce is monotonic and consumed once per
+/// open. Cross-policy / cross-dwallet replay blocked by `dwallet` /
+/// `primary_slot` / `DOMAIN`.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub fn passkey_session_open_challenge(
+    dwallet: &Address,
+    primary_slot: &[u8; 34],
+    eph_pk: &[u8; 32],
+    not_after_unix_ts: u64,
+    credential_id_hash: &[u8; 32],
+    session_nonce: u64,
+) -> Result<[u8; 32], HumanMessageError> {
+    let mut msg = [0u8; MAX_HUMAN_MESSAGE_BYTES];
+    let len =
+        human_message::passkey_session_open_message(&mut msg, dwallet, not_after_unix_ts, eph_pk)?;
+    Ok(passkey_session_open_challenge_with_rendered_message(
+        &msg[..len],
+        dwallet,
+        primary_slot,
+        eph_pk,
+        not_after_unix_ts,
+        credential_id_hash,
+        session_nonce,
+    ))
+}
+
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub fn passkey_session_open_challenge_with_rendered_message(
+    human: &[u8],
+    dwallet: &Address,
+    primary_slot: &[u8; 34],
+    eph_pk: &[u8; 32],
+    not_after_unix_ts: u64,
+    credential_id_hash: &[u8; 32],
+    session_nonce: u64,
+) -> [u8; 32] {
+    let h_len = human_len_le(human);
+    let not_after_le = not_after_unix_ts.to_le_bytes();
+    let nonce_le = session_nonce.to_le_bytes();
+    hashv(&[
+        DOMAIN,
+        OP_PASSKEY_SESSION_OPEN,
+        &h_len,
+        human,
+        dwallet.as_array().as_slice(),
+        primary_slot,
+        eph_pk,
+        &not_after_le,
+        credential_id_hash,
+        &nonce_le,
+    ])
+}
+
+/// Returns the challenge hash that the user's ephemeral Ed25519 key must sign
+/// for each `recover_as_primary_passkey_session` call. Single-use per session
+/// via `use_nonce` (monotonic, advanced before the CPI).
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub fn passkey_primary_use_challenge(
+    session: &Address,
+    dwallet: &Address,
+    message_approval: &Address,
+    message_digest: &[u8; 32],
+    metadata_digest: &[u8; 32],
+    user_pubkey: &[u8; 32],
+    signature_scheme: u16,
+    message_approval_bump: u8,
+    use_nonce: u64,
+    primary_slot: &[u8; 34],
+) -> Result<[u8; 32], HumanMessageError> {
+    let mut msg = [0u8; MAX_HUMAN_MESSAGE_BYTES];
+    let len = human_message::passkey_primary_use_message(
+        &mut msg,
+        session,
+        dwallet,
+        message_digest,
+        metadata_digest,
+        user_pubkey,
+        signature_scheme,
+    )?;
+    Ok(passkey_primary_use_challenge_with_rendered_message(
+        &msg[..len],
+        session,
+        dwallet,
+        message_approval,
+        message_digest,
+        metadata_digest,
+        user_pubkey,
+        signature_scheme,
+        message_approval_bump,
+        use_nonce,
+        primary_slot,
+    ))
+}
+
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub fn passkey_primary_use_challenge_with_rendered_message(
+    human: &[u8],
+    session: &Address,
+    dwallet: &Address,
+    message_approval: &Address,
+    message_digest: &[u8; 32],
+    metadata_digest: &[u8; 32],
+    user_pubkey: &[u8; 32],
+    signature_scheme: u16,
+    message_approval_bump: u8,
+    use_nonce: u64,
+    primary_slot: &[u8; 34],
+) -> [u8; 32] {
+    let h_len = human_len_le(human);
+    let scheme_le = signature_scheme.to_le_bytes();
+    let bump = [message_approval_bump];
+    let nonce_le = use_nonce.to_le_bytes();
+    hashv(&[
+        DOMAIN,
+        OP_PASSKEY_PRIMARY_USE,
         &h_len,
         human,
         session.as_array().as_slice(),

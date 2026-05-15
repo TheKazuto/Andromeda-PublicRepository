@@ -727,6 +727,47 @@ pub fn oidc_primary_use_message(
     Ok(w.len())
 }
 
+pub fn passkey_session_open_message(
+    out: &mut [u8; MAX_HUMAN_MESSAGE_BYTES],
+    dwallet: &Address,
+    not_after_unix_ts: u64,
+    eph_pk: &[u8; 32],
+) -> Result<usize, HumanMessageError> {
+    let mut w = MsgWriter::new(out);
+    w.write_str("Open passkey session for dWallet ")?;
+    w.write_base58_32(dwallet.as_array())?;
+    w.write_str(" until ")?;
+    w.write_u64_dec(not_after_unix_ts)?;
+    w.write_str(" using ephemeral key ")?;
+    w.write_hex_lower(eph_pk)?;
+    Ok(w.len())
+}
+
+pub fn passkey_primary_use_message(
+    out: &mut [u8; MAX_HUMAN_MESSAGE_BYTES],
+    session: &Address,
+    dwallet: &Address,
+    message_digest: &[u8; 32],
+    metadata_digest: &[u8; 32],
+    user_pubkey: &[u8; 32],
+    signature_scheme: u16,
+) -> Result<usize, HumanMessageError> {
+    let mut w = MsgWriter::new(out);
+    w.write_str("Authorize passkey session ")?;
+    w.write_base58_32(session.as_array())?;
+    w.write_str(" for dWallet ")?;
+    w.write_base58_32(dwallet.as_array())?;
+    w.write_str(" message ")?;
+    w.write_hex_lower(message_digest)?;
+    w.write_str(" metadata ")?;
+    w.write_hex_lower(metadata_digest)?;
+    w.write_str(" scheme ")?;
+    w.write_u16_dec(signature_scheme)?;
+    w.write_str(" user ")?;
+    w.write_hex_lower(user_pubkey)?;
+    Ok(w.len())
+}
+
 // ── Phase 2: allowlist-destinations admin (4) ────────────────────
 
 pub fn allowlist_add_destination_message(
