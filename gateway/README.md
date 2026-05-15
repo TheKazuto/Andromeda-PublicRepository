@@ -32,7 +32,8 @@ gateway/
 ├── cmd/server/             # main.go entrypoint
 ├── internal/
 │   ├── api/                # HTTP handlers
-│   ├── auth/               # API key auth, scopes, IP + Origin allowlist, andromeda_auth Go mirror
+│   ├── auth/               # API key auth, scopes, IP + Origin allowlist, andromeda_auth Go mirror, clear-signing
+│   ├── oauth/              # OAuth broker handlers (Login Social — Google + Apple, Authorization Code + PKCE)
 │   ├── routes/             # Route catalogue (REST + MCP source of truth)
 │   ├── upstream/           # Reverse-proxy to ika + encrypt engines
 │   ├── pricing/            # Token cost cache (pricer worker)
@@ -40,9 +41,9 @@ gateway/
 │   ├── idempotency/        # Idempotency-Key store
 │   ├── usage/              # Async usage log writer
 │   ├── webhooks/           # CRUD + dispatcher worker (HMAC + retries)
-│   ├── policies/           # 8 Quasar policy templates (Go side)
+│   ├── policies/           # 8 Quasar policy templates (Go side) + /v1/confidential/sign
 │   ├── futuresign/         # Trigger watcher (oracle/slot/event/external)
-│   ├── audit/              # Per-tenant ed25519 hash chain
+│   ├── audit/              # Per-tenant ed25519 hash chain (env or Vault Transit signer)
 │   ├── netsafety/          # SSRF guard for outbound URLs
 │   ├── mcp/                # MCP JSON-RPC + SSE server
 │   ├── gasponsor/          # Solana fee payer keypair
@@ -51,6 +52,7 @@ gateway/
 │   ├── openapi/            # Auto-generated OpenAPI 3.1
 │   ├── store/              # Postgres + migrations
 │   ├── redisclient/        # Redis pool
+│   ├── httpx/              # Small JSON response helper
 │   └── config/             # Env loader
 ├── openapi.yaml
 ├── Dockerfile
@@ -100,7 +102,7 @@ bodies are capped at 25 MiB.
 | **Wallet (private)** | `wallet/balance/init` | write | encrypt |
 | **Authority / Fees / Ownership** | `authority/{add,remove,register-nek}/prepare`, `fees/deposit/{create,top-up,withdraw,request-withdraw,reimburse}/prepare`, `fees/config/update/prepare`, `ownership/{transfer,copy,make-public}/prepare` | write | encrypt |
 | **Webhooks** | CRUD + retry | admin | gateway |
-| **Audit log** | per-tenant signed hash-chain read | admin | gateway |
+| **Audit log** | `GET audit/log`, `GET audit/log/export`, `GET audit/log/verify`, `GET audit/log/{seq}/proof` — per-tenant signed hash-chain (read + export + verify + Merkle proof). The `verify` response also carries the tenant's ed25519 `publicKeyB64` so external replayers can re-check signatures. | admin | gateway |
 | **Future-sign triggers** | oracle / slot / event / external watchers | admin | gateway |
 | **Policies** | 8 Quasar templates: rules-policy, allowlist-destinations, velocity-guard, time-lock, oracle-conditional, passkey-step-up, fhe-gated, session-keys. Endpoints: `templates`, `init`, `admin/challenge`, `admin/submit`, `request-signature`. Wallet-agnostic + gas-sponsored. | admin | gateway |
 | **SDK metadata** | `GET /v1/policies/{address}/sdk` → typed TypeScript SDK tarball location | admin | gateway |
@@ -305,7 +307,7 @@ service and the gift observer moved to the `backend/` service (architecture spli
 ### Audit signing
 | Var | Notes |
 |-----|-------|
-| `ANDROMEDA_AUDIT_SIGNER` | `env` (default, dev) or `vault` (HashiCorp Vault Transit, ed25519). In `production` with `env`, a loud warning is logged — migrate to `vault`. With `vault`: the gateway never holds the private key; each audit entry is signed via Vault Transit `sign/<key-name>/sha2-256` calls (`andromeda-audit` key, ed25519). Required envs: `VAULT_ADDR`, `VAULT_TOKEN` (short-TTL, auto-renewed), `VAULT_AUDIT_KEY_NAME` (defaults to `andromeda-audit`). Per-tenant public key is exposed at `/v1/audit/public-key` so external verifiers can replay the chain. |
+| `ANDROMEDA_AUDIT_SIGNER` | `env` (default, dev) or `vault` (HashiCorp Vault Transit, ed25519). In `production` with `env`, a loud warning is logged — migrate to `vault`. With `vault`: the gateway never holds the private key; each audit entry is signed via Vault Transit `sign/<key-name>/sha2-256` calls (`andromeda-audit` key, ed25519). Required envs: `ANDROMEDA_AUDIT_VAULT_{ADDR,TOKEN,KEY_NAME,PUBKEY_B64}` (all-or-nothing — see below). The tenant's audit public key is returned by `GET /v1/audit/log/verify` so external verifiers can replay the chain. |
 | `ANDROMEDA_AUDIT_PRIVATE_KEY` | Base64 ed25519 (32-byte seed or 64-byte key). Used only when signer = `env`. Falls back to an ephemeral key if empty in dev. |
 | `ANDROMEDA_AUDIT_VAULT_{ADDR,TOKEN,KEY_NAME,PUBKEY_B64}` | Required (all-or-nothing) when signer = `vault`. Every signature is locally re-verified against `PUBKEY_B64`. |
 
@@ -318,6 +320,21 @@ service and the gift observer moved to the `backend/` service (architecture spli
 | `ANDROMEDA_TEMPLATE_PROGRAM_IDS_JSON` | `{"template-name":"program-id"}` map for the 8 deployed templates. A template missing here is still listed by `/v1/policies/templates` but `deploy`/`request-signature` return `503`. |
 | `ANDROMEDA_GAS_SPONSOR_KEYPAIR` | JSON byte array (64 B, `solana-keygen` format). Gateway pays gas for every policy/recovery Solana tx so users never need a Solana wallet. Never commit it; keep it funded. |
 | `ANDROMEDA_SDK_BASE_URL` + `ANDROMEDA_SDK_VERSION_TAG` | SDK-tarball location for `GET /v1/policies/{address}/sdk`. Tag defaults to `sdk-v0.1.0`. |
+
+### OAuth broker — Login Social (opt-in)
+
+Mounts `GET /v1/oauth/authorize`, `GET /v1/oauth/callback` and `POST /v1/oauth/token-exchange`. Boot fails if `OAUTH_BROKER_ENABLED=true` without `BASE_URL` (`https://` in production), `STATE_HMAC_SECRET` (≥32 bytes), `REDIS_URL`, and at least one provider configured.
+
+| Var | Default | Notes |
+|-----|---------|-------|
+| `OAUTH_BROKER_ENABLED` | `false` | Master flag. |
+| `OAUTH_BROKER_BASE_URL` | empty | Public base URL of the gateway (used to build the callback URI). Must start with `https://` in production. |
+| `OAUTH_BROKER_STATE_HMAC_SECRET` | empty | ≥32 bytes. HMAC over the OAuth `state` payload (CSRF + replay protection). |
+| `OAUTH_BROKER_CODE_TTL_SECONDS` | `60` | Lifetime of the short-lived gateway code returned to the tenant app. Allowed range `[30, 300]`. |
+| `OAUTH_BROKER_GOOGLE_ENABLED` | `false` | Accept Google. |
+| `OAUTH_BROKER_GOOGLE_CLIENT_ID` / `OAUTH_BROKER_GOOGLE_CLIENT_SECRET` | empty | Google OAuth client. Required when Google is enabled. |
+| `OAUTH_BROKER_APPLE_ENABLED` | `false` | Accept Apple. |
+| `OAUTH_BROKER_APPLE_SERVICE_ID` / `OAUTH_BROKER_APPLE_TEAM_ID` / `OAUTH_BROKER_APPLE_KEY_ID` / `OAUTH_BROKER_APPLE_PRIVATE_KEY` | empty | Apple Sign-In credentials. All four required when Apple is enabled. `TEAM_ID` / `KEY_ID` are typically 10 chars. |
 
 ### OpenTelemetry (opt-in)
 | Var | Notes |
