@@ -28,6 +28,7 @@ type Props = {
 
 export function OAuthButtons({ intent }: Props) {
   const [providers, setProviders] = useState<AuthProviders | null>(null);
+  const [redirecting, setRedirecting] = useState<"google" | "github" | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -46,6 +47,12 @@ export function OAuthButtons({ intent }: Props) {
   const verbGoogle = intent === "signup" ? "Sign up with Google" : "Continue with Google";
   const verbGitHub = intent === "signup" ? "Sign up with GitHub" : "Continue with GitHub";
 
+  function startProvider(provider: "google" | "github") {
+    if (redirecting) return;
+    setRedirecting(provider);
+    window.location.href = oauthStartURL(provider);
+  }
+
   if (!providers) {
     return (
       <div className="flex flex-col gap-2.5">
@@ -60,16 +67,26 @@ export function OAuthButtons({ intent }: Props) {
   return (
     <div className="flex flex-col gap-2.5">
       {providers.google && (
-        <a href={oauthStartURL("google")} className="btn-secondary">
+        <button
+          type="button"
+          className="btn-secondary"
+          disabled={redirecting !== null}
+          onClick={() => startProvider("google")}
+        >
           <GoogleIcon />
-          {verbGoogle}
-        </a>
+          {redirecting === "google" ? "Redirecting…" : verbGoogle}
+        </button>
       )}
       {providers.github && (
-        <a href={oauthStartURL("github")} className="btn-secondary">
+        <button
+          type="button"
+          className="btn-secondary"
+          disabled={redirecting !== null}
+          onClick={() => startProvider("github")}
+        >
           <GitHubIcon />
-          {verbGitHub}
-        </a>
+          {redirecting === "github" ? "Redirecting…" : verbGitHub}
+        </button>
       )}
       <div className="flex items-center gap-3 my-3">
         <div className="flex-1 h-px bg-white/[0.06]" />

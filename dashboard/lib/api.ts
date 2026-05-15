@@ -24,8 +24,9 @@
 //
 // A short-lived `localStorage` migration shim (LEGACY_TOKEN_KEY) reads any
 // pre-Wave-3 token left behind by older builds, copies it to memory,
-// and immediately wipes the entry. This keeps logged-in users from being
-// signed out the day the new build deploys.
+// and immediately wipes the entry. Triggered from the boot path *and*
+// from `setToken`, so any OAuth/login that lands first still cleans the
+// stale entry.
 
 const BACKEND_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
 const GATEWAY_BASE = process.env.NEXT_PUBLIC_GATEWAY_URL || "http://localhost:8081";
@@ -58,6 +59,15 @@ export class APIError extends Error {
 let memoryToken: string | null = null;
 let migrationDone = false;
 
+function clearLegacyToken(): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.removeItem(LEGACY_TOKEN_KEY);
+  } catch {
+    /* localStorage unavailable in restricted contexts — ignore */
+  }
+}
+
 function migrateLegacyToken(): void {
   if (migrationDone || typeof window === "undefined") return;
   migrationDone = true;
@@ -78,6 +88,11 @@ function getToken(): string | null {
 }
 
 export function setToken(token: string): void {
+  // Mark migration as done and proactively scrub the legacy entry so a
+  // fresh login (e.g. OAuth callback) can never leave a stale long-lived
+  // token sitting in localStorage.
+  migrationDone = true;
+  clearLegacyToken();
   memoryToken = token;
 }
 
@@ -92,14 +107,29 @@ export function hasToken(): boolean {
 // ----- Refresh / logout -----
 
 let refreshInflight: Promise<boolean> | null = null;
-let onSessionLost: (() => void) | null = null;
 
-/** registerSessionLostHandler lets the app shell wire up a redirect to the
- * login page when the refresh attempt fails. Called once from the root
- * layout. The dashboard is responsible for navigation — this layer just
- * fires the callback. */
-export function registerSessionLostHandler(fn: () => void): void {
-  onSessionLost = fn;
+type SessionLostListener = () => void;
+const sessionLostListeners = new Set<SessionLostListener>();
+
+/** registerSessionLostHandler lets one or more views (root layout, admin
+ * console, etc.) react when the refresh attempt fails. Returns an
+ * unsubscribe function so the caller can clean up on unmount — required
+ * to avoid stale handlers redirecting users to the wrong route. */
+export function registerSessionLostHandler(fn: SessionLostListener): () => void {
+  sessionLostListeners.add(fn);
+  return () => {
+    sessionLostListeners.delete(fn);
+  };
+}
+
+function emitSessionLost(): void {
+  sessionLostListeners.forEach((fn) => {
+    try {
+      fn();
+    } catch {
+      /* one bad listener should not break the others */
+    }
+  });
 }
 
 /** refreshSession swaps the HttpOnly cookie for a new access JWT. Returns
@@ -117,7 +147,7 @@ export async function refreshSession(): Promise<boolean> {
       if (!res.ok) return false;
       const data = (await res.json()) as { token?: string };
       if (!data.token) return false;
-      memoryToken = data.token;
+      setToken(data.token);
       return true;
     } catch {
       return false;
@@ -174,9 +204,27 @@ type FetchOpts = {
   method?: "GET" | "POST" | "PATCH" | "DELETE";
   body?: unknown;
   auth?: boolean;
+  // Lets callers cancel a request when their component unmounts.
+  signal?: AbortSignal;
 };
 
-async function doFetch<T>(base: string, path: string, opts: FetchOpts, attempted = false): Promise<T> {
+// Narrow an `unknown` response body to the standard `{ error, code }` shape
+// without trusting arbitrary fields.
+function readErrorBody(data: unknown): { message?: string; code?: string } {
+  if (typeof data !== "object" || data === null) return {};
+  const obj = data as Record<string, unknown>;
+  const out: { message?: string; code?: string } = {};
+  if (typeof obj.error === "string") out.message = obj.error;
+  if (typeof obj.code === "string") out.code = obj.code;
+  return out;
+}
+
+async function doFetch<T>(
+  base: string,
+  path: string,
+  opts: FetchOpts,
+  attempted = false,
+): Promise<T> {
   const headers: Record<string, string> = {};
 
   if (opts.body !== undefined) {
@@ -196,21 +244,26 @@ async function doFetch<T>(base: string, path: string, opts: FetchOpts, attempted
     // include the HttpOnly refresh cookie on every call so /v1/auth/refresh
     // can rotate it transparently when the access JWT is stale.
     credentials: "include",
+    signal: opts.signal,
   });
 
-  // 401 with auth=true: try the refresh once, then retry.
+  // 401 with auth=true: try the refresh once, then retry. If refresh fails,
+  // wipe local state, notify listeners, and throw — never fall through to
+  // the JSON parse below, which would yield a confusing "Request failed
+  // (401)" while the router is already redirecting to /login.
   if (res.status === 401 && opts.auth !== false && !attempted) {
     const refreshed = await refreshSession();
     if (refreshed) {
       return doFetch<T>(base, path, opts, true);
     }
     clearToken();
-    if (onSessionLost) onSessionLost();
+    emitSessionLost();
+    throw new APIError(401, "Session expired", "session_lost");
   }
 
   if (res.status === 204) return undefined as T;
 
-  let data: any = null;
+  let data: unknown = null;
   try {
     data = await res.json();
   } catch {
@@ -218,9 +271,9 @@ async function doFetch<T>(base: string, path: string, opts: FetchOpts, attempted
   }
 
   if (!res.ok) {
-    const msg = (data && data.error) || `Request failed (${res.status})`;
-    const code = (data && data.code) || "";
-    throw new APIError(res.status, msg, code);
+    const body = readErrorBody(data);
+    const msg = body.message ?? `Request failed (${res.status})`;
+    throw new APIError(res.status, msg, body.code ?? "");
   }
   return data as T;
 }

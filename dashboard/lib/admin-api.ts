@@ -71,6 +71,8 @@ type FetchOpts = {
   // Defaults to true. Set false for /admin/auth/login.
   auth?: boolean;
   query?: Record<string, string | number | undefined>;
+  // Lets callers cancel a request when their component unmounts.
+  signal?: AbortSignal;
 };
 
 export async function adminApi<T>(path: string, opts: FetchOpts = {}): Promise<T> {
@@ -102,6 +104,7 @@ export async function adminApi<T>(path: string, opts: FetchOpts = {}): Promise<T
     headers,
     body: opts.body ? JSON.stringify(opts.body) : undefined,
     cache: "no-store",
+    signal: opts.signal,
   });
 
   if (res.status === 204) return undefined as T;

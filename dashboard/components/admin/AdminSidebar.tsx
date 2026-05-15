@@ -1,8 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
+import { useRouter } from "next/navigation";
 import clsx from "clsx";
+import { useNormalizedPathname } from "@/lib/use-normalized-pathname";
 import {
   LayoutDashboard,
   Users,
@@ -41,10 +42,7 @@ interface AdminSidebarProps {
 }
 
 export function AdminSidebar({ me }: AdminSidebarProps) {
-  const rawPathname = usePathname();
-  // `next.config.js` uses `trailingSlash: true`; strip it so exact matches
-  // against the canonical paths in `NAV` still hit.
-  const pathname = (rawPathname ?? "").replace(/\/+$/, "") || "/";
+  const pathname = useNormalizedPathname();
   const router = useRouter();
 
   const items = NAV.filter((item) => {

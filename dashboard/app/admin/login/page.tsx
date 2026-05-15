@@ -10,6 +10,7 @@ import {
   hasAdminToken,
   AdminAPIError,
 } from "@/lib/admin-api";
+import { errorMessage } from "@/lib/format";
 
 type Stage = "credentials" | "totp";
 
@@ -52,7 +53,7 @@ export default function AdminLoginPage() {
         setError(err.message || "Sign in failed");
         return;
       }
-      setError("Sign in failed");
+      setError(errorMessage(err, "Sign in failed"));
     } finally {
       setLoading(false);
     }

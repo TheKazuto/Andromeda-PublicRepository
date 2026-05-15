@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Search, Save } from "lucide-react";
 import { PageHeader } from "@/components/admin/PageHeader";
 import { adminCosts, type AdminRequestCost } from "@/lib/admin-api";
+import { errorMessage } from "@/lib/format";
 
 export default function AdminCostsPage() {
   const [items, setItems] = useState<AdminRequestCost[]>([]);
@@ -23,14 +24,32 @@ export default function AdminCostsPage() {
       );
       setItems(sorted);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Load failed");
+      setError(errorMessage(err, "Load failed"));
     } finally {
       setLoading(false);
     }
   }
 
   useEffect(() => {
-    load();
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      try {
+        const data = await adminCosts.list();
+        if (cancelled) return;
+        const sorted = [...data.items].sort((a, b) =>
+          a.routeKey.localeCompare(b.routeKey)
+        );
+        setItems(sorted);
+      } catch (err) {
+        if (!cancelled) setError(errorMessage(err, "Load failed"));
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const filtered = useMemo(() => {
@@ -45,7 +64,7 @@ export default function AdminCostsPage() {
 
   async function save(routeKey: string) {
     const v = pending[routeKey];
-    if (typeof v !== "number" || v <= 0) return;
+    if (typeof v !== "number" || !Number.isFinite(v) || v <= 0) return;
     setSavingKey(routeKey);
     setMessage(null);
     try {
@@ -58,7 +77,7 @@ export default function AdminCostsPage() {
       setMessage(`Saved cost for ${routeKey}.`);
       await load();
     } catch (err) {
-      setMessage(err instanceof Error ? err.message : "Save failed");
+      setMessage(errorMessage(err, "Save failed"));
     } finally {
       setSavingKey(null);
     }
@@ -122,6 +141,9 @@ export default function AdminCostsPage() {
                         value={value}
                         onChange={(e) => {
                           const n = Number(e.target.value);
+                          // Reject NaN so the input never feeds the save guard
+                          // with `Number.isFinite === false`.
+                          if (e.target.value !== "" && !Number.isFinite(n)) return;
                           setPending((p) => ({ ...p, [it.routeKey]: n }));
                         }}
                         className="input-base w-24 text-right"

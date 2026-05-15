@@ -9,6 +9,7 @@ import {
   type AdminMe,
   type AdminRole,
 } from "@/lib/admin-api";
+import { errorMessage } from "@/lib/format";
 
 export default function AdminUsersPage() {
   const [items, setItems] = useState<AdminMe[]>([]);
@@ -33,14 +34,32 @@ export default function AdminUsersPage() {
         setError("Only super_admin can manage admin accounts.");
         return;
       }
-      setError(err instanceof Error ? err.message : "Load failed");
+      setError(errorMessage(err, "Load failed"));
     } finally {
       setLoading(false);
     }
   }
 
   useEffect(() => {
-    load();
+    let cancelled = false;
+    (async () => {
+      try {
+        const data = await adminUsers.list();
+        if (!cancelled) setItems(data.items);
+      } catch (err) {
+        if (cancelled) return;
+        if (err instanceof AdminAPIError && err.status === 403) {
+          setError("Only super_admin can manage admin accounts.");
+          return;
+        }
+        setError(errorMessage(err, "Load failed"));
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   async function onCreate(e: React.FormEvent) {
@@ -62,7 +81,7 @@ export default function AdminUsersPage() {
       setShowForm(false);
       await load();
     } catch (err) {
-      setFormError(err instanceof Error ? err.message : "Create failed");
+      setFormError(errorMessage(err, "Create failed"));
     } finally {
       setBusy(false);
     }

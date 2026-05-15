@@ -1,6 +1,6 @@
 type Props = {
   label: string;
-  value: string | number;
+  value: string;
   sublabel?: string;
   trend?: { value: string; positive?: boolean };
   Icon?: React.ComponentType<{ size?: number; strokeWidth?: number; className?: string }>;

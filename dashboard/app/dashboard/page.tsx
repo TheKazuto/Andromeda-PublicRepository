@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import {
   Activity,
@@ -14,20 +14,46 @@ import { Topbar } from "@/components/Topbar";
 import { PageTitle } from "@/components/PageTitle";
 import { Stat } from "@/components/Stat";
 import { api, me, type MeUsage, type APIKey } from "@/lib/api";
-import { formatNumber } from "@/lib/format";
+import { errorMessage, formatNumber } from "@/lib/format";
 
 export default function DashboardHome() {
   const [usage, setUsage] = useState<MeUsage | null>(null);
   const [keys, setKeys] = useState<APIKey[]>([]);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    me.usage("30d").then(setUsage).catch(() => {});
+    let cancelled = false;
+    const errors: string[] = [];
+
+    me.usage("30d")
+      .then((u) => {
+        if (!cancelled) setUsage(u);
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        errors.push(errorMessage(e, "Failed to load usage"));
+        setError(errors.join(" · "));
+      });
+
     api<{ items: APIKey[] }>("/v1/api-keys")
-      .then((r) => setKeys(r.items || []))
-      .catch(() => {});
+      .then((r) => {
+        if (!cancelled) setKeys(r.items || []);
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        errors.push(errorMessage(e, "Failed to load API keys"));
+        setError(errors.join(" · "));
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
-  const activeKeys = keys.filter((k) => !k.revokedAt).length;
+  const activeKeys = useMemo(
+    () => keys.filter((k) => !k.revokedAt).length,
+    [keys],
+  );
   const topRoute = usage?.topRoutes?.[0];
 
   return (
@@ -45,6 +71,12 @@ export default function DashboardHome() {
               </Link>
             }
           />
+
+          {error && (
+            <div className="text-xs text-ember-soft bg-ember/10 border border-ember/20 rounded-lg px-3 py-2 mb-6">
+              {error}
+            </div>
+          )}
 
           {/* Stats */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">

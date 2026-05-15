@@ -8,6 +8,7 @@ import {
   type AdminPlan,
   type AdminPlanUpdate,
 } from "@/lib/admin-api";
+import { errorMessage } from "@/lib/format";
 
 export default function AdminPlansPage() {
   const [plans, setPlans] = useState<AdminPlan[]>([]);
@@ -20,14 +21,28 @@ export default function AdminPlansPage() {
       const data = await adminPlans.list();
       setPlans(data.items);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Load failed");
+      setError(errorMessage(err, "Load failed"));
     } finally {
       setLoading(false);
     }
   }
 
   useEffect(() => {
-    load();
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      try {
+        const data = await adminPlans.list();
+        if (!cancelled) setPlans(data.items);
+      } catch (err) {
+        if (!cancelled) setError(errorMessage(err, "Load failed"));
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   return (
@@ -73,10 +88,7 @@ function PlanCard({ plan, onSaved }: PlanCardProps) {
       setDraft({});
       onSaved();
     } catch (err) {
-      setMessage({
-        tone: "error",
-        text: err instanceof Error ? err.message : "Save failed",
-      });
+      setMessage({ tone: "error", text: errorMessage(err, "Save failed") });
     } finally {
       setBusy(false);
     }
@@ -186,7 +198,9 @@ function NumberField({ label, base, onChange }: NumberFieldProps) {
       return;
     }
     const n = Number(v);
-    if (!Number.isFinite(n)) return;
+    // Reject NaN, ±Infinity and negative values — every plan field is a
+    // count (tokens, cents, RPS) and must stay ≥ 0.
+    if (!Number.isFinite(n) || n < 0) return;
     onChange(n);
   }
 

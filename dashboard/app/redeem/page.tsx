@@ -12,6 +12,7 @@ import {
   type GiftPreview,
   type GiftRedeemResp,
 } from "@/lib/api";
+import { errorMessage } from "@/lib/format";
 
 export default function RedeemPage() {
   return (
@@ -73,7 +74,7 @@ function RedeemPageInner() {
             ? err.status === 404
               ? "This gift link is invalid."
               : err.message
-            : "Could not load gift card";
+            : errorMessage(err, "Could not load gift card");
         setError(message);
         setStage("error");
       });
@@ -98,7 +99,7 @@ function RedeemPageInner() {
           setError(err.message);
         }
       } else {
-        setError("Redeem failed");
+        setError(errorMessage(err, "Redeem failed"));
       }
     } finally {
       setBusy(false);

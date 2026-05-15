@@ -12,7 +12,19 @@ const ERROR_MESSAGES: Record<string, string> = {
   token_error: "We couldn't issue a session token.",
   missing_params: "The provider response was incomplete.",
   provider_not_enabled: "This sign-in method isn't enabled.",
+  malformed_token: "The session token in the URL was malformed.",
 };
+
+// Loose JWT shape check: three base64url segments separated by dots, bounded
+// length so we don't accept a giant blob. Cheap defence against an attacker
+// luring the dashboard into `setToken('attacker-controlled')` via a forged
+// `/auth/callback#token=…` link.
+const JWT_RE = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
+const MAX_TOKEN_LEN = 4096;
+
+function isLikelyJwt(token: string): boolean {
+  return token.length > 0 && token.length <= MAX_TOKEN_LEN && JWT_RE.test(token);
+}
 
 export default function AuthCallbackPage() {
   const router = useRouter();
@@ -30,6 +42,10 @@ export default function AuthCallbackPage() {
     const errorCode = params.get("error");
 
     if (token) {
+      if (!isLikelyJwt(token)) {
+        setError(ERROR_MESSAGES.malformed_token);
+        return;
+      }
       setToken(token);
       window.history.replaceState(null, "", window.location.pathname);
       router.replace("/dashboard");

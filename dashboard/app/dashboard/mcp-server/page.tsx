@@ -4,11 +4,15 @@ import { useState } from "react";
 import { Copy, Check, Server, Globe, Sparkles } from "lucide-react";
 import { Topbar } from "@/components/Topbar";
 import { PageTitle } from "@/components/PageTitle";
+import { copyToClipboard } from "@/lib/clipboard";
+
+const MCP_URL =
+  (process.env.NEXT_PUBLIC_GATEWAY_URL || "https://api.andromedainfra.pro") + "/mcp";
 
 const CONFIG = `{
   "mcpServers": {
     "andromeda": {
-      "url": "https://api.andromedainfra.pro/mcp",
+      "url": "${MCP_URL}",
       "headers": {
         "X-Api-Key": "sk_live_..."
       }
@@ -27,9 +31,15 @@ const TOOLS = [
 
 export default function MCPServerPage() {
   const [copied, setCopied] = useState(false);
+  const [copyError, setCopyError] = useState<string | null>(null);
 
-  function copy(text: string) {
-    navigator.clipboard.writeText(text);
+  async function copy(text: string) {
+    const ok = await copyToClipboard(text);
+    if (!ok) {
+      setCopyError("Clipboard blocked — copy manually.");
+      return;
+    }
+    setCopyError(null);
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
   }
@@ -49,7 +59,7 @@ export default function MCPServerPage() {
             <Capability
               Icon={Server}
               title="Hosted endpoint"
-              body="No local install. Point any MCP client to https://api.andromedainfra.pro/mcp and authenticate with your API key."
+              body={`No local install. Point any MCP client to ${MCP_URL} and authenticate with your API key.`}
             />
             <Capability
               Icon={Globe}
@@ -63,6 +73,12 @@ export default function MCPServerPage() {
             />
           </div>
 
+          {copyError && (
+            <div className="text-xs text-ember-soft bg-ember/10 border border-ember/20 rounded-lg px-3 py-2 mb-4">
+              {copyError}
+            </div>
+          )}
+
           {/* Config block */}
           <div className="card overflow-hidden mb-6">
             <div className="flex items-center justify-between px-4 py-2.5 border-b border-white/[0.05] bg-white/[0.02]">
@@ -75,27 +91,7 @@ export default function MCPServerPage() {
               </button>
             </div>
             <pre className="font-mono text-[13px] leading-relaxed p-5 overflow-x-auto text-[#d6d6d8]">
-              <code>
-                {`{`}
-                {`\n  `}
-                <span className="text-[#9cdcfe]">"mcpServers"</span>: {`{`}
-                {`\n    `}
-                <span className="text-[#9cdcfe]">"andromeda"</span>: {`{`}
-                {`\n      `}
-                <span className="text-[#9cdcfe]">"url"</span>: <span className="text-[#ce9178]">"https://api.andromedainfra.pro/mcp"</span>,
-                {`\n      `}
-                <span className="text-[#9cdcfe]">"headers"</span>: {`{`}
-                {`\n        `}
-                <span className="text-[#9cdcfe]">"X-Api-Key"</span>: <span className="text-[#ce9178]">"sk_live_..."</span>
-                {`\n      `}
-                {`}`}
-                {`\n    `}
-                {`}`}
-                {`\n  `}
-                {`}`}
-                {`\n`}
-                {`}`}
-              </code>
+              <code>{CONFIG}</code>
             </pre>
           </div>
 

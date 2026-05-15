@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import clsx from "clsx";
 import {
   CreditCard,
   Sparkles,
@@ -20,6 +21,7 @@ import {
   type MeBalance,
   APIError,
 } from "@/lib/api";
+import { errorMessage } from "@/lib/format";
 
 type Cycle = "monthly" | "annual";
 
@@ -42,14 +44,34 @@ export default function BillingPage() {
       setPlans(plansResp.plans);
       setBalance(balResp);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load billing");
+      setError(errorMessage(err, "Failed to load billing"));
     } finally {
       setLoading(false);
     }
   }
 
   useEffect(() => {
-    load();
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const [plansResp, balResp] = await Promise.all([
+          pricing.plans(),
+          me.balance(),
+        ]);
+        if (cancelled) return;
+        setPlans(plansResp.plans);
+        setBalance(balResp);
+      } catch (err) {
+        if (!cancelled) setError(errorMessage(err, "Failed to load billing"));
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   async function startCheckout(planCode: string, c: Cycle) {
@@ -98,8 +120,7 @@ export default function BillingPage() {
       }
       await load();
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "Could not change overage";
-      setError(msg);
+      setError(errorMessage(err, "Could not change overage"));
     } finally {
       setBusyAction(null);
     }
@@ -289,24 +310,24 @@ function CycleToggle({ cycle, onChange }: { cycle: Cycle; onChange: (c: Cycle) =
         <button
           type="button"
           onClick={() => onChange("monthly")}
-          className={
-            "px-3 py-1.5 text-xs rounded-md transition-colors " +
-            (cycle === "monthly"
+          className={clsx(
+            "px-3 py-1.5 text-xs rounded-md transition-colors",
+            cycle === "monthly"
               ? "bg-charcoal text-snow"
-              : "text-slate-400 hover:text-snow")
-          }
+              : "text-slate-400 hover:text-snow",
+          )}
         >
           Monthly
         </button>
         <button
           type="button"
           onClick={() => onChange("annual")}
-          className={
-            "px-3 py-1.5 text-xs rounded-md transition-colors flex items-center gap-1.5 " +
-            (cycle === "annual"
+          className={clsx(
+            "px-3 py-1.5 text-xs rounded-md transition-colors flex items-center gap-1.5",
+            cycle === "annual"
               ? "bg-charcoal text-snow"
-              : "text-slate-400 hover:text-snow")
-          }
+              : "text-slate-400 hover:text-snow",
+          )}
         >
           Annual
           <span className="text-[10px] text-emerald-300 font-mono">−16.7%</span>
@@ -335,10 +356,10 @@ function PlanCard({ plan, cycle, currentPlan, busy, onChoose }: PlanCardProps) {
 
   return (
     <div
-      className={
-        "card p-6 flex flex-col" +
-        (isHighlight ? " border-ember/30 shadow-ember" : "")
-      }
+      className={clsx(
+        "card p-6 flex flex-col",
+        isHighlight && "border-ember/30 shadow-ember",
+      )}
     >
       <div className="flex items-center justify-between mb-3">
         <span className="text-sm font-semibold tracking-tight">{plan.name}</span>
@@ -374,10 +395,10 @@ function PlanCard({ plan, cycle, currentPlan, busy, onChoose }: PlanCardProps) {
         type="button"
         disabled={isCurrent || isFree || busy}
         onClick={onChoose}
-        className={
-          (isHighlight ? "btn-primary" : "btn-secondary") +
-          " mt-auto disabled:opacity-50"
-        }
+        className={clsx(
+          isHighlight ? "btn-primary" : "btn-secondary",
+          "mt-auto disabled:opacity-50",
+        )}
       >
         {isCurrent ? "Current plan" : isFree ? "Free tier" : busy ? "Redirecting…" : "Choose"}
       </button>

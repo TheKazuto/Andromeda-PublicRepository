@@ -2,9 +2,11 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import clsx from "clsx";
 import { Sparkles, Building2, Check, Gift } from "lucide-react";
 import { Logo } from "@/components/Logo";
 import { pricing, type PublicPlan } from "@/lib/api";
+import { errorMessage } from "@/lib/format";
 
 type Cycle = "monthly" | "annual";
 
@@ -15,13 +17,21 @@ export default function PublicPricingPage() {
   const [cycle, setCycle] = useState<Cycle>("monthly");
 
   useEffect(() => {
+    let cancelled = false;
     pricing
       .plans()
-      .then((data) => setPlans(data.plans))
-      .catch((err) =>
-        setError(err instanceof Error ? err.message : "Failed to load plans"),
-      )
-      .finally(() => setLoading(false));
+      .then((data) => {
+        if (!cancelled) setPlans(data.plans);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(errorMessage(err, "Failed to load plans"));
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const enterprise = plans.find((p) => p.code === "enterprise");
@@ -64,24 +74,24 @@ export default function PublicPricingPage() {
               <button
                 type="button"
                 onClick={() => setCycle("monthly")}
-                className={
-                  "px-4 py-2 text-sm rounded-md transition-colors " +
-                  (cycle === "monthly"
+                className={clsx(
+                  "px-4 py-2 text-sm rounded-md transition-colors",
+                  cycle === "monthly"
                     ? "bg-charcoal text-snow"
-                    : "text-slate-400 hover:text-snow")
-                }
+                    : "text-slate-400 hover:text-snow",
+                )}
               >
                 Monthly
               </button>
               <button
                 type="button"
                 onClick={() => setCycle("annual")}
-                className={
-                  "px-4 py-2 text-sm rounded-md transition-colors flex items-center gap-2 " +
-                  (cycle === "annual"
+                className={clsx(
+                  "px-4 py-2 text-sm rounded-md transition-colors flex items-center gap-2",
+                  cycle === "annual"
                     ? "bg-charcoal text-snow"
-                    : "text-slate-400 hover:text-snow")
-                }
+                    : "text-slate-400 hover:text-snow",
+                )}
               >
                 Annual
                 <span className="text-[10px] text-emerald-300 font-mono">−16.7%</span>
@@ -129,10 +139,10 @@ function PublicPlanCard({ plan, cycle }: { plan: PublicPlan; cycle: Cycle }) {
 
   return (
     <div
-      className={
-        "card p-6 flex flex-col" +
-        (isHighlight ? " border-ember/30 shadow-ember" : "")
-      }
+      className={clsx(
+        "card p-6 flex flex-col",
+        isHighlight && "border-ember/30 shadow-ember",
+      )}
     >
       <div className="flex items-center justify-between mb-3">
         <span className="text-sm font-semibold tracking-tight">{plan.name}</span>
@@ -166,7 +176,10 @@ function PublicPlanCard({ plan, cycle }: { plan: PublicPlan; cycle: Cycle }) {
       </ul>
       <Link
         href={isFree ? "/signup" : `/signup?plan=${plan.code}&cycle=${cycle}`}
-        className={(isHighlight ? "btn-primary" : "btn-secondary") + " mt-auto"}
+        className={clsx(
+          isHighlight ? "btn-primary" : "btn-secondary",
+          "mt-auto",
+        )}
       >
         {isFree ? "Start free" : "Get started"}
       </Link>

@@ -2,9 +2,11 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import clsx from "clsx";
 import { Gift, ArrowRight } from "lucide-react";
 import { Logo } from "@/components/Logo";
 import { gifts, pricing, type PublicPlan, APIError } from "@/lib/api";
+import { errorMessage } from "@/lib/format";
 
 type Cycle = 1 | 12;
 
@@ -18,15 +20,24 @@ export default function GiftBuyPage() {
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
+    let cancelled = false;
     pricing
       .plans()
       .then((data) => {
+        if (cancelled) return;
         const giftable = data.plans.filter((p) => p.isGiftable);
         setPlans(giftable);
         if (giftable.length > 0) setPlanCode(giftable[0].code);
       })
-      .catch((err) => setError(err instanceof Error ? err.message : "Failed to load"))
-      .finally(() => setLoading(false));
+      .catch((err) => {
+        if (!cancelled) setError(errorMessage(err, "Failed to load"));
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   async function onSubmit(e: React.FormEvent) {
@@ -47,7 +58,7 @@ export default function GiftBuyPage() {
           ? err.code === "billing_disabled"
             ? "Gift purchases are not yet enabled."
             : err.message
-          : "Could not start checkout";
+          : errorMessage(err, "Could not start checkout");
       setError(msg);
       setBusy(false);
     }
@@ -103,12 +114,12 @@ export default function GiftBuyPage() {
                       key={p.code}
                       type="button"
                       onClick={() => setPlanCode(p.code)}
-                      className={
-                        "rounded-lg border px-4 py-3 text-left transition-colors " +
-                        (planCode === p.code
+                      className={clsx(
+                        "rounded-lg border px-4 py-3 text-left transition-colors",
+                        planCode === p.code
                           ? "border-ember/40 bg-ember/[0.06] text-snow"
-                          : "border-white/[0.05] bg-graphite-700/40 text-slate-300 hover:border-white/[0.1]")
-                      }
+                          : "border-white/[0.05] bg-graphite-700/40 text-slate-300 hover:border-white/[0.1]",
+                      )}
                     >
                       <div className="text-sm font-semibold">{p.name}</div>
                       <div className="text-[11px] text-slate-400 font-mono">
@@ -207,12 +218,12 @@ function DurationOption({
     <button
       type="button"
       onClick={onClick}
-      className={
-        "rounded-lg border px-4 py-3 text-sm text-left transition-colors " +
-        (selected
+      className={clsx(
+        "rounded-lg border px-4 py-3 text-sm text-left transition-colors",
+        selected
           ? "border-ember/40 bg-ember/[0.06] text-snow"
-          : "border-white/[0.05] bg-graphite-700/40 text-slate-300 hover:border-white/[0.1]")
-      }
+          : "border-white/[0.05] bg-graphite-700/40 text-slate-300 hover:border-white/[0.1]",
+      )}
     >
       {label}
     </button>

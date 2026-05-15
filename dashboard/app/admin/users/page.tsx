@@ -13,6 +13,8 @@ import {
   type AdminUserAPIKey,
   type AdminPlan,
 } from "@/lib/admin-api";
+import { errorMessage } from "@/lib/format";
+import { copyToClipboard } from "@/lib/clipboard";
 
 export default function AdminCustomersPage() {
   const [email, setEmail] = useState("");
@@ -48,7 +50,7 @@ export default function AdminCustomersPage() {
       if (keysRes.status === "fulfilled") setKeys(keysRes.value.items);
       if (plansRes.status === "fulfilled") setPlans(plansRes.value.items);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Lookup failed");
+      setError(errorMessage(err, "Lookup failed"));
     } finally {
       setLoading(false);
     }
@@ -169,15 +171,17 @@ function SubscriptionPanel({
   const [overageEnabled, setOverageEnabled] = useState(sub?.overageEnabled || false);
   const [cardPresent, setCardPresent] = useState(sub?.overageCardPresent || false);
   const [cap, setCap] = useState(sub?.overageCapTokens || 0);
+  const [err, setErr] = useState<string | null>(null);
 
   async function assign() {
     if (!planCode) return;
     setBusy(true);
+    setErr(null);
     try {
       await adminCustomers.assignPlan({ userId: user.id, planCode });
       await onChange();
-    } catch (err) {
-      alert(err instanceof Error ? err.message : "Assign failed");
+    } catch (e) {
+      setErr(errorMessage(e, "Assign failed"));
     } finally {
       setBusy(false);
     }
@@ -185,7 +189,12 @@ function SubscriptionPanel({
 
   async function saveOverage() {
     if (!sub) return;
+    if (!Number.isFinite(cap) || cap < 0) {
+      setErr("Overage cap must be a non-negative number.");
+      return;
+    }
     setBusy(true);
+    setErr(null);
     try {
       await adminCustomers.updateOverage(sub.id, {
         enabled: overageEnabled,
@@ -193,8 +202,8 @@ function SubscriptionPanel({
         capTokens: cap,
       });
       await onChange();
-    } catch (err) {
-      alert(err instanceof Error ? err.message : "Save failed");
+    } catch (e) {
+      setErr(errorMessage(e, "Save failed"));
     } finally {
       setBusy(false);
     }
@@ -253,7 +262,11 @@ function SubscriptionPanel({
                 type="number"
                 min={0}
                 value={cap}
-                onChange={(e) => setCap(Number(e.target.value))}
+                onChange={(e) => {
+                  const n = Number(e.target.value);
+                  if (e.target.value !== "" && !Number.isFinite(n)) return;
+                  setCap(n);
+                }}
                 className="input-base"
               />
               <button type="button" disabled={busy} onClick={saveOverage} className="btn-secondary mt-2 text-xs">
@@ -263,6 +276,7 @@ function SubscriptionPanel({
           </>
         )}
       </div>
+      {err && <div className="mt-3 text-xs text-ember-soft">{err}</div>}
     </section>
   );
 }
@@ -281,6 +295,10 @@ function CreditsPanel({
 
   async function grant() {
     setError(null);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      setError("Amount must be a positive number.");
+      return;
+    }
     setBusy(true);
     try {
       await adminCredits.grant({
@@ -290,7 +308,7 @@ function CreditsPanel({
       });
       onGranted();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Grant failed");
+      setError(errorMessage(err, "Grant failed"));
     } finally {
       setBusy(false);
     }
@@ -307,7 +325,11 @@ function CreditsPanel({
             type="number"
             min={1}
             value={amount}
-            onChange={(e) => setAmount(Number(e.target.value))}
+            onChange={(e) => {
+              const n = Number(e.target.value);
+              if (e.target.value !== "" && !Number.isFinite(n)) return;
+              setAmount(n);
+            }}
             className="input-base"
           />
         </div>
@@ -376,9 +398,17 @@ function KeysPanel({
       setName("");
       await onMinted();
     } catch (e) {
-      setErr(e instanceof Error ? e.message : "Mint failed");
+      setErr(errorMessage(e, "Mint failed"));
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function copyKey() {
+    if (!revealed) return;
+    const ok = await copyToClipboard(revealed);
+    if (!ok) {
+      setErr("Clipboard blocked — copy the key manually.");
     }
   }
 
@@ -443,7 +473,7 @@ function KeysPanel({
           </code>
           <button
             type="button"
-            onClick={() => navigator.clipboard.writeText(revealed)}
+            onClick={copyKey}
             className="mt-2 text-[11px] text-emerald-300 hover:text-emerald-100"
           >
             Copy to clipboard

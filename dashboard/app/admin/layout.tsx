@@ -1,8 +1,10 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { usePathname, useRouter } from "next/navigation";
+import { useRouter } from "next/navigation";
 import { AdminSidebar } from "@/components/admin/AdminSidebar";
+import { useNormalizedPathname } from "@/lib/use-normalized-pathname";
+import { errorMessage } from "@/lib/format";
 import {
   hasAdminToken,
   adminAuth,
@@ -13,12 +15,7 @@ import {
 
 export default function AdminLayout({ children }: { children: React.ReactNode }) {
   const router = useRouter();
-  const pathname = usePathname();
-  // `next.config.js` has `trailingSlash: true`, so usePathname returns
-  // `/admin/login/`. Normalise by stripping the trailing slash before the
-  // comparison — otherwise `isLoginPage` is always false and the login
-  // page itself triggers the auth flow (which then redirects back here).
-  const normalizedPathname = (pathname ?? "").replace(/\/+$/, "") || "/";
+  const normalizedPathname = useNormalizedPathname();
   const isLoginPage = normalizedPathname === "/admin/login";
 
   const [me, setMe] = useState<AdminMe | null>(null);
@@ -36,6 +33,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
     }
 
     let cancelled = false;
+    const ac = new AbortController();
     adminAuth
       .me()
       .then((data) => {
@@ -44,19 +42,21 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
         setReady(true);
       })
       .catch((err: unknown) => {
-        if (cancelled) return;
+        if (cancelled || (err instanceof DOMException && err.name === "AbortError")) {
+          return;
+        }
         if (err instanceof AdminAPIError && err.status === 401) {
           clearAdminToken();
           router.replace("/admin/login");
           return;
         }
-        const message = err instanceof Error ? err.message : "Failed to load admin profile";
-        setError(message);
+        setError(errorMessage(err, "Failed to load admin profile"));
         setReady(true);
       });
 
     return () => {
       cancelled = true;
+      ac.abort();
     };
   }, [router, isLoginPage]);
 

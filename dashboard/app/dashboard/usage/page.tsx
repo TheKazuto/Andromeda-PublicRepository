@@ -1,12 +1,13 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import clsx from "clsx";
 import { Activity, Zap, BarChart3, ArrowUpRight } from "lucide-react";
 import { Topbar } from "@/components/Topbar";
 import { PageTitle } from "@/components/PageTitle";
 import { Stat } from "@/components/Stat";
 import { me, type MeUsage } from "@/lib/api";
-import { formatNumber } from "@/lib/format";
+import { errorMessage, formatNumber } from "@/lib/format";
 
 type RangeKey = "7d" | "30d" | "90d";
 
@@ -31,7 +32,7 @@ export default function UsagePage() {
         if (!cancelled) setUsage(u);
       })
       .catch((err) => {
-        if (!cancelled) setError(err instanceof Error ? err.message : "Failed to load usage");
+        if (!cancelled) setError(errorMessage(err, "Failed to load usage"));
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -61,12 +62,12 @@ export default function UsagePage() {
                     key={r}
                     type="button"
                     onClick={() => setRange(r)}
-                    className={
-                      "px-2.5 py-1 text-xs rounded-md transition-colors " +
-                      (range === r
+                    className={clsx(
+                      "px-2.5 py-1 text-xs rounded-md transition-colors",
+                      range === r
                         ? "bg-ember/15 text-ember-soft border border-ember/25"
-                        : "text-slate-300 hover:text-snow")
-                    }
+                        : "text-slate-300 hover:text-snow",
+                    )}
                   >
                     {RANGE_LABEL[r]}
                   </button>

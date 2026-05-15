@@ -1,7 +1,6 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
 import clsx from "clsx";
 import {
   Home,
@@ -14,6 +13,10 @@ import {
   BookOpen,
   Link2,
 } from "lucide-react";
+import { useNormalizedPathname } from "@/lib/use-normalized-pathname";
+
+const NETWORK_LABEL = process.env.NEXT_PUBLIC_NETWORK || "Devnet";
+const NETWORK_TIER = process.env.NEXT_PUBLIC_NETWORK_TIER || "Pre-alpha";
 
 type Item = { href: string; label: string; Icon: typeof Home };
 
@@ -30,10 +33,7 @@ const NAV: Item[] = [
 ];
 
 export function Sidebar() {
-  const rawPathname = usePathname();
-  // `next.config.js` uses `trailingSlash: true`; strip so /dashboard/ still
-  // matches /dashboard exactly for "active link" highlighting.
-  const pathname = (rawPathname ?? "").replace(/\/+$/, "") || "/";
+  const pathname = useNormalizedPathname();
 
   return (
     <aside className="hidden md:flex md:w-60 lg:w-64 shrink-0 flex-col bg-charcoal border-r border-white/[0.05] sticky top-0 h-screen">
@@ -85,9 +85,9 @@ export function Sidebar() {
           </div>
           <div className="mt-1.5 flex items-center gap-2">
             <span className="w-1.5 h-1.5 rounded-full bg-signal-mint shadow-[0_0_8px_var(--tw-shadow-color)] shadow-signal-mint" />
-            <span className="text-xs text-snow">Devnet</span>
+            <span className="text-xs text-snow">{NETWORK_LABEL}</span>
           </div>
-          <div className="mt-1 text-[11px] text-slate-400 font-mono">Pre-alpha</div>
+          <div className="mt-1 text-[11px] text-slate-400 font-mono">{NETWORK_TIER}</div>
         </div>
       </div>
     </aside>

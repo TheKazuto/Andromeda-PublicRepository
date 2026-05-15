@@ -1,20 +1,47 @@
 "use client";
 
-import { useState, useEffect } from "react";
-import { useRouter } from "next/navigation";
+import { Suspense, useEffect, useMemo, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import dynamic from "next/dynamic";
 import { ArrowRight } from "lucide-react";
 import { OAuthButtons } from "@/components/OAuthButtons";
 import { api, bootstrapSession, setToken, type AuthResp } from "@/lib/api";
+import { errorMessage } from "@/lib/format";
 
 const SpacetimeBackground = dynamic(
   () => import("@/components/SpacetimeBackground").then((m) => m.SpacetimeBackground),
   { ssr: false },
 );
 
+// Only accept paths that start with a single forward slash and do not look
+// like a protocol-relative URL (`//evil.com`). Anything else collapses to
+// the dashboard — keeps `?next=` from doubling as an open-redirect.
+function safeNext(raw: string | null): string {
+  if (!raw) return "/dashboard";
+  if (!raw.startsWith("/") || raw.startsWith("//")) return "/dashboard";
+  return raw;
+}
+
 export default function LoginPage() {
+  return (
+    <Suspense
+      fallback={
+        <main className="min-h-screen grid place-items-center bg-void">
+          <div className="text-sm text-slate-400">Loading…</div>
+        </main>
+      }
+    >
+      <LoginPageInner />
+    </Suspense>
+  );
+}
+
+function LoginPageInner() {
   const router = useRouter();
+  const search = useSearchParams();
+  const next = useMemo(() => safeNext(search?.get("next") ?? null), [search]);
+
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
@@ -25,12 +52,12 @@ export default function LoginPage() {
     (async () => {
       const ok = await bootstrapSession();
       if (cancelled) return;
-      if (ok) router.replace("/dashboard");
+      if (ok) router.replace(next);
     })();
     return () => {
       cancelled = true;
     };
-  }, [router]);
+  }, [router, next]);
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -43,9 +70,9 @@ export default function LoginPage() {
         body: { email, password },
       });
       setToken(data.token);
-      router.push("/dashboard");
+      router.push(next);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Login failed");
+      setError(errorMessage(err, "Login failed"));
     } finally {
       setLoading(false);
     }

@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { Plus, Copy, Check } from "lucide-react";
 import { PageHeader } from "@/components/admin/PageHeader";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 import {
   adminCoupons,
   adminPlans,
@@ -11,6 +12,8 @@ import {
   type GiftCardSource,
   type GiftCardStatus,
 } from "@/lib/admin-api";
+import { errorMessage } from "@/lib/format";
+import { copyToClipboard } from "@/lib/clipboard";
 
 export default function AdminCouponsPage() {
   const [items, setItems] = useState<AdminGiftCard[]>([]);
@@ -20,9 +23,9 @@ export default function AdminCouponsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showForm, setShowForm] = useState(false);
-  const [busyId, setBusyId] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
   const [newRedeem, setNewRedeem] = useState<string | null>(null);
+  const [toRefund, setToRefund] = useState<AdminGiftCard | null>(null);
 
   // form state
   const [planCode, setPlanCode] = useState("");
@@ -32,30 +35,60 @@ export default function AdminCouponsPage() {
   const [busy, setBusy] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
-  async function load() {
+  // Plans are immutable for the duration of this view — fetch them once and
+  // never refetch when the user toggles the gift-card filters.
+  useEffect(() => {
+    let cancelled = false;
+    adminPlans
+      .list()
+      .then((p) => {
+        if (cancelled) return;
+        const giftable = p.items.filter((x) => x.isGiftable);
+        setPlans(giftable);
+        if (giftable.length > 0) setPlanCode(giftable[0].code);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(errorMessage(err, "Failed to load plans"));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Gift cards depend on the active filter — refetch whenever it changes.
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    adminCoupons
+      .list({ source: filterSource, status: filterStatus })
+      .then((c) => {
+        if (!cancelled) setItems(c.items);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(errorMessage(err, "Failed to load coupons"));
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [filterSource, filterStatus]);
+
+  async function reloadCoupons() {
     setLoading(true);
     try {
-      const [c, p] = await Promise.all([
-        adminCoupons.list({ source: filterSource, status: filterStatus }),
-        adminPlans.list(),
-      ]);
+      const c = await adminCoupons.list({
+        source: filterSource,
+        status: filterStatus,
+      });
       setItems(c.items);
-      setPlans(p.items.filter((x) => x.isGiftable));
-      if (!planCode && p.items.length > 0) {
-        const giftable = p.items.find((x) => x.isGiftable);
-        if (giftable) setPlanCode(giftable.code);
-      }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Load failed");
+      setError(errorMessage(err, "Failed to load coupons"));
     } finally {
       setLoading(false);
     }
   }
-
-  useEffect(() => {
-    load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filterSource, filterStatus]);
 
   async function onCreate(e: React.FormEvent) {
     e.preventDefault();
@@ -71,35 +104,34 @@ export default function AdminCouponsPage() {
       setNewRedeem(data.redeemUrl);
       setShowForm(false);
       setMessage("");
-      await load();
+      await reloadCoupons();
     } catch (err) {
-      setFormError(err instanceof Error ? err.message : "Create failed");
+      setFormError(errorMessage(err, "Create failed"));
     } finally {
       setBusy(false);
     }
   }
 
-  async function refund(id: string) {
-    if (!confirm("Refund this paid gift card? Only allowed within 7 days, not redeemed.")) return;
-    setBusyId(id);
+  async function confirmRefund() {
+    if (!toRefund) return;
     try {
-      await adminCoupons.refund(id);
-      await load();
+      await adminCoupons.refund(toRefund.id);
+      setToRefund(null);
+      await reloadCoupons();
     } catch (err) {
-      alert(err instanceof Error ? err.message : "Refund failed");
-    } finally {
-      setBusyId(null);
+      setError(errorMessage(err, "Refund failed"));
+      throw err;
     }
   }
 
   async function copyLink(text: string) {
-    try {
-      await navigator.clipboard.writeText(text);
-      setCopied(text);
-      setTimeout(() => setCopied(null), 2000);
-    } catch {
-      /* noop */
+    const ok = await copyToClipboard(text);
+    if (!ok) {
+      setError("Clipboard blocked — copy manually.");
+      return;
     }
+    setCopied(text);
+    setTimeout(() => setCopied(null), 2000);
   }
 
   return (
@@ -259,11 +291,10 @@ export default function AdminCouponsPage() {
                       {g.source === "paid" && state === "active" && (
                         <button
                           type="button"
-                          disabled={busyId === g.id}
-                          onClick={() => refund(g.id)}
+                          onClick={() => setToRefund(g)}
                           className="btn-secondary text-xs"
                         >
-                          {busyId === g.id ? "Refunding…" : "Refund"}
+                          Refund
                         </button>
                       )}
                       {state === "active" && (
@@ -290,6 +321,17 @@ export default function AdminCouponsPage() {
           </table>
         </div>
       )}
+
+      <ConfirmDialog
+        open={toRefund !== null}
+        title="Refund gift card"
+        description="Refund this paid gift card? Only allowed within 7 days of purchase and only when the card has not been redeemed."
+        confirmLabel="Refund"
+        busyLabel="Refunding…"
+        danger
+        onConfirm={confirmRefund}
+        onCancel={() => setToRefund(null)}
+      />
     </main>
   );
 }

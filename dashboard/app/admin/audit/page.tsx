@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { PageHeader } from "@/components/admin/PageHeader";
 import { adminAudit, type AdminAuditEntry } from "@/lib/admin-api";
+import { errorMessage } from "@/lib/format";
 
 export default function AdminAuditPage() {
   const [items, setItems] = useState<AdminAuditEntry[]>([]);
@@ -11,13 +12,21 @@ export default function AdminAuditPage() {
   const [search, setSearch] = useState("");
 
   useEffect(() => {
+    let cancelled = false;
     adminAudit
       .list()
-      .then((data) => setItems(data.items))
-      .catch((err) =>
-        setError(err instanceof Error ? err.message : "Failed to load audit log")
-      )
-      .finally(() => setLoading(false));
+      .then((data) => {
+        if (!cancelled) setItems(data.items);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(errorMessage(err, "Failed to load audit log"));
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const filtered = items.filter((entry) => {

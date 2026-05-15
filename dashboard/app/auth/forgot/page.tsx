@@ -4,6 +4,7 @@ import { useState } from "react";
 import Link from "next/link";
 import { Logo } from "@/components/Logo";
 import { passwords, APIError } from "@/lib/api";
+import { errorMessage } from "@/lib/format";
 
 export default function ForgotPasswordPage() {
   const [email, setEmail] = useState("");
@@ -24,7 +25,7 @@ export default function ForgotPasswordPage() {
       setError(
         err instanceof APIError
           ? err.message
-          : "Could not reach the server. Please try again.",
+          : errorMessage(err, "Could not reach the server. Please try again."),
       );
     } finally {
       setSubmitting(false);

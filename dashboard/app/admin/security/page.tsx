@@ -3,7 +3,10 @@
 import { useEffect, useState } from "react";
 import { ShieldCheck, ShieldAlert, Copy, Check } from "lucide-react";
 import { PageHeader } from "@/components/admin/PageHeader";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { adminAuth, type AdminMe } from "@/lib/admin-api";
+import { errorMessage } from "@/lib/format";
+import { copyToClipboard } from "@/lib/clipboard";
 
 export default function AdminSecurityPage() {
   const [me, setMe] = useState<AdminMe | null>(null);
@@ -13,6 +16,7 @@ export default function AdminSecurityPage() {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<{ tone: "ok" | "error"; text: string } | null>(null);
   const [copied, setCopied] = useState<"secret" | "uri" | null>(null);
+  const [askDisable, setAskDisable] = useState(false);
 
   async function loadMe() {
     const data = await adminAuth.me();
@@ -20,9 +24,15 @@ export default function AdminSecurityPage() {
   }
 
   useEffect(() => {
-    loadMe().catch((err) =>
-      setMessage({ tone: "error", text: err instanceof Error ? err.message : "Load failed" })
-    );
+    let cancelled = false;
+    loadMe().catch((err) => {
+      if (!cancelled) {
+        setMessage({ tone: "error", text: errorMessage(err, "Load failed") });
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   async function startSetup() {
@@ -33,10 +43,7 @@ export default function AdminSecurityPage() {
       setSetupSecret(data.secret);
       setSetupURI(data.uri);
     } catch (err) {
-      setMessage({
-        tone: "error",
-        text: err instanceof Error ? err.message : "Could not start setup",
-      });
+      setMessage({ tone: "error", text: errorMessage(err, "Could not start setup") });
     } finally {
       setBusy(false);
     }
@@ -54,41 +61,36 @@ export default function AdminSecurityPage() {
       setMessage({ tone: "ok", text: "Two-factor authentication enabled." });
       await loadMe();
     } catch (err) {
-      setMessage({
-        tone: "error",
-        text: err instanceof Error ? err.message : "Verification failed",
-      });
+      setMessage({ tone: "error", text: errorMessage(err, "Verification failed") });
     } finally {
       setBusy(false);
     }
   }
 
-  async function disable() {
-    if (!confirm("Disable 2FA on your account? You can re-enable later.")) return;
+  async function confirmDisable() {
     setBusy(true);
     setMessage(null);
     try {
       await adminAuth.totpDisable();
+      setAskDisable(false);
       setMessage({ tone: "ok", text: "Two-factor authentication disabled." });
       await loadMe();
     } catch (err) {
-      setMessage({
-        tone: "error",
-        text: err instanceof Error ? err.message : "Disable failed",
-      });
+      setMessage({ tone: "error", text: errorMessage(err, "Disable failed") });
+      throw err;
     } finally {
       setBusy(false);
     }
   }
 
   async function copyText(value: string, kind: "secret" | "uri") {
-    try {
-      await navigator.clipboard.writeText(value);
-      setCopied(kind);
-      setTimeout(() => setCopied(null), 2000);
-    } catch {
-      /* noop */
+    const ok = await copyToClipboard(value);
+    if (!ok) {
+      setMessage({ tone: "error", text: "Clipboard blocked — copy manually." });
+      return;
     }
+    setCopied(kind);
+    setTimeout(() => setCopied(null), 2000);
   }
 
   return (
@@ -130,9 +132,9 @@ export default function AdminSecurityPage() {
           type="button"
           className="btn-secondary"
           disabled={busy}
-          onClick={disable}
+          onClick={() => setAskDisable(true)}
         >
-          {busy ? "Disabling…" : "Disable 2FA"}
+          Disable 2FA
         </button>
       )}
 
@@ -201,6 +203,17 @@ export default function AdminSecurityPage() {
           {message.text}
         </div>
       )}
+
+      <ConfirmDialog
+        open={askDisable}
+        title="Disable two-factor authentication"
+        description="Disable 2FA on your admin account? You will be able to sign in with just your password until you re-enable it. You can turn 2FA back on at any time."
+        confirmLabel="Disable 2FA"
+        busyLabel="Disabling…"
+        danger
+        onConfirm={confirmDisable}
+        onCancel={() => setAskDisable(false)}
+      />
     </main>
   );
 }

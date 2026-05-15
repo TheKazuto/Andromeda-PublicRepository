@@ -1,11 +1,13 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Plus, Trash2, X, Link2, AlertCircle } from "lucide-react";
+import { Plus, Trash2, Link2, AlertCircle } from "lucide-react";
 import { Topbar } from "@/components/Topbar";
 import { PageTitle } from "@/components/PageTitle";
+import { Modal } from "@/components/Modal";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { api, type OAuthRedirect } from "@/lib/api";
-import { formatDate, timeAgo } from "@/lib/format";
+import { errorMessage, formatDate, timeAgo } from "@/lib/format";
 
 // Login Social — tenant-managed redirect URI allowlist for the gateway
 // OAuth broker. Mirrors the backend at /v1/oauth/redirects (CRUD).
@@ -22,16 +24,43 @@ export default function OAuthRedirectsPage() {
   const [newDescription, setNewDescription] = useState("");
   const [adding, setAdding] = useState(false);
 
-  function refresh() {
-    setLoading(true);
-    api<{ items: OAuthRedirect[] }>("/v1/oauth/redirects")
-      .then((r) => setItems(r.items || []))
-      .catch((e) => setError(e instanceof Error ? e.message : "Failed to load"))
-      .finally(() => setLoading(false));
-  }
+  // Delete confirmation state.
+  const [uriToDelete, setUriToDelete] = useState<string | null>(null);
+
   useEffect(() => {
-    refresh();
+    let cancelled = false;
+    const ac = new AbortController();
+    setLoading(true);
+    api<{ items: OAuthRedirect[] }>("/v1/oauth/redirects", { signal: ac.signal })
+      .then((r) => {
+        if (!cancelled) setItems(r.items || []);
+      })
+      .catch((e) => {
+        if (cancelled || (e instanceof DOMException && e.name === "AbortError")) {
+          return;
+        }
+        setError(errorMessage(e, "Failed to load"));
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+      ac.abort();
+    };
   }, []);
+
+  async function refresh() {
+    setLoading(true);
+    try {
+      const r = await api<{ items: OAuthRedirect[] }>("/v1/oauth/redirects");
+      setItems(r.items || []);
+    } catch (e) {
+      setError(errorMessage(e, "Failed to load"));
+    } finally {
+      setLoading(false);
+    }
+  }
 
   async function onAdd(e: React.FormEvent) {
     e.preventDefault();
@@ -48,25 +77,26 @@ export default function OAuthRedirectsPage() {
       setShowAdd(false);
       setNewUri("");
       setNewDescription("");
-      refresh();
+      await refresh();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to add");
+      setError(errorMessage(e, "Failed to add"));
     } finally {
       setAdding(false);
     }
   }
 
-  async function onDelete(uri: string) {
-    if (!confirm(`Remove this redirect URI?\n\n${uri}\n\nApps using it will fail at /v1/oauth/authorize until re-added.`)) {
-      return;
-    }
+  async function confirmDelete() {
+    if (!uriToDelete) return;
     try {
-      await api(`/v1/oauth/redirects?redirectUri=${encodeURIComponent(uri)}`, {
-        method: "DELETE",
-      });
-      refresh();
+      await api(
+        `/v1/oauth/redirects?redirectUri=${encodeURIComponent(uriToDelete)}`,
+        { method: "DELETE" },
+      );
+      setUriToDelete(null);
+      await refresh();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to delete");
+      setError(errorMessage(e, "Failed to delete"));
+      throw e;
     }
   }
 
@@ -87,9 +117,9 @@ export default function OAuthRedirectsPage() {
           />
 
           {error && (
-            <div className="card p-4 mb-6 border-red-500/20 bg-red-500/[0.04] flex items-start gap-3">
-              <AlertCircle size={16} className="text-red-400 mt-0.5 flex-shrink-0" />
-              <div className="text-sm text-red-200">{error}</div>
+            <div className="card p-4 mb-6 border-ember/20 bg-ember/[0.04] flex items-start gap-3">
+              <AlertCircle size={16} className="text-ember-soft mt-0.5 flex-shrink-0" />
+              <div className="text-sm text-ember-soft">{error}</div>
             </div>
           )}
 
@@ -127,8 +157,8 @@ export default function OAuthRedirectsPage() {
                       </td>
                       <td className="px-5 py-3.5">
                         <button
-                          onClick={() => onDelete(item.redirectUri)}
-                          className="text-slate-500 hover:text-red-400 transition-colors"
+                          onClick={() => setUriToDelete(item.redirectUri)}
+                          className="text-slate-500 hover:text-ember-soft transition-colors"
                           title="Remove"
                           aria-label="Remove redirect URI"
                         >
@@ -152,57 +182,72 @@ export default function OAuthRedirectsPage() {
         </div>
       </main>
 
-      {showAdd && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
-          <div className="card w-full max-w-lg">
-            <div className="flex items-center justify-between px-5 py-4 border-b border-white/[0.06]">
-              <h2 className="text-sm font-medium">Add redirect URI</h2>
-              <button onClick={() => setShowAdd(false)} className="text-slate-500 hover:text-white">
-                <X size={16} />
-              </button>
-            </div>
-            <form onSubmit={onAdd} className="p-5 space-y-4">
-              <div>
-                <label className="block text-xs font-medium text-slate-300 mb-1.5">
-                  Redirect URI <span className="text-red-400">*</span>
-                </label>
-                <input
-                  type="text"
-                  value={newUri}
-                  onChange={(e) => setNewUri(e.target.value)}
-                  placeholder="https://app.example.com/oauth/callback"
-                  className="input w-full font-mono text-[13px]"
-                  required
-                  autoFocus
-                />
-                <p className="text-xs text-slate-500 mt-1.5">
-                  Must be exactly the same URI your app sends to <code className="font-mono">/v1/oauth/authorize</code>.
-                </p>
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-slate-300 mb-1.5">Description</label>
-                <input
-                  type="text"
-                  value={newDescription}
-                  onChange={(e) => setNewDescription(e.target.value)}
-                  placeholder="Production web app"
-                  maxLength={200}
-                  className="input w-full"
-                />
-                <p className="text-xs text-slate-500 mt-1.5">Optional. Helps you identify which app uses this URI.</p>
-              </div>
-              <div className="flex items-center justify-end gap-2 pt-2">
-                <button type="button" onClick={() => setShowAdd(false)} className="btn-secondary">
-                  Cancel
-                </button>
-                <button type="submit" disabled={adding || !newUri.trim()} className="btn-primary">
-                  {adding ? "Adding…" : "Add"}
-                </button>
-              </div>
-            </form>
+      <Modal
+        open={showAdd}
+        onClose={() => setShowAdd(false)}
+        title="Add redirect URI"
+        maxWidth={520}
+      >
+        <form onSubmit={onAdd} className="space-y-4">
+          <div>
+            <label className="label-base mb-1.5 block" htmlFor="oauth-uri">
+              Redirect URI <span className="text-ember-soft">*</span>
+            </label>
+            <input
+              id="oauth-uri"
+              type="text"
+              value={newUri}
+              onChange={(e) => setNewUri(e.target.value)}
+              placeholder="https://app.example.com/oauth/callback"
+              className="input-base font-mono text-[13px]"
+              required
+              autoFocus
+            />
+            <p className="text-xs text-slate-500 mt-1.5">
+              Must be exactly the same URI your app sends to <code className="font-mono">/v1/oauth/authorize</code>.
+            </p>
           </div>
-        </div>
-      )}
+          <div>
+            <label className="label-base mb-1.5 block" htmlFor="oauth-desc">
+              Description
+            </label>
+            <input
+              id="oauth-desc"
+              type="text"
+              value={newDescription}
+              onChange={(e) => setNewDescription(e.target.value)}
+              placeholder="Production web app"
+              maxLength={200}
+              className="input-base"
+            />
+            <p className="text-xs text-slate-500 mt-1.5">Optional. Helps you identify which app uses this URI.</p>
+          </div>
+          <div className="flex items-center justify-end gap-2 pt-2">
+            <button type="button" onClick={() => setShowAdd(false)} className="btn-ghost">
+              Cancel
+            </button>
+            <button type="submit" disabled={adding || !newUri.trim()} className="btn-primary">
+              {adding ? "Adding…" : "Add"}
+            </button>
+          </div>
+        </form>
+      </Modal>
+
+      <ConfirmDialog
+        open={uriToDelete !== null}
+        title="Remove redirect URI"
+        description={
+          <>
+            Remove <span className="font-mono text-snow break-all">{uriToDelete}</span>?
+            Apps using this URI will start failing at <code>/v1/oauth/authorize</code> until you re-add it.
+          </>
+        }
+        confirmLabel="Remove URI"
+        busyLabel="Removing…"
+        danger
+        onConfirm={confirmDelete}
+        onCancel={() => setUriToDelete(null)}
+      />
     </>
   );
 }

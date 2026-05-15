@@ -1,12 +1,14 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Plus, X } from "lucide-react";
 import { PageHeader } from "@/components/admin/PageHeader";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 import {
   adminPricingChanges,
   type AdminPricingChange,
 } from "@/lib/admin-api";
+import { errorMessage } from "@/lib/format";
 
 const CHANGE_TYPES = [
   { value: "route_cost", label: "Route cost (request_costs.cost_tokens)" },
@@ -18,12 +20,16 @@ const CHANGE_TYPES = [
   { value: "plan_overage", label: "Plan overage rate" },
 ];
 
+// The backend enforces a 30-day notice window; we mirror it in the UI so the
+// admin can't even pick a sooner date.
+const NOTICE_DAYS = 30;
+
 export default function AdminPricingChangesPage() {
   const [items, setItems] = useState<AdminPricingChange[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showForm, setShowForm] = useState(false);
-  const [busyId, setBusyId] = useState<number | null>(null);
+  const [toCancel, setToCancel] = useState<AdminPricingChange | null>(null);
 
   const [changeType, setChangeType] = useState<string>(CHANGE_TYPES[0].value);
   const [targetKey, setTargetKey] = useState("");
@@ -34,32 +40,64 @@ export default function AdminPricingChangesPage() {
   const [busy, setBusy] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
+  // `min` for the date input — recomputed on mount so the form is always
+  // comparing against the current clock, not a build-time constant.
+  const minEffective = useMemo(() => minEffectiveAt(), []);
+
   async function load() {
     setLoading(true);
     try {
       const data = await adminPricingChanges.list({ status: "pending" });
       setItems(data.items);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Load failed");
+      setError(errorMessage(err, "Load failed"));
     } finally {
       setLoading(false);
     }
   }
 
   useEffect(() => {
-    load();
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      try {
+        const data = await adminPricingChanges.list({ status: "pending" });
+        if (!cancelled) setItems(data.items);
+      } catch (err) {
+        if (!cancelled) setError(errorMessage(err, "Load failed"));
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   async function onCreate(e: React.FormEvent) {
     e.preventDefault();
     setFormError(null);
+    if (!Number.isFinite(newValue) || newValue < 0) {
+      setFormError("New value must be a non-negative number.");
+      return;
+    }
+    const effectiveDate = new Date(effectiveAt);
+    if (Number.isNaN(effectiveDate.getTime())) {
+      setFormError("Pick a valid effective date.");
+      return;
+    }
+    const earliest = new Date(Date.now() + NOTICE_DAYS * 24 * 60 * 60 * 1000);
+    if (effectiveDate.getTime() < earliest.getTime()) {
+      setFormError(`Effective date must be at least ${NOTICE_DAYS} days from now.`);
+      return;
+    }
     setBusy(true);
     try {
       await adminPricingChanges.create({
         changeType,
         targetKey: targetKey.trim(),
         newValue,
-        effectiveAt: new Date(effectiveAt).toISOString(),
+        effectiveAt: effectiveDate.toISOString(),
         createdBy: createdBy.trim() || "admin",
         reason: reason.trim(),
       });
@@ -70,22 +108,21 @@ export default function AdminPricingChangesPage() {
       setEffectiveAt(defaultEffectiveAt());
       await load();
     } catch (err) {
-      setFormError(err instanceof Error ? err.message : "Create failed");
+      setFormError(errorMessage(err, "Create failed"));
     } finally {
       setBusy(false);
     }
   }
 
-  async function cancel(id: number) {
-    if (!confirm("Cancel this scheduled change? Cannot be undone.")) return;
-    setBusyId(id);
+  async function confirmCancel() {
+    if (!toCancel) return;
     try {
-      await adminPricingChanges.cancel(id);
+      await adminPricingChanges.cancel(toCancel.id);
+      setToCancel(null);
       await load();
     } catch (err) {
-      alert(err instanceof Error ? err.message : "Cancel failed");
-    } finally {
-      setBusyId(null);
+      setError(errorMessage(err, "Cancel failed"));
+      throw err;
     }
   }
 
@@ -142,8 +179,13 @@ export default function AdminPricingChangesPage() {
             <input
               type="number"
               required
+              min={0}
               value={newValue}
-              onChange={(e) => setNewValue(Number(e.target.value))}
+              onChange={(e) => {
+                const n = Number(e.target.value);
+                if (e.target.value !== "" && !Number.isFinite(n)) return;
+                setNewValue(n);
+              }}
               className="input-base"
             />
             <p className="text-[11px] text-slate-400 mt-1">
@@ -155,11 +197,14 @@ export default function AdminPricingChangesPage() {
             <input
               type="datetime-local"
               required
+              min={minEffective}
               value={effectiveAt}
               onChange={(e) => setEffectiveAt(e.target.value)}
               className="input-base"
             />
-            <p className="text-[11px] text-slate-400 mt-1">Must be ≥30 days from now.</p>
+            <p className="text-[11px] text-slate-400 mt-1">
+              Must be ≥{NOTICE_DAYS} days from now.
+            </p>
           </div>
           <div>
             <label className="label-base mb-1.5 block">Created by</label>
@@ -221,12 +266,11 @@ export default function AdminPricingChangesPage() {
                   <td className="px-4 py-3 text-right">
                     <button
                       type="button"
-                      disabled={busyId === c.id}
-                      onClick={() => cancel(c.id)}
+                      onClick={() => setToCancel(c)}
                       className="btn-secondary text-xs"
                     >
                       <X size={12} strokeWidth={2} />
-                      {busyId === c.id ? "…" : "Cancel"}
+                      Cancel
                     </button>
                   </td>
                 </tr>
@@ -242,14 +286,42 @@ export default function AdminPricingChangesPage() {
           </table>
         </div>
       )}
+
+      <ConfirmDialog
+        open={toCancel !== null}
+        title="Cancel scheduled change"
+        description={
+          toCancel ? (
+            <>
+              Cancel the scheduled change to{" "}
+              <span className="font-mono text-snow">{toCancel.targetKey}</span>?
+              The applier worker will skip this entry and the live value stays unchanged.
+              This action cannot be undone.
+            </>
+          ) : null
+        }
+        confirmLabel="Cancel change"
+        busyLabel="Cancelling…"
+        danger
+        onConfirm={confirmCancel}
+        onCancel={() => setToCancel(null)}
+      />
     </main>
   );
 }
 
 function defaultEffectiveAt(): string {
   // 31 days from now to stay above the 30-day floor.
-  const d = new Date(Date.now() + 31 * 24 * 60 * 60 * 1000);
+  const d = new Date(Date.now() + (NOTICE_DAYS + 1) * 24 * 60 * 60 * 1000);
   d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); // local timezone
+  return d.toISOString().slice(0, 16);
+}
+
+function minEffectiveAt(): string {
+  // The exact 30-day floor for the `min` attribute. Browsers reject any
+  // earlier pick before the form even submits.
+  const d = new Date(Date.now() + NOTICE_DAYS * 24 * 60 * 60 * 1000);
+  d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
   return d.toISOString().slice(0, 16);
 }
 

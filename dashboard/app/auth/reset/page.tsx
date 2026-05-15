@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { Logo } from "@/components/Logo";
 import { passwords, APIError } from "@/lib/api";
+import { errorMessage } from "@/lib/format";
 
 const MIN_PASSWORD_LEN = 8;
 
@@ -59,7 +60,7 @@ function ResetPasswordPageInner() {
       setError(
         err instanceof APIError
           ? err.message
-          : "Could not reset password. Please try again.",
+          : errorMessage(err, "Could not reset password. Please try again."),
       );
     } finally {
       setSubmitting(false);

@@ -72,9 +72,15 @@ export default function AdminOverviewPage() {
 
   useEffect(() => {
     let cancelled = false;
-    adminAuth.me().then((data) => {
-      if (!cancelled) setMe(data);
-    });
+    adminAuth
+      .me()
+      .then((data) => {
+        if (!cancelled) setMe(data);
+      })
+      .catch(() => {
+        // Errors are surfaced by the layout's `me()` call; swallow here so a
+        // transient failure doesn't leak unhandledrejection into the console.
+      });
     return () => {
       cancelled = true;
     };
@@ -151,7 +157,12 @@ export default function AdminOverviewPage() {
 }
 
 function formatGreeting(email: string): string {
-  const [local] = email.split("@");
+  const local = email.split("@")[0] ?? "";
   if (!local) return email;
-  return local.charAt(0).toUpperCase() + local.slice(1);
+  // String.prototype.toUpperCase() is unicode-aware in modern engines, but
+  // codepoint splitting via `Array.from` keeps accented or compound letters
+  // intact (e.g. `émile` doesn't lose its accent).
+  const chars = Array.from(local);
+  const first = chars[0]?.toUpperCase() ?? "";
+  return first + chars.slice(1).join("");
 }

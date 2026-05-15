@@ -1,11 +1,24 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Plus, KeyRound, Copy, Check, Trash2, X, Pencil, Globe, Link2 } from "lucide-react";
+import {
+  Plus,
+  KeyRound,
+  Copy,
+  Check,
+  Trash2,
+  X,
+  Pencil,
+  Globe,
+  Link2,
+} from "lucide-react";
 import { Topbar } from "@/components/Topbar";
 import { PageTitle } from "@/components/PageTitle";
+import { Modal } from "@/components/Modal";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { api, type APIKey } from "@/lib/api";
-import { formatDate, timeAgo } from "@/lib/format";
+import { errorMessage, formatDate, timeAgo } from "@/lib/format";
+import { copyToClipboard } from "@/lib/clipboard";
 
 const API_ENDPOINT =
   process.env.NEXT_PUBLIC_GATEWAY_URL || "https://api.andromedainfra.pro";
@@ -18,7 +31,6 @@ function parseOriginsInput(raw: string): string[] {
     .filter(Boolean);
 }
 
-// Pretty-print an origins list for display.
 function originsCount(key: APIKey): number {
   return key.allowedOrigins?.length ?? 0;
 }
@@ -39,27 +51,70 @@ export default function ApiKeysPage() {
   const [editOrigins, setEditOrigins] = useState("");
   const [saving, setSaving] = useState(false);
 
+  // Revoke confirmation state.
+  const [keyToRevoke, setKeyToRevoke] = useState<APIKey | null>(null);
+
   const [revealedKey, setRevealedKey] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [endpointCopied, setEndpointCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  function copyEndpoint() {
-    navigator.clipboard.writeText(API_ENDPOINT);
+  // Warn the user before they unload while a fresh key is still on screen —
+  // the value is only returned once and we cannot show it again.
+  useEffect(() => {
+    if (!revealedKey) return;
+    function onBeforeUnload(e: BeforeUnloadEvent) {
+      e.preventDefault();
+      e.returnValue = "";
+    }
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [revealedKey]);
+
+  async function copyEndpoint() {
+    const ok = await copyToClipboard(API_ENDPOINT);
+    if (!ok) {
+      setError("Clipboard blocked — copy the endpoint manually.");
+      return;
+    }
     setEndpointCopied(true);
     setTimeout(() => setEndpointCopied(false), 1500);
   }
 
-  function refresh() {
-    setLoading(true);
-    api<{ items: APIKey[] }>("/v1/api-keys")
-      .then((r) => setKeys(r.items || []))
-      .catch((e) => setError(e.message))
-      .finally(() => setLoading(false));
-  }
   useEffect(() => {
-    refresh();
+    let cancelled = false;
+    const ac = new AbortController();
+    setLoading(true);
+    api<{ items: APIKey[] }>("/v1/api-keys", { signal: ac.signal })
+      .then((r) => {
+        if (!cancelled) setKeys(r.items || []);
+      })
+      .catch((e) => {
+        if (cancelled || (e instanceof DOMException && e.name === "AbortError")) {
+          return;
+        }
+        setError(errorMessage(e, "Failed to load keys"));
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+      ac.abort();
+    };
   }, []);
+
+  async function refresh() {
+    setLoading(true);
+    try {
+      const r = await api<{ items: APIKey[] }>("/v1/api-keys");
+      setKeys(r.items || []);
+    } catch (e) {
+      setError(errorMessage(e, "Failed to load keys"));
+    } finally {
+      setLoading(false);
+    }
+  }
 
   async function onCreate(e: React.FormEvent) {
     e.preventDefault();
@@ -78,9 +133,9 @@ export default function ApiKeysPage() {
       setShowCreate(false);
       setNewName("");
       setNewOrigins("");
-      refresh();
+      await refresh();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed");
+      setError(errorMessage(e, "Failed to create key"));
     } finally {
       setCreating(false);
     }
@@ -114,26 +169,32 @@ export default function ApiKeysPage() {
         },
       });
       closeEdit();
-      refresh();
+      await refresh();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed");
+      setError(errorMessage(e, "Failed to save changes"));
     } finally {
       setSaving(false);
     }
   }
 
-  async function onRevoke(id: string) {
-    if (!confirm("Revoke this API key? This action cannot be undone.")) return;
+  async function confirmRevoke() {
+    if (!keyToRevoke) return;
     try {
-      await api(`/v1/api-keys/${id}`, { method: "DELETE" });
-      refresh();
+      await api(`/v1/api-keys/${keyToRevoke.id}`, { method: "DELETE" });
+      setKeyToRevoke(null);
+      await refresh();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed");
+      setError(errorMessage(e, "Failed to revoke key"));
+      throw e;
     }
   }
 
-  function copy(text: string) {
-    navigator.clipboard.writeText(text);
+  async function copy(text: string) {
+    const ok = await copyToClipboard(text);
+    if (!ok) {
+      setError("Clipboard blocked — copy the key manually.");
+      return;
+    }
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
   }
@@ -162,7 +223,8 @@ export default function ApiKeysPage() {
                     YOUR NEW KEY — COPY IT NOW
                   </div>
                   <p className="text-xs text-slate-300 mb-3">
-                    This key will not be shown again. Store it in a secure location.
+                    This key will not be shown again. Store it in a secure location before
+                    leaving this page.
                   </p>
                   <div className="font-mono text-[13px] bg-void border border-white/[0.06] rounded-lg px-3 py-2.5 break-all">
                     {revealedKey}
@@ -279,7 +341,7 @@ export default function ApiKeysPage() {
                             <Pencil size={14} strokeWidth={1.6} />
                           </button>
                           <button
-                            onClick={() => onRevoke(k.id)}
+                            onClick={() => setKeyToRevoke(k)}
                             className="w-8 h-8 grid place-items-center rounded-lg text-slate-400 hover:text-ember-soft hover:bg-ember/10 transition-colors"
                             aria-label="Revoke"
                           >
@@ -295,118 +357,115 @@ export default function ApiKeysPage() {
         </div>
       </main>
 
-      {/* Create modal */}
-      {showCreate && (
-        <div
-          className="fixed inset-0 z-50 grid place-items-center bg-black/60 backdrop-blur-sm px-4"
-          onClick={() => setShowCreate(false)}
-        >
-          <div
-            className="card w-full max-w-[480px] p-6 animate-fade-up"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <h3 className="text-[17px] font-semibold mb-1">Create API key</h3>
-            <p className="text-sm text-slate-300 mb-5">
-              Pick a name and optionally restrict which web origins can use this key.
-            </p>
-            <form onSubmit={onCreate} className="flex flex-col gap-4">
-              <div>
-                <label className="label-base mb-1.5 block" htmlFor="kname">Name</label>
-                <input
-                  id="kname"
-                  type="text"
-                  autoFocus
-                  className="input-base"
-                  placeholder="Production · Backend"
-                  value={newName}
-                  onChange={(e) => setNewName(e.target.value)}
-                />
-              </div>
-              <div>
-                <label className="label-base mb-1.5 block" htmlFor="korigins">
-                  Allowed origins <span className="text-slate-400 font-normal">(optional)</span>
-                </label>
-                <textarea
-                  id="korigins"
-                  rows={4}
-                  className="input-base font-mono text-[12px] resize-none"
-                  placeholder={"https://app.example.com\nhttps://staging.example.com"}
-                  value={newOrigins}
-                  onChange={(e) => setNewOrigins(e.target.value)}
-                />
-                <p className="text-[11px] text-slate-400 mt-1.5 leading-relaxed">
-                  One origin per line, in the form <code>scheme://host[:port]</code>. Leave empty to
-                  accept any origin (server-to-server calls are unaffected).
-                </p>
-              </div>
-              <div className="flex justify-end gap-2 mt-2">
-                <button type="button" onClick={() => setShowCreate(false)} className="btn-ghost">
-                  Cancel
-                </button>
-                <button type="submit" disabled={creating} className="btn-primary">
-                  {creating ? "Creating…" : "Create key"}
-                </button>
-              </div>
-            </form>
+      <Modal
+        open={showCreate}
+        onClose={() => setShowCreate(false)}
+        title="Create API key"
+        description="Pick a name and optionally restrict which web origins can use this key."
+      >
+        <form onSubmit={onCreate} className="flex flex-col gap-4">
+          <div>
+            <label className="label-base mb-1.5 block" htmlFor="kname">Name</label>
+            <input
+              id="kname"
+              type="text"
+              autoFocus
+              className="input-base"
+              placeholder="Production · Backend"
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+            />
           </div>
-        </div>
-      )}
+          <div>
+            <label className="label-base mb-1.5 block" htmlFor="korigins">
+              Allowed origins <span className="text-slate-400 font-normal">(optional)</span>
+            </label>
+            <textarea
+              id="korigins"
+              rows={4}
+              className="input-base font-mono text-[12px] resize-none"
+              placeholder={"https://app.example.com\nhttps://staging.example.com"}
+              value={newOrigins}
+              onChange={(e) => setNewOrigins(e.target.value)}
+            />
+            <p className="text-[11px] text-slate-400 mt-1.5 leading-relaxed">
+              One origin per line, in the form <code>scheme://host[:port]</code>. Leave empty to
+              accept any origin (server-to-server calls are unaffected).
+            </p>
+          </div>
+          <div className="flex justify-end gap-2 mt-2">
+            <button type="button" onClick={() => setShowCreate(false)} className="btn-ghost">
+              Cancel
+            </button>
+            <button type="submit" disabled={creating} className="btn-primary">
+              {creating ? "Creating…" : "Create key"}
+            </button>
+          </div>
+        </form>
+      </Modal>
 
-      {/* Edit modal */}
-      {editingKey && (
-        <div
-          className="fixed inset-0 z-50 grid place-items-center bg-black/60 backdrop-blur-sm px-4"
-          onClick={closeEdit}
-        >
-          <div
-            className="card w-full max-w-[480px] p-6 animate-fade-up"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <h3 className="text-[17px] font-semibold mb-1">Edit API key</h3>
-            <p className="text-sm text-slate-300 mb-5">
-              Change the name or update the allowed origins. The key value itself never changes.
-            </p>
-            <form onSubmit={onSaveEdit} className="flex flex-col gap-4">
-              <div>
-                <label className="label-base mb-1.5 block" htmlFor="ename">Name</label>
-                <input
-                  id="ename"
-                  type="text"
-                  autoFocus
-                  className="input-base"
-                  value={editName}
-                  onChange={(e) => setEditName(e.target.value)}
-                />
-              </div>
-              <div>
-                <label className="label-base mb-1.5 block" htmlFor="eorigins">
-                  Allowed origins
-                </label>
-                <textarea
-                  id="eorigins"
-                  rows={5}
-                  className="input-base font-mono text-[12px] resize-none"
-                  placeholder={"https://app.example.com"}
-                  value={editOrigins}
-                  onChange={(e) => setEditOrigins(e.target.value)}
-                />
-                <p className="text-[11px] text-slate-400 mt-1.5 leading-relaxed">
-                  One origin per line. Empty = accept any origin (browser-only restriction;
-                  server-side calls are unaffected).
-                </p>
-              </div>
-              <div className="flex justify-end gap-2 mt-2">
-                <button type="button" onClick={closeEdit} className="btn-ghost">
-                  Cancel
-                </button>
-                <button type="submit" disabled={saving} className="btn-primary">
-                  {saving ? "Saving…" : "Save changes"}
-                </button>
-              </div>
-            </form>
+      <Modal
+        open={editingKey !== null}
+        onClose={closeEdit}
+        title="Edit API key"
+        description="Change the name or update the allowed origins. The key value itself never changes."
+      >
+        <form onSubmit={onSaveEdit} className="flex flex-col gap-4">
+          <div>
+            <label className="label-base mb-1.5 block" htmlFor="ename">Name</label>
+            <input
+              id="ename"
+              type="text"
+              autoFocus
+              className="input-base"
+              value={editName}
+              onChange={(e) => setEditName(e.target.value)}
+            />
           </div>
-        </div>
-      )}
+          <div>
+            <label className="label-base mb-1.5 block" htmlFor="eorigins">
+              Allowed origins
+            </label>
+            <textarea
+              id="eorigins"
+              rows={5}
+              className="input-base font-mono text-[12px] resize-none"
+              placeholder={"https://app.example.com"}
+              value={editOrigins}
+              onChange={(e) => setEditOrigins(e.target.value)}
+            />
+            <p className="text-[11px] text-slate-400 mt-1.5 leading-relaxed">
+              One origin per line. Empty = accept any origin (browser-only restriction;
+              server-side calls are unaffected).
+            </p>
+          </div>
+          <div className="flex justify-end gap-2 mt-2">
+            <button type="button" onClick={closeEdit} className="btn-ghost">
+              Cancel
+            </button>
+            <button type="submit" disabled={saving} className="btn-primary">
+              {saving ? "Saving…" : "Save changes"}
+            </button>
+          </div>
+        </form>
+      </Modal>
+
+      <ConfirmDialog
+        open={keyToRevoke !== null}
+        title="Revoke API key"
+        description={
+          <>
+            Revoke <span className="font-mono text-snow">{keyToRevoke?.name}</span>?
+            Any client still using this key will start getting <code>401</code> immediately.
+            This cannot be undone.
+          </>
+        }
+        confirmLabel="Revoke key"
+        busyLabel="Revoking…"
+        danger
+        onConfirm={confirmRevoke}
+        onCancel={() => setKeyToRevoke(null)}
+      />
     </>
   );
 }

@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Sidebar } from "@/components/Sidebar";
 import { bootstrapSession, registerSessionLostHandler } from "@/lib/api";
+import { UserProvider } from "@/lib/user-context";
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
   const router = useRouter();
@@ -11,9 +12,14 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
   useEffect(() => {
     let cancelled = false;
-    registerSessionLostHandler(() => {
+
+    // `registerSessionLostHandler` now returns an unsubscribe function so we
+    // can safely scope the redirect handler to this layout instance — no
+    // dangling listeners trying to navigate after unmount.
+    const unsubscribe = registerSessionLostHandler(() => {
       router.replace("/login");
     });
+
     (async () => {
       const ok = await bootstrapSession();
       if (cancelled) return;
@@ -23,8 +29,10 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       }
       setReady(true);
     })();
+
     return () => {
       cancelled = true;
+      unsubscribe();
     };
   }, [router]);
 
@@ -37,9 +45,11 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   }
 
   return (
-    <div className="flex min-h-screen bg-void">
-      <Sidebar />
-      <div className="flex-1 min-w-0 flex flex-col">{children}</div>
-    </div>
+    <UserProvider>
+      <div className="flex min-h-screen bg-void">
+        <Sidebar />
+        <div className="flex-1 min-w-0 flex flex-col">{children}</div>
+      </div>
+    </UserProvider>
   );
 }
