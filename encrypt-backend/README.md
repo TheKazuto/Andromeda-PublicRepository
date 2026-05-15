@@ -179,8 +179,6 @@ partially-filled bundle errors at first request.
 | `FHE_AUTHORITY_VAULT_PUBKEY_B64` | ed25519 pubkey (32 B base64) for local re-verification of every signature. |
 | `FHE_AUTHORITY_PUBKEY_B64` | Fallback pubkey published as `FHEGatedPolicy.fhe_authority` when Vault is not configured (placeholder mode). |
 
-See `docs/FHE_AUTHORITY_KMS.md`.
-
 ### Gas sponsor (infra ready, not wired)
 | Var | Notes |
 |-----|-------|
@@ -213,7 +211,8 @@ npm run dev          # tsx watch src/server.ts — default port :3010
 | `npm run build` | `tsc` → `dist/`. |
 | `npm start` | Run the compiled server (`dist/server.js`). |
 | `npm run typecheck` | `tsc --noEmit`. |
-| `npm run lint` / `npm test` | Placeholders — not configured yet. |
+| `npm test` | Runs `src/routes/decision.test.ts` via `node --test` + `tsx`. Only the FHE decision canonical encoding is covered today; broader suite pending. |
+| `npm run lint` | Placeholder — no linter configured yet. |
 
 ## Required post-deploy operation
 
