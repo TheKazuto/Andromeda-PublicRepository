@@ -154,6 +154,8 @@ func (w *QuotaWorker) dispatch(ctx context.Context, sub store.NotificationSubscr
 	}
 	apiKeyUUID, err := uuid.Parse(apiKey.ID)
 	if err != nil {
+		w.logger.Warn("quota worker: invalid api key uuid",
+			"err", err, "user", sub.UserID, "api_key_id", apiKey.ID)
 		return
 	}
 	payload := map[string]any{

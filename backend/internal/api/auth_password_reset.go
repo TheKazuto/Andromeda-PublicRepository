@@ -45,12 +45,16 @@ func (s *Server) handleForgotPassword(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Detach from the request context so a slow SMTP path does not block
-	// the response (which has already been flushed).
-	go s.dispatchPasswordReset(email)
+	// the response (which has already been flushed). goBackground ties
+	// the goroutine to the server's lifecycle so graceful shutdown
+	// waits for in-flight emails instead of orphaning them.
+	s.goBackground(func(bgCtx context.Context) {
+		s.dispatchPasswordReset(bgCtx, email)
+	})
 }
 
-func (s *Server) dispatchPasswordReset(email string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+func (s *Server) dispatchPasswordReset(parent context.Context, email string) {
+	ctx, cancel := context.WithTimeout(parent, 15*time.Second)
 	defer cancel()
 
 	user, err := s.store.GetUserByEmail(ctx, email)
@@ -191,10 +195,22 @@ func (s *Server) handleResetPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Sign the user out everywhere — a password reset is a strong signal
-	// that previously-issued sessions should not survive.
-	_ = s.store.RevokeRefreshTokensByUser(r.Context(), userID)
-	// Also clear any lockout — the user just proved control of the email.
-	_ = s.store.ResetUserFailedLogin(r.Context(), userID)
+	// that previously-issued sessions should not survive. The revocation
+	// is BLOCKING: if it fails the password has been changed but old
+	// refresh tokens are still alive, so we surface 500 and force the
+	// operator to investigate rather than silently leaving them valid.
+	if err := s.store.RevokeRefreshTokensByUser(r.Context(), userID); err != nil {
+		slog.Default().Error("reset-password: revoke refresh tokens failed",
+			"user_id", userID, "err", err)
+		writeInternal(w)
+		return
+	}
+	// Best-effort lockout clear — the user just proved control of the
+	// email, so we don't want them blocked. Logging only.
+	if err := s.store.ResetUserFailedLogin(r.Context(), userID); err != nil {
+		slog.Default().Warn("reset-password: clear lockout failed",
+			"user_id", userID, "err", err)
+	}
 
 	w.WriteHeader(http.StatusNoContent)
 }

@@ -76,10 +76,16 @@ func (s *Service) RemoveOverageItem(ctx context.Context, stripeItemID string) er
 // consumed since the last report. Stripe aggregates these events against
 // the configured meter and bills at the end of the period.
 //
+// `idempotencyKey` MUST be deterministic for a given (subscription,
+// reported_total, delta) tuple so a crash between a successful Stripe
+// ack and the local DB update does NOT result in double-billing on the
+// next tick — Stripe deduplicates by Idempotency-Key for 24 h. Pass an
+// empty string to opt out (e.g. ad-hoc telemetry pushes).
+//
 // Returns the value reported (for telemetry). The caller is responsible
 // for advancing overage_reported_tokens by the same amount AFTER this
 // returns nil.
-func (s *Service) ReportOverage(ctx context.Context, stripeCustomerID string, tokens int64) (int64, error) {
+func (s *Service) ReportOverage(ctx context.Context, stripeCustomerID string, tokens int64, idempotencyKey string) (int64, error) {
 	if !s.Enabled() {
 		return 0, ErrServiceDisabled
 	}
@@ -95,6 +101,9 @@ func (s *Service) ReportOverage(ctx context.Context, stripeCustomerID string, to
 			"stripe_customer_id": stripeCustomerID,
 			"value":              strconv.FormatInt(tokens, 10),
 		},
+	}
+	if idempotencyKey != "" {
+		params.SetIdempotencyKey(idempotencyKey)
 	}
 	if _, err := meterevent.New(params); err != nil {
 		return 0, fmt.Errorf("report meter event: %w", err)

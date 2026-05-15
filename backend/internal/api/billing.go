@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -90,8 +91,9 @@ func (s *Server) handleBillingCheckout(w http.ResponseWriter, r *http.Request) {
 	if res.StripeCustomerID != "" && stripeCustomerID == "" {
 		if err := s.store.SetUserStripeCustomerID(r.Context(), user.ID, res.StripeCustomerID); err != nil &&
 			!errors.Is(err, store.ErrAlreadyExists) {
-			// Non-fatal — Stripe still completed.
-			_ = err
+			// Non-fatal — Stripe still completed. Logged for reconciliation.
+			slog.Default().Warn("checkout: persist stripe customer id failed",
+				"user_id", user.ID, "customer_id", res.StripeCustomerID, "err", err)
 		}
 	}
 
@@ -175,7 +177,10 @@ func (s *Server) handleBillingOverageEnable(w http.ResponseWriter, r *http.Reque
 		writeInternal(w)
 		return
 	}
-	_ = s.store.SetSubscriptionOverageItem(r.Context(), sub.ID, itemID)
+	if err := s.store.SetSubscriptionOverageItem(r.Context(), sub.ID, itemID); err != nil {
+		slog.Default().Warn("overage enable: persist item id failed",
+			"sub_id", sub.ID, "item_id", itemID, "err", err)
+	}
 	enabled := true
 	cardPresent := true
 	if _, err := s.store.UpdateSubscription(r.Context(), sub.ID, store.SubscriptionMutation{
@@ -210,7 +215,10 @@ func (s *Server) handleBillingOverageDisable(w http.ResponseWriter, r *http.Requ
 			return
 		}
 	}
-	_ = s.store.SetSubscriptionOverageItem(r.Context(), sub.ID, "")
+	if err := s.store.SetSubscriptionOverageItem(r.Context(), sub.ID, ""); err != nil {
+		slog.Default().Warn("overage disable: clear item id failed",
+			"sub_id", sub.ID, "err", err)
+	}
 	disabled := false
 	if _, err := s.store.UpdateSubscription(r.Context(), sub.ID, store.SubscriptionMutation{
 		OverageEnabled: &disabled,
@@ -264,7 +272,12 @@ func (s *Server) handleStripeWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.billingWebhook.Handle(r.Context(), ev); err != nil {
-		_ = s.store.UnmarkStripeEventProcessed(r.Context(), ev.ID)
+		slog.Default().Error("stripe webhook handler failed",
+			"event_id", ev.ID, "type", ev.Type, "err", err)
+		if uErr := s.store.UnmarkStripeEventProcessed(r.Context(), ev.ID); uErr != nil {
+			slog.Default().Warn("stripe webhook: unmark dedup row failed",
+				"event_id", ev.ID, "err", uErr)
+		}
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}

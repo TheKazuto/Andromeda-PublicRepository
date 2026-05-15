@@ -26,7 +26,7 @@ type GiftPurchaseObserver interface {
 
 // GiftPurchaseEvent is the payload passed to the observer.
 type GiftPurchaseEvent struct {
-	GiftCard *store.GiftCard
+	GiftCard   *store.GiftCard
 	BuyerEmail string
 }
 
@@ -36,11 +36,11 @@ type GiftPurchaseEvent struct {
 //
 // Events handled:
 //
-//   * checkout.session.completed       — assigns plan + persists Stripe ids
-//   * customer.subscription.updated    — syncs status, cancellation
-//   * customer.subscription.deleted    — marks cancelled
-//   * invoice.payment_failed           — marks past_due
-//   * invoice.paid / invoice.payment_succeeded — restores active
+//   - checkout.session.completed       — assigns plan + persists Stripe ids
+//   - customer.subscription.updated    — syncs status, cancellation
+//   - customer.subscription.deleted    — marks cancelled
+//   - invoice.payment_failed           — marks past_due
+//   - invoice.paid / invoice.payment_succeeded — restores active
 //
 // Anything else is logged at debug and acknowledged with HTTP 200.
 type WebhookHandler struct {

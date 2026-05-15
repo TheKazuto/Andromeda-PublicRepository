@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -148,8 +149,13 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 	if row.RevokedAt != nil {
 		// Reuse of a consumed token: assume the cookie was stolen and
-		// revoke every descendant before refusing the request.
-		_ = s.store.RevokeRefreshTokenFamily(r.Context(), row.ID)
+		// revoke every descendant before refusing the request. The
+		// revocation failing is logged but does not change the user-
+		// visible 401 — the caller is rejected either way.
+		if err := s.store.RevokeRefreshTokenFamily(r.Context(), row.ID); err != nil {
+			slog.Default().Warn("refresh: revoke family on reuse failed",
+				"token_id", row.ID, "err", err)
+		}
 		clearRefreshCookie(w, s.cfg.Env == "production")
 		writeError(w, http.StatusUnauthorized, "refresh token reused")
 		return
@@ -183,7 +189,10 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	if raw, ok := readRefreshCookie(r); ok {
 		hash := auth.HashOpaqueToken(raw)
 		if row, err := s.store.GetRefreshTokenByHash(r.Context(), hash); err == nil {
-			_ = s.store.RevokeRefreshTokensByUser(r.Context(), row.UserID)
+			if rErr := s.store.RevokeRefreshTokensByUser(r.Context(), row.UserID); rErr != nil {
+				slog.Default().Warn("logout: revoke refresh tokens failed",
+					"user_id", row.UserID, "err", rErr)
+			}
 		}
 	}
 	clearRefreshCookie(w, s.cfg.Env == "production")
@@ -215,7 +224,10 @@ func (s *Server) recordFailedLogin(ctx context.Context, userID string) {
 	if userID == "" {
 		return
 	}
-	_ = s.store.IncrementUserFailedLogin(ctx, userID, LockoutThreshold, LockoutDuration)
+	if err := s.store.IncrementUserFailedLogin(ctx, userID, LockoutThreshold, LockoutDuration); err != nil {
+		slog.Default().Warn("failed login: increment counter failed",
+			"user_id", userID, "err", err)
+	}
 }
 
 // recordSuccessfulLogin clears the counter on a clean login.
@@ -223,7 +235,10 @@ func (s *Server) recordSuccessfulLogin(ctx context.Context, userID string) {
 	if userID == "" {
 		return
 	}
-	_ = s.store.ResetUserFailedLogin(ctx, userID)
+	if err := s.store.ResetUserFailedLogin(ctx, userID); err != nil {
+		slog.Default().Warn("successful login: reset counter failed",
+			"user_id", userID, "err", err)
+	}
 }
 
 // truncate caps a string at n bytes — used to keep User-Agent strings out of

@@ -1,12 +1,12 @@
 // Package billing wraps Stripe SDK calls so the rest of the gateway never
 // imports stripe-go directly. Two responsibilities live here:
 //
-//   1. Customer + Checkout: create a Stripe Customer for an Andromeda user
-//      lazily on first checkout, then build a Stripe Checkout Session for
-//      the chosen plan + billing cycle.
-//   2. Webhook event handling: parse incoming events with the webhook
-//      secret and apply state mutations to our subscription tables
-//      (handled in webhook.go in this package).
+//  1. Customer + Checkout: create a Stripe Customer for an Andromeda user
+//     lazily on first checkout, then build a Stripe Checkout Session for
+//     the chosen plan + billing cycle.
+//  2. Webhook event handling: parse incoming events with the webhook
+//     secret and apply state mutations to our subscription tables
+//     (handled in webhook.go in this package).
 //
 // The Service is constructed once at boot and shared across handlers.
 package billing
@@ -26,22 +26,22 @@ import (
 
 // Service is the high-level billing facade.
 type Service struct {
-	apiKey         string
-	webhookSecret  string
-	priceIDs       map[string]string // "pro:monthly" -> "price_..."
-	successURL     string
-	cancelURL      string
-	logger         *slog.Logger
+	apiKey        string
+	webhookSecret string
+	priceIDs      map[string]string // "pro:monthly" -> "price_..."
+	successURL    string
+	cancelURL     string
+	logger        *slog.Logger
 }
 
 // Options is the bundle of configuration the Service needs at boot.
 type Options struct {
-	APIKey         string
-	WebhookSecret  string
-	PriceIDsJSON   string // raw env value
-	SuccessURL     string
-	CancelURL      string
-	Logger         *slog.Logger
+	APIKey        string
+	WebhookSecret string
+	PriceIDsJSON  string // raw env value
+	SuccessURL    string
+	CancelURL     string
+	Logger        *slog.Logger
 }
 
 // New parses the config and returns a Service. When APIKey is empty the
@@ -97,8 +97,10 @@ func (s *Service) PriceID(planCode, cycle string) (string, error) {
 
 // EnsureCustomer returns the Stripe customer id for the user. If the
 // supplied existingID is non-empty, it is returned as-is (one Stripe
-// customer per user, ever). Otherwise a new customer is created and the
-// id returned for the caller to persist on users.stripe_customer_id.
+// customer per user, ever). Otherwise a new customer is created with
+// an Idempotency-Key derived from the user id — Stripe deduplicates
+// for 24 h, so a transient network failure between Stripe creation
+// and our local persistence cannot strand a duplicate customer.
 func (s *Service) EnsureCustomer(ctx context.Context, existingID, email, userID string) (string, error) {
 	if !s.Enabled() {
 		return "", ErrServiceDisabled
@@ -109,10 +111,17 @@ func (s *Service) EnsureCustomer(ctx context.Context, existingID, email, userID 
 	if email == "" {
 		return "", errors.New("email required to create Stripe customer")
 	}
+	if userID == "" {
+		return "", errors.New("user id required to create Stripe customer")
+	}
 	params := &stripe.CustomerParams{
 		Email: stripe.String(email),
 	}
 	params.AddMetadata("andromeda_user_id", userID)
+	// Stable per-user Idempotency-Key. Two parallel checkout attempts
+	// for the same user collapse to one Stripe customer; a retry after
+	// a network blip returns the previously created object.
+	params.SetIdempotencyKey("andromeda_customer_" + userID)
 	c, err := customer.New(params)
 	if err != nil {
 		return "", fmt.Errorf("create stripe customer: %w", err)
@@ -123,11 +132,11 @@ func (s *Service) EnsureCustomer(ctx context.Context, existingID, email, userID 
 // CreateCheckoutSessionInput is the payload for building a hosted
 // Checkout Session URL.
 type CreateCheckoutSessionInput struct {
-	UserID            string
-	UserEmail         string
-	StripeCustomerID  string // empty → EnsureCustomer creates one
-	PlanCode          string
-	Cycle             string // 'monthly' | 'annual'
+	UserID             string
+	UserEmail          string
+	StripeCustomerID   string // empty → EnsureCustomer creates one
+	PlanCode           string
+	Cycle              string // 'monthly' | 'annual'
 	SuccessURLOverride string // optional per-call override
 	CancelURLOverride  string
 }
@@ -172,8 +181,8 @@ func (s *Service) CreateCheckoutSession(ctx context.Context, in CreateCheckoutSe
 				Quantity: stripe.Int64(1),
 			},
 		},
-		SuccessURL: stripe.String(successURL),
-		CancelURL:  stripe.String(cancelURL),
+		SuccessURL:       stripe.String(successURL),
+		CancelURL:        stripe.String(cancelURL),
 		SubscriptionData: &stripe.CheckoutSessionSubscriptionDataParams{},
 	}
 	params.AddMetadata("andromeda_user_id", in.UserID)

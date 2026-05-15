@@ -22,8 +22,19 @@ const (
 var DefaultScopes = []string{ScopeRead, ScopeWrite}
 
 // ValidateScopes returns "" if every entry is a known scope (or the
-// wildcard), else the first invalid entry.
+// wildcard), else the first invalid entry. The wildcard, when present,
+// must appear alone — mixing "*" with concrete scopes is rejected so
+// minted API keys never have ambiguous permission sets.
 func ValidateScopes(scopes []string) string {
+	hasWildcard := false
+	for _, s := range scopes {
+		if s == ScopeWildcard {
+			hasWildcard = true
+		}
+	}
+	if hasWildcard && len(scopes) > 1 {
+		return ScopeWildcard
+	}
 	for _, s := range scopes {
 		switch s {
 		case ScopeRead, ScopeWrite, ScopeAdmin, ScopeWildcard:

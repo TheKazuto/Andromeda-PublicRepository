@@ -317,9 +317,9 @@ func (s *PostgresStore) GetGiftCardByToken(ctx context.Context, token string) (*
 // ApplyGiftCard atomically marks a gift redeemed AND applies the plan
 // to the recipient's subscription. Three outcomes:
 //
-//   * Action="created"  — recipient had no active subscription
-//   * Action="extended" — current plan tier ≥ gift plan tier
-//   * Action="upgraded" — current plan tier < gift plan tier (plan + RPS swap)
+//   - Action="created"  — recipient had no active subscription
+//   - Action="extended" — current plan tier ≥ gift plan tier
+//   - Action="upgraded" — current plan tier < gift plan tier (plan + RPS swap)
 //
 // "Tier" comparison is plans.sort_order — equal tiers are treated as
 // equal (no upgrade). Errors: ErrNotFound / ErrGiftAlreadyUsed /

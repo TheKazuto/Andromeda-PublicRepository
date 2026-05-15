@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"embed"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -13,14 +14,35 @@ import (
 //go:embed migrations/*.sql
 var migrationsFS embed.FS
 
+// migrationLockID is a fixed pg_advisory_lock id shared by every
+// backend instance that runs migrations. A 64-bit constant — the value
+// is arbitrary as long as nobody else in this Postgres uses the same
+// number for unrelated locks.
+const migrationLockID int64 = 0x416E64726F6D6564 // "Andromed"
+
 // Migrate applies all SQL files under migrations/ in lexical order. Tracking
 // is done via a `backend_schema_migrations` table; idempotent by file name.
+//
+// A session-level advisory lock guarantees that two concurrent processes
+// (e.g. blue/green deploys, or two replicas booting at the same moment)
+// serialise migration work without corrupting the schema.
 func Migrate(ctx context.Context, databaseURL string) error {
 	conn, err := pgx.Connect(ctx, databaseURL)
 	if err != nil {
 		return fmt.Errorf("connect: %w", err)
 	}
 	defer conn.Close(ctx)
+
+	// Acquire the advisory lock for the duration of the connection. Other
+	// instances will block on pg_advisory_lock until we release.
+	if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock($1)`, migrationLockID); err != nil {
+		return fmt.Errorf("acquire migration lock: %w", err)
+	}
+	defer func() {
+		// Best-effort release; the lock is automatically dropped when the
+		// connection closes, so a failure here is non-fatal.
+		_, _ = conn.Exec(context.Background(), `SELECT pg_advisory_unlock($1)`, migrationLockID)
+	}()
 
 	if _, err := conn.Exec(ctx, `
 		CREATE TABLE IF NOT EXISTS backend_schema_migrations (
@@ -49,7 +71,7 @@ func Migrate(ctx context.Context, databaseURL string) error {
 		if err == nil {
 			continue
 		}
-		if err != pgx.ErrNoRows {
+		if !errors.Is(err, pgx.ErrNoRows) {
 			return fmt.Errorf("check migration %s: %w", name, err)
 		}
 		body, err := migrationsFS.ReadFile("migrations/" + name)

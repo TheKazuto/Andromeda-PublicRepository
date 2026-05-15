@@ -92,6 +92,12 @@ type AdminStore interface {
 
 	AppendAdminAudit(ctx context.Context, in AdminAuditAppend) error
 	ListAdminAudit(ctx context.Context, limit int) ([]AdminAuditEntry, error)
+
+	// TOTP replay protection — see auth.VerifyTOTP. The last successfully
+	// accepted TOTP window is stored per-admin so the same 6-digit code
+	// cannot be reused inside its 30-second validity envelope.
+	GetAdminTOTPLastWindow(ctx context.Context, adminID string) (int64, error)
+	SetAdminTOTPLastWindow(ctx context.Context, adminID string, window int64) error
 }
 
 const adminUserColumns = `
@@ -222,6 +228,44 @@ func (s *PostgresStore) DeactivateAdminUser(ctx context.Context, adminID string)
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrNotFound
+	}
+	return nil
+}
+
+// GetAdminTOTPLastWindow returns the most recently consumed TOTP window
+// for the admin. Zero when the admin has never authenticated with TOTP.
+func (s *PostgresStore) GetAdminTOTPLastWindow(ctx context.Context, adminID string) (int64, error) {
+	var w *int64
+	err := s.pool.QueryRow(ctx,
+		`SELECT mfa_last_window FROM admin_users WHERE id = $1`, adminID).Scan(&w)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, ErrNotFound
+		}
+		return 0, fmt.Errorf("get totp last window: %w", err)
+	}
+	if w == nil {
+		return 0, nil
+	}
+	return *w, nil
+}
+
+// SetAdminTOTPLastWindow advances mfa_last_window only when the supplied
+// window is strictly greater than the persisted one. The atomic update
+// prevents two parallel logins from consuming the same window.
+func (s *PostgresStore) SetAdminTOTPLastWindow(ctx context.Context, adminID string, window int64) error {
+	tag, err := s.pool.Exec(ctx, `
+        UPDATE admin_users
+        SET mfa_last_window = $2, updated_at = now()
+        WHERE id = $1
+          AND (mfa_last_window IS NULL OR mfa_last_window < $2)`, adminID, window)
+	if err != nil {
+		return fmt.Errorf("set totp last window: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		// Either the admin doesn't exist or another login already
+		// claimed this (or a newer) window — both are replay attempts.
+		return ErrAlreadyExists
 	}
 	return nil
 }

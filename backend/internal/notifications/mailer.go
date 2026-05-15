@@ -15,10 +15,19 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/mail"
 	"net/smtp"
+	"strconv"
 	"strings"
+	"time"
 )
+
+// smtpDialTimeout caps how long a single Send blocks waiting on the
+// remote SMTP host before failing. Without a timeout an unresponsive
+// host can pin goroutines forever — the worker fleet would silently
+// grind to a halt under load.
+const smtpDialTimeout = 10 * time.Second
 
 // Mailer sends a single email. Implementations must be safe for concurrent
 // use — the workers may dispatch multiple alerts in parallel.
@@ -69,6 +78,19 @@ type smtpMailer struct {
 	logger *slog.Logger
 }
 
+// sanitizeHeader strips CR/LF and NUL from a single SMTP header value.
+// Without this an attacker who can influence Subject/From/To (gift
+// messages, plan names sourced from the dashboard, etc.) could inject
+// extra headers via CRLF and add Bcc:, alter the Reply-To, or smuggle
+// a second message body. This is the classic SMTP-header-injection
+// vulnerability — the fix is to refuse line terminators outright.
+func sanitizeHeader(v string) string {
+	v = strings.ReplaceAll(v, "\r", "")
+	v = strings.ReplaceAll(v, "\n", "")
+	v = strings.ReplaceAll(v, "\x00", "")
+	return strings.TrimSpace(v)
+}
+
 func (m *smtpMailer) Send(msg Message) error {
 	if msg.To == "" {
 		return errors.New("missing To")
@@ -85,22 +107,35 @@ func (m *smtpMailer) Send(msg Message) error {
 	if msg.From == "" {
 		return errors.New("missing From and SMTPConfig.From")
 	}
+	if _, err := mail.ParseAddress(msg.From); err != nil {
+		return fmt.Errorf("invalid sender: %w", err)
+	}
 
 	body := buildMIME(msg)
-	addr := fmt.Sprintf("%s:%d", m.cfg.Host, m.cfg.Port)
+	addr := net.JoinHostPort(m.cfg.Host, strconv.Itoa(m.cfg.Port))
 
 	auth := smtp.PlainAuth("", m.cfg.Username, m.cfg.Password, m.cfg.Host)
 	switch m.cfg.Port {
 	case 465:
-		// Implicit TLS — net/smtp doesn't support this directly; we dial
-		// a tls connection first and hand it to NewClient.
-		conn, err := tls.Dial("tcp", addr, &tls.Config{ServerName: m.cfg.Host})
+		// Implicit TLS — net/smtp doesn't support this directly. Dial
+		// the underlying TCP socket with a bounded timeout, then wrap
+		// in TLS and hand to NewClient.
+		dialer := &net.Dialer{Timeout: smtpDialTimeout}
+		rawConn, err := dialer.Dial("tcp", addr)
 		if err != nil {
-			return fmt.Errorf("dial tls smtp: %w", err)
+			return fmt.Errorf("dial smtp: %w", err)
 		}
-		defer conn.Close()
-		c, err := smtp.NewClient(conn, m.cfg.Host)
+		// Bound the entire SMTP exchange too so a hung server can't
+		// indefinitely block on subsequent reads/writes.
+		_ = rawConn.SetDeadline(time.Now().Add(smtpDialTimeout * 6))
+		tlsConn := tls.Client(rawConn, &tls.Config{ServerName: m.cfg.Host})
+		if err := tlsConn.Handshake(); err != nil {
+			_ = rawConn.Close()
+			return fmt.Errorf("smtp tls handshake: %w", err)
+		}
+		c, err := smtp.NewClient(tlsConn, m.cfg.Host)
 		if err != nil {
+			_ = tlsConn.Close()
 			return fmt.Errorf("smtp client: %w", err)
 		}
 		defer c.Close()
@@ -112,8 +147,42 @@ func (m *smtpMailer) Send(msg Message) error {
 		return sendOnClient(c, msg.From, msg.To, body)
 	default:
 		// 587 (STARTTLS) and 25 — net/smtp handles STARTTLS upgrade.
-		return smtp.SendMail(addr, auth, msg.From, []string{msg.To}, body)
+		// smtp.SendMail does not expose a Dialer hook, so wrap the
+		// dial+exchange manually to enforce a timeout.
+		return sendWithSTARTTLS(addr, m.cfg.Host, auth, msg.From, msg.To, body)
 	}
+}
+
+// sendWithSTARTTLS is the timed-out equivalent of smtp.SendMail for the
+// 587/25 path. It dials with a deadline, optionally upgrades to TLS via
+// STARTTLS, authenticates, and delivers the message.
+func sendWithSTARTTLS(addr, host string, auth smtp.Auth, from, to string, body []byte) error {
+	dialer := &net.Dialer{Timeout: smtpDialTimeout}
+	rawConn, err := dialer.Dial("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("dial smtp: %w", err)
+	}
+	_ = rawConn.SetDeadline(time.Now().Add(smtpDialTimeout * 6))
+	c, err := smtp.NewClient(rawConn, host)
+	if err != nil {
+		_ = rawConn.Close()
+		return fmt.Errorf("smtp client: %w", err)
+	}
+	defer c.Close()
+
+	if ok, _ := c.Extension("STARTTLS"); ok {
+		if err := c.StartTLS(&tls.Config{ServerName: host}); err != nil {
+			return fmt.Errorf("smtp starttls: %w", err)
+		}
+	}
+	if auth != nil {
+		if ok, _ := c.Extension("AUTH"); ok {
+			if err := c.Auth(auth); err != nil {
+				return fmt.Errorf("smtp auth: %w", err)
+			}
+		}
+	}
+	return sendOnClient(c, from, to, body)
 }
 
 func sendOnClient(c *smtp.Client, from, to string, body []byte) error {
@@ -137,16 +206,21 @@ func sendOnClient(c *smtp.Client, from, to string, body []byte) error {
 	return c.Quit()
 }
 
-// buildMIME assembles a minimal RFC 5322 + MIME 1.0 message. When HTML
-// body is empty, sends as text/plain; otherwise sends multipart/alternative.
+// buildMIME assembles a minimal RFC 5322 + MIME 1.0 message. Every
+// header value is sanitised so a CRLF in From/To/Subject cannot inject
+// arbitrary headers downstream. When HTML body is empty, sends as
+// text/plain; otherwise sends multipart/alternative.
 func buildMIME(msg Message) []byte {
 	var buf bytes.Buffer
-	host := hostOf(msg.From)
+	from := sanitizeHeader(msg.From)
+	to := sanitizeHeader(msg.To)
+	subject := sanitizeHeader(msg.Subject)
+	host := hostOf(from)
 	boundary := "andromeda-mp-" + randomBoundary()
 
-	buf.WriteString("From: " + msg.From + "\r\n")
-	buf.WriteString("To: " + msg.To + "\r\n")
-	buf.WriteString("Subject: " + msg.Subject + "\r\n")
+	buf.WriteString("From: " + from + "\r\n")
+	buf.WriteString("To: " + to + "\r\n")
+	buf.WriteString("Subject: " + subject + "\r\n")
 	buf.WriteString("MIME-Version: 1.0\r\n")
 	buf.WriteString("Message-ID: <" + randomMsgID() + "@" + host + ">\r\n")
 

@@ -16,12 +16,15 @@ import (
 // the rate per source — the stricter per-account lockout for known bad
 // passwords is enforced separately at the store layer.
 //
-// Buckets are evicted lazily after `ttl` of inactivity so a long-running
-// process does not hoard memory for IPs that have stopped probing.
+// Buckets are evicted lazily after `ttl` of inactivity AND a hard ceiling
+// (`maxBuckets`) is enforced so a process under DDoS does not grow the
+// map without bound — when the cap is reached we evict the oldest entry
+// before inserting the new one.
 type authRateLimiter struct {
-	rps   rate.Limit // requests per second sustained
-	burst int        // initial bucket capacity
-	ttl   time.Duration
+	rps        rate.Limit // requests per second sustained
+	burst      int        // initial bucket capacity
+	ttl        time.Duration
+	maxBuckets int
 
 	mu      sync.Mutex
 	buckets map[string]*ipBucket
@@ -38,10 +41,11 @@ type ipBucket struct {
 // stuffers are throttled to a useless rate.
 func newAuthRateLimiter() *authRateLimiter {
 	rl := &authRateLimiter{
-		rps:     rate.Every(6 * time.Second), // 10 / minute
-		burst:   10,
-		ttl:     30 * time.Minute,
-		buckets: make(map[string]*ipBucket),
+		rps:        rate.Every(6 * time.Second), // 10 / minute
+		burst:      10,
+		ttl:        30 * time.Minute,
+		maxBuckets: 50_000,
+		buckets:    make(map[string]*ipBucket),
 	}
 	go rl.gcLoop()
 	return rl
@@ -50,14 +54,37 @@ func newAuthRateLimiter() *authRateLimiter {
 // allow reports whether the request from this IP is permitted right now.
 func (rl *authRateLimiter) allow(ip string) bool {
 	rl.mu.Lock()
-	defer rl.mu.Unlock()
 	b, ok := rl.buckets[ip]
 	if !ok {
+		if len(rl.buckets) >= rl.maxBuckets {
+			rl.evictOldestLocked()
+		}
 		b = &ipBucket{limiter: rate.NewLimiter(rl.rps, rl.burst)}
 		rl.buckets[ip] = b
 	}
 	b.lastHit = time.Now()
+	rl.mu.Unlock()
 	return b.limiter.Allow()
+}
+
+// evictOldestLocked drops the bucket with the oldest lastHit. Caller
+// must hold rl.mu.
+func (rl *authRateLimiter) evictOldestLocked() {
+	var (
+		oldestKey  string
+		oldestTime time.Time
+		first      = true
+	)
+	for k, b := range rl.buckets {
+		if first || b.lastHit.Before(oldestTime) {
+			oldestKey = k
+			oldestTime = b.lastHit
+			first = false
+		}
+	}
+	if oldestKey != "" {
+		delete(rl.buckets, oldestKey)
+	}
 }
 
 func (rl *authRateLimiter) gcLoop() {
@@ -65,11 +92,19 @@ func (rl *authRateLimiter) gcLoop() {
 	defer ticker.Stop()
 	for range ticker.C {
 		cutoff := time.Now().Add(-rl.ttl)
+
+		// Snapshot the keys under lock, then evict in a second pass to
+		// minimise time holding the lock and avoid concurrent-iteration
+		// concerns (although the lock would already prevent that).
 		rl.mu.Lock()
+		stale := make([]string, 0, len(rl.buckets)/8)
 		for ip, b := range rl.buckets {
 			if b.lastHit.Before(cutoff) {
-				delete(rl.buckets, ip)
+				stale = append(stale, ip)
 			}
+		}
+		for _, ip := range stale {
+			delete(rl.buckets, ip)
 		}
 		rl.mu.Unlock()
 	}

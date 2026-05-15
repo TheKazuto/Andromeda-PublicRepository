@@ -19,6 +19,12 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// MaxWebhookPayloadBytes caps the serialised event size that goes into
+// webhook_deliveries.payload. Without a cap a runaway producer (or
+// adversarial input) can fill the table with multi-MB rows, blow up
+// the gateway dispatcher's memory, or hit Postgres TOAST limits.
+const MaxWebhookPayloadBytes = 100 * 1024
+
 // Publisher writes webhook_deliveries rows; the gateway-side dispatcher
 // claims them with SKIP LOCKED and POSTs to the registered URL.
 type Publisher struct {
@@ -30,7 +36,8 @@ func NewPublisher(pool *pgxpool.Pool) *Publisher { return &Publisher{pool: pool}
 // Publish enqueues one delivery per active endpoint registered for
 // `apiKeyID` that subscribes to `eventType` (or has no event filter,
 // which means "all events"). Returns the number of endpoints fanned
-// out to.
+// out to. Payloads larger than MaxWebhookPayloadBytes are rejected
+// before any DB write so a single bad event cannot pollute the queue.
 func (p *Publisher) Publish(ctx context.Context, apiKeyID uuid.UUID, eventType string, payload any) (int, error) {
 	body, err := json.Marshal(map[string]any{
 		"id":      uuid.New().String(),
@@ -40,6 +47,10 @@ func (p *Publisher) Publish(ctx context.Context, apiKeyID uuid.UUID, eventType s
 	})
 	if err != nil {
 		return 0, fmt.Errorf("publish marshal: %w", err)
+	}
+	if len(body) > MaxWebhookPayloadBytes {
+		return 0, fmt.Errorf("webhook payload too large: %d bytes (max %d)",
+			len(body), MaxWebhookPayloadBytes)
 	}
 
 	rows, err := p.pool.Query(ctx, `

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -69,7 +70,10 @@ func (s *Server) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := auth.VerifyAdminPassword(pass, admin.HashedPassword); err != nil {
-		_ = s.store.IncrementAdminFailedLogin(ctx, admin.ID, AdminLockoutThreshold, AdminLockoutDuration)
+		if incErr := s.store.IncrementAdminFailedLogin(ctx, admin.ID, AdminLockoutThreshold, AdminLockoutDuration); incErr != nil {
+			slog.Default().Warn("admin login: increment failed login failed",
+				"admin_id", admin.ID, "err", incErr)
+		}
 		writeError(w, http.StatusUnauthorized, "invalid credentials")
 		return
 	}
@@ -80,14 +84,32 @@ func (s *Server) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 				"two-factor authentication code required")
 			return
 		}
-		if err := auth.VerifyTOTP(admin.MFASecret, req.TOTPCode); err != nil {
-			_ = s.store.IncrementAdminFailedLogin(ctx, admin.ID, AdminLockoutThreshold, AdminLockoutDuration)
+		lastWindow, lwErr := s.store.GetAdminTOTPLastWindow(ctx, admin.ID)
+		if lwErr != nil && !errors.Is(lwErr, store.ErrNotFound) {
+			slog.Default().Warn("admin login: totp last window lookup failed",
+				"admin_id", admin.ID, "err", lwErr)
+		}
+		window, err := auth.VerifyTOTP(admin.MFASecret, req.TOTPCode, lastWindow)
+		if err != nil {
+			if incErr := s.store.IncrementAdminFailedLogin(ctx, admin.ID, AdminLockoutThreshold, AdminLockoutDuration); incErr != nil {
+				slog.Default().Warn("admin login: increment failed login failed",
+					"admin_id", admin.ID, "err", incErr)
+			}
+			writeError(w, http.StatusUnauthorized, "invalid credentials")
+			return
+		}
+		// Burn this window so the same code cannot be reused.
+		if setErr := s.store.SetAdminTOTPLastWindow(ctx, admin.ID, window); setErr != nil {
+			// Concurrent login already burned this window — treat as replay.
 			writeError(w, http.StatusUnauthorized, "invalid credentials")
 			return
 		}
 	}
 
-	_ = s.store.ResetAdminFailedLogin(ctx, admin.ID)
+	if err := s.store.ResetAdminFailedLogin(ctx, admin.ID); err != nil {
+		slog.Default().Warn("admin login: reset failed login failed",
+			"admin_id", admin.ID, "err", err)
+	}
 
 	tok, exp, err := auth.IssueAdminToken([]byte(s.cfg.AdminJWTSecret),
 		admin.ID, admin.Email, admin.Role)
@@ -97,7 +119,10 @@ func (s *Server) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ip := clientIP(r)
-	_ = s.store.TouchAdminLogin(ctx, admin.ID, ip)
+	if err := s.store.TouchAdminLogin(ctx, admin.ID, ip); err != nil {
+		slog.Default().Warn("admin login: touch last_login_at failed",
+			"admin_id", admin.ID, "err", err)
+	}
 
 	s.adminAuditAppend(ctx, admin, r, "admin.login.success", "", map[string]any{
 		"role": admin.Role,
@@ -215,12 +240,28 @@ func (s *Server) handleAdminTOTPVerify(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "run /totp/setup first")
 		return
 	}
-	if err := auth.VerifyTOTP(admin.MFASecret, req.Code); err != nil {
-		_ = s.store.IncrementAdminFailedLogin(r.Context(), admin.ID, AdminLockoutThreshold, AdminLockoutDuration)
+	lastWindow, lwErr := s.store.GetAdminTOTPLastWindow(r.Context(), admin.ID)
+	if lwErr != nil && !errors.Is(lwErr, store.ErrNotFound) {
+		slog.Default().Warn("admin totp verify: last window lookup failed",
+			"admin_id", admin.ID, "err", lwErr)
+	}
+	window, err := auth.VerifyTOTP(admin.MFASecret, req.Code, lastWindow)
+	if err != nil {
+		if incErr := s.store.IncrementAdminFailedLogin(r.Context(), admin.ID, AdminLockoutThreshold, AdminLockoutDuration); incErr != nil {
+			slog.Default().Warn("admin totp verify: increment failed login failed",
+				"admin_id", admin.ID, "err", incErr)
+		}
 		writeError(w, http.StatusUnauthorized, "invalid TOTP code")
 		return
 	}
-	_ = s.store.ResetAdminFailedLogin(r.Context(), admin.ID)
+	if setErr := s.store.SetAdminTOTPLastWindow(r.Context(), admin.ID, window); setErr != nil {
+		writeError(w, http.StatusUnauthorized, "invalid TOTP code")
+		return
+	}
+	if err := s.store.ResetAdminFailedLogin(r.Context(), admin.ID); err != nil {
+		slog.Default().Warn("admin totp verify: reset failed login failed",
+			"admin_id", admin.ID, "err", err)
+	}
 	if err := s.store.SetAdminMFASecret(r.Context(), admin.ID, admin.MFASecret, true); err != nil {
 		writeInternal(w)
 		return

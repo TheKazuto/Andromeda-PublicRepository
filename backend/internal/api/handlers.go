@@ -118,11 +118,26 @@ type loginReq struct {
 	Password string `json:"password"`
 }
 
-// dummyBcryptHash is fed to CheckPassword when the email is not registered, so
-// the response time of /v1/auth/login does not leak whether the email exists
-// (timing-safe enumeration mitigation). The cost matches the hash users get at
-// signup so the comparison takes the same wall-clock time.
-const dummyBcryptHash = "$2a$10$CwTycUXWue0Thq9StjUM0uJ8.Zz0c2Z5hH5NQ9rYmAoVj9VxrRwPe"
+// dummyBcryptHash is fed to VerifyPassword when the email is not
+// registered, so the response time of /v1/auth/login does not leak
+// whether the email exists (timing-safe enumeration mitigation). The
+// hash is generated once at package init with the same cost as live
+// user hashes, so the bogus comparison takes the same wall-clock
+// time as a real one.
+var dummyBcryptHash = mustGenerateDummyHash()
+
+func mustGenerateDummyHash() string {
+	h, err := bcryptGenerate("andromeda-dummy-never-a-real-password")
+	if err != nil {
+		// bcrypt failure at boot is unrecoverable — surface it loudly.
+		panic("dummy bcrypt hash init: " + err.Error())
+	}
+	return h
+}
+
+func bcryptGenerate(s string) (string, error) {
+	return auth.HashPassword(s)
+}
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	var req loginReq
@@ -149,7 +164,11 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if err == nil && user != nil {
 		hash = user.PasswordHash
 	}
-	ok := auth.CheckPassword(req.Password, hash)
+	verifyErr := auth.VerifyPassword(req.Password, hash)
+	if verifyErr != nil && !errors.Is(verifyErr, auth.ErrInvalidPassword) {
+		log.Printf("login: bcrypt verify failed for hash: %v", verifyErr)
+	}
+	ok := verifyErr == nil
 	if err != nil || user == nil || !ok {
 		if err == nil && user != nil {
 			s.recordFailedLogin(r.Context(), user.ID)

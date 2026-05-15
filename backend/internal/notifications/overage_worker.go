@@ -2,6 +2,7 @@ package notifications
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -45,7 +46,6 @@ func NewOverageWorker(opts OverageWorkerOptions) *OverageWorker {
 func (w *OverageWorker) Start(ctx context.Context) {
 	if w.billing == nil || !w.billing.Enabled() {
 		w.logger.Info("overage worker disabled — billing service not configured")
-		<-ctx.Done()
 		return
 	}
 
@@ -86,7 +86,20 @@ func (w *OverageWorker) tick(ctx context.Context) {
 				"subscription", t.SubscriptionID)
 			continue
 		}
-		if _, err := w.billing.ReportOverage(tickCtx, t.StripeCustomerID, delta); err != nil {
+		// Deterministic key: (subscription, baseline, delta). If a crash
+		// happens between Stripe ack and the local AdvanceOverageReported
+		// below, the next tick reads the SAME baseline + delta and
+		// generates the SAME key — Stripe deduplicates and we never
+		// double-bill. PendingDelta() returns the difference between
+		// the live counter and the persisted reported counter; combining
+		// both anchors the key to the exact slice of usage we paid for.
+		idempotencyKey := fmt.Sprintf(
+			"andromeda-overage:%s:%d:%d",
+			t.SubscriptionID,
+			t.OverageReportedTokens,
+			delta,
+		)
+		if _, err := w.billing.ReportOverage(tickCtx, t.StripeCustomerID, delta, idempotencyKey); err != nil {
 			w.logger.Warn("overage worker: meter event failed",
 				"err", err,
 				"subscription", t.SubscriptionID,
@@ -95,16 +108,14 @@ func (w *OverageWorker) tick(ctx context.Context) {
 			continue
 		}
 		// Only advance after Stripe ack — at-most-once-extra guarantee.
+		// Even if THIS step fails the next tick re-uses the SAME
+		// idempotency key (baseline hasn't moved), so Stripe will
+		// drop the duplicate and we eventually converge.
 		if err := w.store.AdvanceOverageReported(tickCtx, t.SubscriptionID, delta); err != nil {
-			w.logger.Error("overage worker: persist reported delta failed — will re-report next tick",
+			w.logger.Error("overage worker: persist reported delta failed — will retry with same Stripe idempotency key",
 				"err", err,
 				"subscription", t.SubscriptionID,
 				"delta", delta)
-			// Note: this means Stripe will receive the same delta again
-			// on the next tick. Stripe's meter event de-dupe is by event
-			// id (which we don't supply), so we MAY double-bill. The
-			// failure path is rare (DB write); operators should monitor
-			// this log line.
 			failed++
 			continue
 		}

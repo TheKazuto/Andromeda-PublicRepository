@@ -37,6 +37,13 @@ func (g *GiftObserver) OnGiftPurchased(ctx context.Context, ev billing.GiftPurch
 			"gift", ev.GiftCard.ID)
 		return
 	}
+	if ev.GiftCard.RedeemToken == "" {
+		// Sending a receipt with a broken /redeem?token= link is worse
+		// than silence — the buyer would think the gift never minted.
+		g.logger.Error("gift purchase: empty redeem token; skipping receipt",
+			"gift", ev.GiftCard.ID)
+		return
+	}
 
 	redeemURL := buildRedeemURL(g.dashboardURL, ev.GiftCard.RedeemToken)
 	paid := 0

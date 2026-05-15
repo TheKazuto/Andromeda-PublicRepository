@@ -1,7 +1,9 @@
 package api
 
 import (
+	"context"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -37,6 +39,16 @@ type Server struct {
 	billingWebhook *billing.WebhookHandler
 	authLimiter    *authRateLimiter
 	mailer         notifications.Mailer
+
+	// rootCtx is cancelled by main when the process is asked to stop.
+	// Background goroutines spawned by handlers (e.g. password reset
+	// email dispatch) derive their context from this field so they
+	// abort cleanly on shutdown instead of running past Shutdown().
+	rootCtx context.Context
+
+	// bgTasks tracks every goroutine started via Server.goBackground so
+	// main can wait for outstanding work before exiting.
+	bgTasks sync.WaitGroup
 }
 
 // NewServer constructs the backend HTTP server.
@@ -71,7 +83,35 @@ func NewServer(cfg *config.Config, st BillingCapableStore, billingSvc *billing.S
 		billingWebhook: billingWH,
 		authLimiter:    newAuthRateLimiter(),
 		mailer:         mailer,
+		rootCtx:        context.Background(),
 	}
+}
+
+// AttachLifecycle binds the server to the process-wide context used by
+// background goroutines and the WaitGroup main blocks on at shutdown.
+// Call before Router(). The returned Wait() helper lets the entry-point
+// wait for in-flight background tasks (e.g. password-reset emails) to
+// finish after the HTTP server stops accepting new requests.
+func (s *Server) AttachLifecycle(rootCtx context.Context) (wait func()) {
+	s.rootCtx = rootCtx
+	return func() { s.bgTasks.Wait() }
+}
+
+// goBackground runs `fn` on a tracked goroutine that uses the server's
+// root context. Handlers that need fire-and-forget work (sending an
+// email, hitting a slow webhook, etc.) must funnel through here so the
+// shutdown path can wait for them instead of leaking goroutines that
+// outlive httpServer.Shutdown.
+func (s *Server) goBackground(fn func(ctx context.Context)) {
+	ctx := s.rootCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	s.bgTasks.Add(1)
+	go func() {
+		defer s.bgTasks.Done()
+		fn(ctx)
+	}()
 }
 
 func (s *Server) Router() http.Handler {

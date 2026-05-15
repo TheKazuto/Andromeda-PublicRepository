@@ -2,6 +2,8 @@ package auth
 
 import (
 	"errors"
+	"fmt"
+	"time"
 
 	"github.com/pquerna/otp"
 	"github.com/pquerna/otp/totp"
@@ -10,6 +12,14 @@ import (
 // TOTPIssuer is the label shown in authenticator apps (1Password, Authy,
 // Google Authenticator).
 const TOTPIssuer = "Andromeda"
+
+// TOTPPeriodSeconds is the rotation period for TOTP codes. RFC 6238
+// recommends 30s, which is also the default of pquerna/otp.
+const TOTPPeriodSeconds = 30
+
+// ErrTOTPReplay is returned when the supplied code is technically valid
+// but its window has already been consumed (replay attempt).
+var ErrTOTPReplay = errors.New("totp code already used")
 
 // TOTPSetup is the bundle returned when an admin opts into TOTP.
 //
@@ -29,12 +39,12 @@ func GenerateTOTP(account string) (*TOTPSetup, error) {
 	key, err := totp.Generate(totp.GenerateOpts{
 		Issuer:      TOTPIssuer,
 		AccountName: account,
-		Period:      30,
+		Period:      TOTPPeriodSeconds,
 		Digits:      otp.DigitsSix,
 		Algorithm:   otp.AlgorithmSHA1, // SHA1 is the broadest authenticator-app support
 	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("generate totp: %w", err)
 	}
 	return &TOTPSetup{
 		Secret: key.Secret(),
@@ -42,17 +52,33 @@ func GenerateTOTP(account string) (*TOTPSetup, error) {
 	}, nil
 }
 
-// VerifyTOTP validates a 6-digit code against the stored secret.
-// Returns nil on success, an error on mismatch or malformed inputs.
-func VerifyTOTP(secret, code string) error {
+// CurrentTOTPWindow returns the TOTP window index (= unix / period) for
+// the current time. The window is what we persist per-admin to enforce
+// single-use within the rotation period.
+func CurrentTOTPWindow() int64 {
+	return time.Now().Unix() / int64(TOTPPeriodSeconds)
+}
+
+// VerifyTOTP validates a 6-digit code against the stored secret and
+// rejects replays by comparing against the last accepted window.
+//
+// `lastWindow` is the window index previously consumed by this admin
+// (zero means "never used"). On success the function returns the new
+// window index — the caller persists it via SetAdminTOTPLastWindow so
+// subsequent attempts at the same window are refused.
+func VerifyTOTP(secret, code string, lastWindow int64) (int64, error) {
 	if secret == "" {
-		return errors.New("secret missing")
+		return 0, errors.New("secret missing")
 	}
 	if len(code) != 6 {
-		return errors.New("invalid code length")
+		return 0, errors.New("invalid code length")
 	}
 	if !totp.Validate(code, secret) {
-		return errors.New("invalid code")
+		return 0, errors.New("invalid code")
 	}
-	return nil
+	window := CurrentTOTPWindow()
+	if window <= lastWindow {
+		return 0, ErrTOTPReplay
+	}
+	return window, nil
 }

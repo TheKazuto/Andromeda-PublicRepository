@@ -18,9 +18,9 @@ import (
 // notifications dispatched (notification_sent_at IS NULL).
 //
 // Scope of v1:
-//   * plan_*  → emails users with active subscription on the affected plan
-//   * route_cost → SKIPPED in v1 (would email every active user; needs a
-//                  digest pipeline before we turn it on).
+//   - plan_*  → emails users with active subscription on the affected plan
+//   - route_cost → SKIPPED in v1 (would email every active user; needs a
+//     digest pipeline before we turn it on).
 //
 // Once a row has been processed, notification_sent_at is set so the next
 // tick ignores it. Even if the worker crashes mid-loop, the next run
@@ -156,6 +156,8 @@ func (w *PricingWorker) dispatchPlanChange(ctx context.Context, c store.PricingC
 		}
 		apiKeyUUID, err := uuid.Parse(apiKey.ID)
 		if err != nil {
+			w.logger.Warn("pricing worker: invalid api key uuid",
+				"err", err, "user", r.UserID, "api_key_id", apiKey.ID)
 			continue
 		}
 		payload := map[string]any{

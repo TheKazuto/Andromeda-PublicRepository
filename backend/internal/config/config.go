@@ -71,22 +71,22 @@ func Load() *Config {
 	_ = godotenv.Load()
 
 	cfg := &Config{
-		Port:             getenv("PORT", "8080"),
-		JWTSecret:        getenv("JWT_SECRET", "dev-only-secret-change-me"),
-		AllowedOrigins:   splitCSV(getenv("ALLOWED_ORIGINS", "http://localhost:3000")),
-		Env:              getenv("ENV", "development"),
-		DatabaseURL:      getenv("DATABASE_URL", ""),
-		DashboardBaseURL: strings.TrimRight(getenv("ANDROMEDA_DASHBOARD_BASE_URL", ""), "/"),
+		Port:                getenv("PORT", "8080"),
+		JWTSecret:           getenv("JWT_SECRET", "dev-only-secret-change-me"),
+		AllowedOrigins:      splitCSV(getenv("ALLOWED_ORIGINS", "http://localhost:3000")),
+		Env:                 getenv("ENV", "development"),
+		DatabaseURL:         getenv("DATABASE_URL", ""),
+		DashboardBaseURL:    strings.TrimRight(getenv("ANDROMEDA_DASHBOARD_BASE_URL", ""), "/"),
 		StripeSecretKey:     getenv("STRIPE_SECRET_KEY", ""),
 		StripeWebhookSecret: getenv("STRIPE_WEBHOOK_SECRET", ""),
 		StripePriceIDsJSON:  getenv("STRIPE_PRICES_JSON", ""),
 		CheckoutSuccessURL:  strings.TrimRight(getenv("STRIPE_CHECKOUT_SUCCESS_URL", ""), "/"),
 		CheckoutCancelURL:   strings.TrimRight(getenv("STRIPE_CHECKOUT_CANCEL_URL", ""), "/"),
-		SMTPHost:     strings.TrimSpace(getenv("SMTP_HOST", "")),
-		SMTPPort:     getenvInt("SMTP_PORT", 587),
-		SMTPUsername: getenv("SMTP_USERNAME", ""),
-		SMTPPassword: getenv("SMTP_PASSWORD", ""),
-		SMTPFrom:     getenv("SMTP_FROM", ""),
+		SMTPHost:            strings.TrimSpace(getenv("SMTP_HOST", "")),
+		SMTPPort:            mustGetenvInt("SMTP_PORT", 587),
+		SMTPUsername:        getenv("SMTP_USERNAME", ""),
+		SMTPPassword:        getenv("SMTP_PASSWORD", ""),
+		SMTPFrom:            getenv("SMTP_FROM", ""),
 
 		AdminJWTSecret:         getenv("ADMIN_JWT_SECRET", ""),
 		AdminToken:             getenv("ADMIN_TOKEN", ""),
@@ -137,6 +137,9 @@ func Load() *Config {
 	if (cfg.AdminBootstrapEmail == "") != (cfg.AdminBootstrapPassword == "") {
 		log.Fatal("ANDROMEDA_BOOTSTRAP_ADMIN_EMAIL and ANDROMEDA_BOOTSTRAP_ADMIN_PASSWORD must be set together (or both empty)")
 	}
+	if cfg.AdminBootstrapPassword != "" && len(cfg.AdminBootstrapPassword) < 12 {
+		log.Fatal("ANDROMEDA_BOOTSTRAP_ADMIN_PASSWORD must be at least 12 characters")
+	}
 	if cfg.Env == "production" && cfg.AdminToken != "" && len(cfg.AdminToken) < 32 {
 		log.Fatal("ADMIN_TOKEN must be at least 32 bytes in production (or unset to disable)")
 	}
@@ -158,6 +161,21 @@ func getenvInt(key string, fallback int) int {
 		}
 	}
 	return fallback
+}
+
+// mustGetenvInt parses an int env var with a default. A non-empty but
+// malformed value is fatal — silently falling back masks operator
+// typos that would otherwise behave like "not configured".
+func mustGetenvInt(key string, fallback int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		log.Fatalf("invalid %s=%q (must be an integer)", key, v)
+	}
+	return n
 }
 
 func splitCSV(s string) []string {

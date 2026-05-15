@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -230,7 +231,10 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "no password set for this account; sign in with your OAuth provider")
 		return
 	}
-	if !auth.CheckPassword(req.CurrentPassword, user.PasswordHash) {
+	if err := auth.VerifyPassword(req.CurrentPassword, user.PasswordHash); err != nil {
+		if !errors.Is(err, auth.ErrInvalidPassword) {
+			slog.Default().Warn("change password: bcrypt error", "user_id", uid, "err", err)
+		}
 		writeError(w, http.StatusUnauthorized, "current password is incorrect")
 		return
 	}
@@ -244,7 +248,15 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "could not update password")
 		return
 	}
-	_ = s.store.RevokeRefreshTokensByUser(r.Context(), uid)
+	// Sign the user out everywhere. If revocation fails the password
+	// change must NOT be reported as success — older refresh tokens
+	// would still mint access tokens for the old credentials.
+	if err := s.store.RevokeRefreshTokensByUser(r.Context(), uid); err != nil {
+		slog.Default().Error("change password: revoke refresh tokens failed",
+			"user_id", uid, "err", err)
+		writeInternal(w)
+		return
+	}
 	clearRefreshCookie(w, s.cfg.Env == "production")
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -288,7 +300,10 @@ func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "password is required to delete this account")
 			return
 		}
-		if !auth.CheckPassword(req.Password, user.PasswordHash) {
+		if err := auth.VerifyPassword(req.Password, user.PasswordHash); err != nil {
+			if !errors.Is(err, auth.ErrInvalidPassword) {
+				slog.Default().Warn("delete account: bcrypt error", "user_id", uid, "err", err)
+			}
 			writeError(w, http.StatusUnauthorized, "password is incorrect")
 			return
 		}

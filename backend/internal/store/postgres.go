@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -24,9 +26,11 @@ func NewPostgres(ctx context.Context, databaseURL string) (*PostgresStore, error
 	if err != nil {
 		return nil, fmt.Errorf("parse DATABASE_URL: %w", err)
 	}
-	cfg.MaxConns = 10
-	cfg.MinConns = 1
+	cfg.MaxConns = int32(envInt("PG_MAX_CONNS", 10))
+	cfg.MinConns = int32(envInt("PG_MIN_CONNS", 1))
 	cfg.HealthCheckPeriod = 30 * time.Second
+	cfg.MaxConnLifetime = time.Duration(envInt("PG_CONN_MAX_LIFETIME_SEC", 3600)) * time.Second
+	cfg.MaxConnIdleTime = time.Duration(envInt("PG_CONN_MAX_IDLE_SEC", 600)) * time.Second
 
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
@@ -222,6 +226,20 @@ func (s *PostgresStore) SoftDeleteUser(ctx context.Context, id string) error {
 		return fmt.Errorf("revoke keys: %w", err)
 	}
 
+	// Burn every live session and password-reset token so the deleted
+	// account cannot be authenticated against under any code path.
+	if _, err := tx.Exec(ctx, `
+		UPDATE refresh_tokens SET revoked_at = $2
+		WHERE user_id = $1 AND revoked_at IS NULL
+	`, id, now); err != nil {
+		return fmt.Errorf("revoke refresh tokens: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		DELETE FROM password_reset_tokens WHERE user_id = $1
+	`, id); err != nil {
+		return fmt.Errorf("drop password reset tokens: %w", err)
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit: %w", err)
 	}
@@ -371,6 +389,21 @@ func scanUser(row pgx.Row) (*User, error) {
 		return nil, fmt.Errorf("scan user: %w", err)
 	}
 	return u, nil
+}
+
+// envInt reads an int env var with a default. Used for pool tuning so
+// operators can size connections to match Railway/Postgres limits
+// without recompiling.
+func envInt(key string, fallback int) int {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		return fallback
+	}
+	return n
 }
 
 func isUniqueViolation(err error) bool {

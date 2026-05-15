@@ -69,12 +69,16 @@ func (g *googleProvider) Exchange(ctx context.Context, code string) (*Profile, e
 	if !p.EmailVerified {
 		return nil, fmt.Errorf("google email is not verified")
 	}
-	return &Profile{
+	prof := &Profile{
 		Provider: "google",
 		Subject:  p.Sub,
-		Email:    strings.ToLower(p.Email),
+		Email:    strings.ToLower(strings.TrimSpace(p.Email)),
 		Name:     p.Name,
-	}, nil
+	}
+	if err := prof.Validate(); err != nil {
+		return nil, fmt.Errorf("google profile invalid: %w", err)
+	}
+	return prof, nil
 }
 
 // ----- GitHub -----
@@ -172,10 +176,14 @@ func (g *githubProvider) Exchange(ctx context.Context, code string) (*Profile, e
 		name = p.Login
 	}
 
-	return &Profile{
+	prof := &Profile{
 		Provider: "github",
 		Subject:  fmt.Sprintf("%d", p.ID),
 		Email:    email,
 		Name:     name,
-	}, nil
+	}
+	if err := prof.Validate(); err != nil {
+		return nil, fmt.Errorf("github profile invalid: %w", err)
+	}
+	return prof, nil
 }

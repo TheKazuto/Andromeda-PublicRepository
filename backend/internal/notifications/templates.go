@@ -8,14 +8,14 @@ import (
 
 // QuotaTemplateInput carries the values rendered into the threshold email.
 type QuotaTemplateInput struct {
-	Email          string
-	PlanCode       string
-	ThresholdPct   int
-	TokensUsed     int64
-	TokensLimit    int64
-	OverageUsed    int64
-	PeriodEnd      time.Time
-	DashboardURL   string
+	Email        string
+	PlanCode     string
+	ThresholdPct int
+	TokensUsed   int64
+	TokensLimit  int64
+	OverageUsed  int64
+	PeriodEnd    time.Time
+	DashboardURL string
 }
 
 // RenderQuotaSubject returns the subject line for the threshold email.
