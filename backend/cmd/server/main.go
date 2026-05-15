@@ -146,6 +146,7 @@ func main() {
 	}
 
 	srv := api.NewServer(cfg, capable, billingSvc, billingWH, mailer)
+	waitBackground := srv.AttachLifecycle(rootCtx)
 
 	httpServer := &http.Server{
 		Addr:              ":" + cfg.Port,
@@ -168,10 +169,27 @@ func main() {
 	<-stop
 	log.Println("shutting down...")
 
-	ctx, c := context.WithTimeout(context.Background(), 10*time.Second)
+	// Stop accepting new requests, then signal background goroutines
+	// (workers + handler-spawned tasks) and finally block until they
+	// finish or the grace window elapses.
+	shutdownCtx, c := context.WithTimeout(context.Background(), 15*time.Second)
 	defer c()
-	_ = httpServer.Shutdown(ctx)
+	if err := httpServer.Shutdown(shutdownCtx); err != nil {
+		log.Printf("http shutdown: %v", err)
+	}
 	cancel()
+
+	done := make(chan struct{})
+	go func() {
+		waitBackground()
+		close(done)
+	}()
+	select {
+	case <-done:
+		log.Println("background tasks drained")
+	case <-shutdownCtx.Done():
+		log.Println("shutdown grace exceeded — exiting with tasks in flight")
+	}
 }
 
 // buildStore returns the customer-facing Store (auth, api keys) and,
@@ -342,6 +360,12 @@ func (unsupportedBillingStore) ResetAdminFailedLogin(context.Context, string) er
 }
 func (unsupportedBillingStore) IsAdminLocked(context.Context, string) (bool, *time.Time, error) {
 	return false, nil, nil
+}
+func (unsupportedBillingStore) GetAdminTOTPLastWindow(context.Context, string) (int64, error) {
+	return 0, store.ErrNotFound
+}
+func (unsupportedBillingStore) SetAdminTOTPLastWindow(context.Context, string, int64) error {
+	return store.ErrNotFound
 }
 
 // AdminEconomyStore stubs (M4b). Same posture: unreachable in dev.
