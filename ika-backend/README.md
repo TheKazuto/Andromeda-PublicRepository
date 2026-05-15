@@ -56,9 +56,10 @@ ika-backend/
 │   │   ├── quorum/                 # PDA staging multi-tx
 │   │   ├── policy/                 # Admin actions
 │   │   ├── oidc/                   # Opt-in (Login Social): /v1/recovery/primary/oidc/*
-│   │   ├── adapters/               # PolicyAdapter, SolanaAdapter (incl. solana/oidc.ts flow module)
+│   │   ├── passkey/                # Opt-in (Keyspring): /v1/recovery/primary/passkey/* + store helpers
+│   │   ├── adapters/               # PolicyAdapter, SolanaAdapter (solana/oidc.ts + solana/passkey.ts flow modules)
 │   │   ├── message.ts              # Canonical discovery message
-│   │   └── challenge.ts            # Byte-for-byte mirror of auth/challenge.rs (incl. OP_OIDC_*)
+│   │   └── challenge.ts            # Byte-for-byte mirror of auth/challenge.rs (incl. OP_OIDC_* + OP_PASSKEY_*)
 │   ├── store/                      # Postgres pool + migrations + cleanup job
 │   └── __tests__/
 ├── proto/                          # Ika .proto files (populate from upstream — boot fails without them)
@@ -79,6 +80,7 @@ ika-backend/
 | Recovery (discovery) | `IKA_RECOVERY_ENABLED` | `/v1/recovery/{challenge,resolve}` |
 | Recovery (policy) | `IKA_RECOVERY_POLICY_ENABLED` | `/v1/recovery/{primary,quorum,policy}/*` |
 | Login Social (OIDC) | `IKA_OIDC_ENABLED` (requires policy layer + `jwk-registry` deployed) | `/v1/oidc/{nonce,validate}` + `/v1/recovery/primary/oidc/*` |
+| Passkey-PRF (Keyspring) | `IKA_PASSKEY_ENABLED` (requires policy layer) | `/v1/recovery/primary/passkey/*` |
 
 ## Endpoints
 
@@ -279,6 +281,36 @@ On-chain schemes (validated via Solana precompile, **zero attestor**):
 
 The trust root for the JWKs lives in a separate on-chain `jwk-registry` program. The off-chain `jwk-rotator/` worker (in the monorepo root) keeps it in sync with the provider JWKS via the `jwk-registry::propose` and `::commit` flow (proposal → timelock → commit), so a rogue provider key cannot be inserted instantly.
 
+### Recovery — Passkey-PRF (WebAuthn primary, scheme=3)
+
+`IKA_PASSKEY_ENABLED=true` mounts the passkey routes (Keyspring Fase 3 — D1 Opção A of `PLAN_KEYSPRING_INTEGRATION_2026_05.md`). A passkey credential lives in `policy.primary_slot` as `[SCHEME_WEBAUTHN, credential_pubkey(33)]`, but on-chain it is **session-scoped**: every use of the primary goes through a short-lived `PasskeySession` PDA opened by a single WebAuthn assertion and authorized per-use by an Ed25519 signature from the ephemeral key committed at open time. The PRF secret never leaves the browser (D12).
+
+```
+POST /v1/recovery/primary/passkey/credentials/register-init     # server issues a single-use challenge for navigator.credentials.create
+POST /v1/recovery/primary/passkey/credentials/register-complete # persists credential (D6 hard limit 5/dwallet enforced in tx)
+GET  /v1/recovery/primary/passkey/credentials?dwalletAddress=…  # lists active credentials (public metadata only)
+POST /v1/recovery/primary/passkey/credentials/:id/revoke        # D5 guard: refuses to revoke the last active recovery method (HTTP 409)
+
+POST /v1/recovery/primary/passkey/open/challenge   # passkey_session_open_challenge — signed by WebAuthn (Secp256r1)
+POST /v1/recovery/primary/passkey/open             # ix 25 passkey_session_open + Secp256r1 precompile
+POST /v1/recovery/primary/passkey/use/challenge    # passkey_primary_use_challenge — signed by ephemeral Ed25519
+POST /v1/recovery/primary/passkey/use/submit       # ix 26 recover_as_primary_passkey_session + CPI Ika approve_message
+POST /v1/recovery/primary/passkey/close            # ix 27 passkey_session_close (rent refund to gas sponsor)
+GET  /v1/recovery/primary/passkey/capabilities     # rp_id / origin / salt mode / TTLs / on-chain WebAuthn bounds
+```
+
+**Custody-free.** The user signs the open challenge with a WebAuthn assertion (authenticator's secure element) and each per-use challenge with a per-session Ed25519 key. The gas sponsor pays the Solana fee; the on-chain `rules-policy` is the only authority. Even if the backend is compromised it cannot forge a signature.
+
+**Salt strategy (D3).** Only `IKA_PASSKEY_SALT_MODE=per_credential` is accepted in production. Each credential gets a stable `salt_id` (UUID v4) + `salt_hash` (sha256 of the raw salt). The raw salt itself is derived `HKDF(server_secret, salt_id)` at use time and never persisted.
+
+**RP ID (D2).** `IKA_PASSKEY_RP_ID=andromedainfra.pro` (apex) is **IMMUTABLE** after the first passkey is registered in a given environment — rotation would orphan every credential derived under the old value.
+
+**Multiple passkeys per dWallet (D6).** Up to 5 active credentials per dWallet. Cross-device use case: 1 hardware key + 1 iCloud Keychain + 1 Google Password Manager + 1 Windows Hello + 1 reserve. The limit is enforced inside a `SELECT … FOR UPDATE` transaction at `register-complete` so concurrent registers can't both win the 5th slot.
+
+**Bound payload sizes (D13).** `authenticatorData` and `clientDataJSON` are each capped at 192 bytes on-chain. Samsung Pass returns `authData = 84 bytes` in the Fase 0 spike; the 192-byte cap leaves ~2.3× margin for future authenticators with multiple active extensions.
+
+**Cross-language drift gate.** Challenge bytes + human-message renderers + primary slot layout + WebAuthn bounds are mirrored byte-for-byte in `contracts/auth/src/challenge.rs`, `contracts/auth/src/human_message.rs`, `ika-backend/src/recovery/challenge.ts`, and `fixtures/passkey_prf/v1/`. CI runs the matching Rust + TS fixture tests; any drift fails both jobs.
+
 ### Health
 - `GET /health` — liveness (no auth)
 - `GET /health/deep` — Postgres + Ika gRPC + Solana RPC checks; requires `X-Api-Key: <IKA_ADMIN_API_KEY>`
@@ -349,6 +381,21 @@ Mounts `/v1/oidc/{nonce,validate}` + `/v1/recovery/primary/oidc/*`. Requires the
 | `IKA_OIDC_JWK_REGISTRY_ADDRESS` | _(none)_ | Address of the on-chain `JwkRegistry` account (canonical PDA of the `jwk-registry` program). Required when enabled. |
 | `IKA_OIDC_VERIFIER_VERSION` | `1` | Must equal the on-chain `OIDC_VERIFIER_V1`. Bumps with any wire-format change. |
 | `IKA_OIDC_LOG_SUBJECT_HMAC_SECRET` | _(none)_ | HMAC key (≥32 bytes, hex) for hashing `sub` in logs/metrics. **Required when enabled.** Generate with `openssl rand -hex 32`. Rotation invalidates historical correlation only — no operational impact. Never reuse another secret. |
+
+### Passkey-PRF (opt-in — `IKA_PASSKEY_ENABLED=true`)
+
+Mounts `/v1/recovery/primary/passkey/*`. Requires the policy recovery layer (`IKA_RECOVERY_POLICY_ENABLED=true`). Boot refuses to start if `IKA_PASSKEY_SALT_MODE` is anything other than `per_credential` (D3 fail-fast).
+
+| Var | Default | Notes |
+|-----|---------|-------|
+| `IKA_PASSKEY_ENABLED` | `false` | Master flag. Requires `IKA_RECOVERY_POLICY_ENABLED=true`. |
+| `IKA_PASSKEY_RP_ID` | _(none)_ | WebAuthn Relying Party ID. Production: `andromedainfra.pro` (apex). **IMMUTABLE** after first registration — rotating orphans every existing credential (D2). |
+| `IKA_PASSKEY_RP_ORIGIN` | _(none)_ | Origin the WebAuthn flow runs on, e.g. `https://app.andromedainfra.pro`. Required when enabled. |
+| `IKA_PASSKEY_CHALLENGE_TTL_SECONDS` | `120` | TTL of `register-init` / pre-open challenges (single-use, consumed by the matching `-complete` / `-submit`). |
+| `IKA_PASSKEY_SALT_MODE` | `per_credential` | **Only `per_credential` accepted in production.** Boot fails on `global`. See D3. |
+| `IKA_PASSKEY_SESSION_TTL_SECONDS` | `600` | UI hint for session lifetime. The on-chain `rules-policy` enforces its own `SESSION_TTL_SECONDS = 600` cap regardless. |
+
+Migration `015_passkey_credentials.sql` adds `passkey_credentials`, `passkey_challenges`, and `recovery_bindings`. These tables are owned exclusively by ika-backend (D4) — the gateway never reads them directly.
 
 ## Setup
 
