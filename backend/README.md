@@ -105,7 +105,7 @@ JWT-gated operator console with TOTP MFA and audit log.
 | Var | Notes |
 |-----|-------|
 | `ANDROMEDA_BOOTSTRAP_ADMIN_EMAIL` | Initial super_admin email. |
-| `ANDROMEDA_BOOTSTRAP_ADMIN_PASSWORD` | Initial password (≥12 chars). Empty after first login. |
+| `ANDROMEDA_BOOTSTRAP_ADMIN_PASSWORD` | Initial password. Must be ≥12 chars **and** contain at least two of: uppercase letter, digit, special character. Service refuses to boot if shorter; admin row creation also fails if the entropy rule is not met. Clear after first login. |
 
 ### OAuth (opt-in)
 | Var | Notes |
@@ -127,11 +127,54 @@ JWT-gated operator console with TOTP MFA and audit log.
 ### SMTP (opt-in)
 | Var | Notes |
 |-----|-------|
-| `SMTP_HOST` / `SMTP_PORT` | 587 (STARTTLS) or 465 (TLS). Empty disables email. |
+| `SMTP_HOST` / `SMTP_PORT` | 587 (STARTTLS) or 465 (TLS). Empty `SMTP_HOST` disables email; a non-numeric `SMTP_PORT` is fatal at boot (no silent fallback). |
 | `SMTP_USERNAME` / `SMTP_PASSWORD` | Provider creds. |
-| `SMTP_FROM` | `Andromeda <noreply@shinkalabs.com>`. |
+| `SMTP_FROM` | `Andromeda <noreply@shinkalabs.com>`. Validated with `mail.ParseAddress` and stripped of CR/LF before every send (header-injection defense). |
+
+### Postgres pool tuning (opt-in)
+| Var | Default | Notes |
+|-----|---------|-------|
+| `PG_MAX_CONNS` | `10` | Upper bound on pgx pool size. Raise to match Railway plan limits when the gateway and backend share the same database. |
+| `PG_MIN_CONNS` | `1` | Idle connections kept warm. |
+| `PG_CONN_MAX_LIFETIME_SEC` | `3600` | Hard recycle to refresh DNS / pgbouncer state. |
+| `PG_CONN_MAX_IDLE_SEC` | `600` | Drop connections idle for longer than this. |
 
 `PORT` is injected by Railway — do not set it.
+
+## Database migrations
+
+SQL files live under `internal/store/migrations/` and are embedded in the binary. On boot the service:
+
+1. Connects to `DATABASE_URL`.
+2. Acquires a session-level `pg_advisory_lock` (id `0x416E64726F6D6564`). Concurrent boots — blue/green deploys, two replicas restarting in lockstep — serialise here instead of double-applying a migration.
+3. Creates `backend_schema_migrations` if missing.
+4. Applies any file whose name is not yet recorded, each inside its own transaction.
+
+Latest file: `005_admin_totp_replay.sql` (adds `admin_users.mfa_last_window` for TOTP single-use). Apply before rolling out the binary that depends on it.
+
+The schema is co-owned with the gateway: tables the gateway creates (users, plans, subscriptions, webhook tables, etc.) live in the gateway's migration set. Backend's migrations only add columns the product surface needs.
+
+## Security hardening (what to expect)
+
+| Area | Control |
+|------|---------|
+| Refresh tokens | Single-use rotation with family-revocation on reuse. Hashed SHA-256 at rest. Cookie is `HttpOnly`, `Secure`+`SameSite=None` in production. |
+| Password reset | Atomic `UPDATE ... RETURNING` consume; failed refresh-token revocation BLOCKS the success response. |
+| Admin JWT | HS256, 8 h TTL, `jwt.WithLeeway(60s)`, mandatory `role` claim, random 16-byte `jti`. |
+| TOTP | Single-use per window. `mfa_last_window` advances atomically — concurrent logins consuming the same code lose the race and get 401. |
+| Admin password | bcrypt cost 12 + entropy gate (length ≥12, 2-of-3 upper/digit/special). |
+| User password | bcrypt cost 12. Login feeds a real bcrypt hash on miss so response time does not leak email existence. |
+| OAuth state | HMAC-signed `(nonce, expiry)`; verified state is marked consumed in-memory so the same value cannot be replayed inside its 10 min TTL. |
+| OAuth profiles | Validated with `mail.ParseAddress` before persisting. |
+| Scopes | `*` must appear alone; mixed `[ "*", "read" ]` is rejected. |
+| Rate limit | Per-IP token bucket on `/v1/auth/*` and `/admin/auth/{login,totp/verify}`. Hard ceiling of 50 k buckets with LRU eviction. |
+| Mailer | `\r\n\x00` stripped from From/To/Subject. TCP/TLS handshake bounded by a 10 s timeout, full SMTP exchange by 60 s. |
+| Stripe overage | `Idempotency-Key` derived from `(subscription, baseline, delta)` — a crash between Stripe ack and DB update never double-bills. |
+| Stripe customer | `Idempotency-Key` per user id — duplicate customers cannot be created. |
+| Stripe refund | 3 attempts with exponential backoff for 429 / 5xx / `api_error`. |
+| Webhooks | Outbound payloads >100 KiB are rejected before any DB write. |
+| Account deletion | `SoftDeleteUser` anonymises email/name, deletes OAuth links, revokes API keys, revokes refresh tokens, and drops password-reset tokens in one transaction. |
+| Background tasks | Goroutines spawned by handlers go through `Server.goBackground` and are awaited by the shutdown path (15 s drain window). |
 
 ## Run locally
 
