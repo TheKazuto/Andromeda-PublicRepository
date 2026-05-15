@@ -29,8 +29,3 @@ func Generate() (string, string, string, error) {
 	sum := sha256.Sum256([]byte(full))
 	return full, pubPrefix, hex.EncodeToString(sum[:]), nil
 }
-
-func Hash(key string) string {
-	sum := sha256.Sum256([]byte(key))
-	return hex.EncodeToString(sum[:])
-}

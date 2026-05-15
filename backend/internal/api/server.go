@@ -192,9 +192,8 @@ func (s *Server) Router() http.Handler {
 		sub.Get("/", s.handleAdminAuditList)
 	})
 
-	// ----- Admin economy (M4b). requireAdmin lets CLI scripts use the
-	// X-Admin-Token shared secret, while dashboard requests carry the
-	// Bearer JWT — both attach the operator identity for audit. -----
+	// ----- Admin economy (M4b). Dashboard requests carry the Bearer
+	// JWT; the JWT identity is attached to the request for audit. -----
 	r.Route("/admin", func(adm chi.Router) {
 		adm.Use(s.requireAdminJWT)
 

@@ -9,41 +9,10 @@ import (
 	"github.com/shinkalabs/andromeda-backend/internal/store"
 )
 
-// requireAdmin gates /admin/* endpoints. Two parallel paths are accepted:
-//
-//   1. Authorization: Bearer <admin_jwt>  (preferred)
-//   2. X-Admin-Token: <ADMIN_TOKEN>       (legacy shared secret for CLI)
-//
-// JWT path attaches the admin identity to the request context via
-// withAdmin, which downstream handlers use for audit logs.
-func (s *Server) requireAdmin(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// 1. Bearer JWT.
-		if raw := bearerToken(r); raw != "" && s.cfg.AdminJWTSecret != "" {
-			claims, err := auth.ParseAdminToken([]byte(s.cfg.AdminJWTSecret), raw)
-			if err == nil {
-				next.ServeHTTP(w, withAdmin(r, &adminIdentity{
-					ID:    claims.AdminID,
-					Email: claims.Email,
-					Role:  claims.Role,
-				}))
-				return
-			}
-			// JWT present but invalid — fall through to shared-secret check.
-		}
-		// 2. Shared-secret fallback.
-		token := r.Header.Get("X-Admin-Token")
-		if token != "" && s.cfg.AdminToken != "" && auth.ConstantTimeEqual(token, s.cfg.AdminToken) {
-			next.ServeHTTP(w, r)
-			return
-		}
-		writeError(w, http.StatusUnauthorized, "admin token required")
-	})
-}
-
-// requireAdminJWT is a stricter variant that REQUIRES the Bearer JWT path
-// (no shared-secret fallback). Used for handlers that must record the
-// identity of the operator (admin user CRUD, audit reads, MFA setup).
+// requireAdminJWT gates /admin/* endpoints: it REQUIRES the Bearer JWT
+// path (no shared-secret fallback) and attaches the admin identity to
+// the request context via withAdmin so downstream handlers can record
+// the operator in audit logs.
 func (s *Server) requireAdminJWT(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if s.cfg.AdminJWTSecret == "" {
