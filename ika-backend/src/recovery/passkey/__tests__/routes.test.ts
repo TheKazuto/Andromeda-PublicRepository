@@ -289,8 +289,9 @@ describe('GET /capabilities', () => {
     expect(r.status).toBe(200)
     expect(r.body.data).toMatchObject({
       enabled: true,
-      rpId: 'andromedainfra.pro',
-      rpOrigin: 'https://app.andromedainfra.pro',
+      // Falls back to env defaults when the request carries no
+      // X-Andromeda-Allowed-Origins header (Andromeda dashboard path).
+      allowedOrigins: ['https://app.andromedainfra.pro'],
       saltMode: 'per_credential',
       challengeTtlSeconds: 120,
       sessionTtlSeconds: 600,
@@ -298,5 +299,16 @@ describe('GET /capabilities', () => {
       webauthnAuthDataMaxBytes: 192,
       webauthnClientDataJsonMaxBytes: 192,
     })
+  })
+
+  it('echoes the tenant allowlist forwarded by the gateway', async () => {
+    const r = await request(makeApp())
+      .get('/capabilities')
+      .set('X-Andromeda-Allowed-Origins', 'https://app.cliente-a.com,https://wallet.cliente-a.com')
+    expect(r.status).toBe(200)
+    expect(r.body.data.allowedOrigins).toEqual([
+      'https://app.cliente-a.com',
+      'https://wallet.cliente-a.com',
+    ])
   })
 })

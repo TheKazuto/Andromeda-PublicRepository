@@ -51,6 +51,13 @@ import {
   registerPasskeyCredential,
   revokePasskeyCredential,
 } from './store.js'
+import {
+  NoRpConfiguredError,
+  OriginNotAllowedError,
+  RpIdNotMatchingOriginError,
+  parseAllowedOrigins,
+  resolveRp,
+} from './origins.js'
 
 // Tenant resolver — the recovery router protects every route with
 // `requireServiceApiKey`, which only authenticates the engine itself. In a
@@ -130,6 +137,10 @@ const closeSchema = z.object({
 
 const registerInitSchema = z.object({
   dwalletAddress: z.string().min(32),
+  /** Optional — required when the key has multiple `allowed_origins`. */
+  rpOrigin: z.string().url().optional(),
+  /** Optional — defaults to the registrable apex of `rpOrigin`'s host. */
+  rpId: z.string().min(1).optional(),
 })
 
 const registerCompleteSchema = z.object({
@@ -165,6 +176,18 @@ function handleError(context: string, e: unknown, res: Response): void {
   }
   if (e instanceof LastActiveCredentialError) {
     res.status(409).json(fail('last_active_credential'))
+    return
+  }
+  if (e instanceof OriginNotAllowedError) {
+    res.status(403).json(fail('origin_not_allowed'))
+    return
+  }
+  if (e instanceof RpIdNotMatchingOriginError) {
+    res.status(400).json(fail('rp_id_not_matching_origin'))
+    return
+  }
+  if (e instanceof NoRpConfiguredError) {
+    res.status(412).json(fail('passkey_rp_not_configured'))
     return
   }
   const safe = sanitizeError(context, e)
@@ -360,12 +383,23 @@ export function buildPasskeyRecoveryRouter(config: AppConfig): Router {
     const parsed = registerInitSchema.safeParse(req.body)
     if (!parsed.success) return res.status(400).json(fail('Invalid request'))
     try {
+      const rp = resolveRp({
+        allowedOrigins: parseAllowedOrigins(req),
+        requestedOrigin: parsed.data.rpOrigin,
+        requestedRpId: parsed.data.rpId,
+        envRpOrigin: config.passkey.rpOrigin,
+        envRpId: config.passkey.rpId,
+      })
       const challenge = newRegisterChallenge()
       const row = await insertPasskeyChallenge({
         tenantId: tenantOf(req),
         purpose: 'register',
         challenge,
         dwalletAddress: parsed.data.dwalletAddress,
+        // The resolved RP is pinned into the challenge metadata so
+        // register-complete uses the same pair without re-deriving it (and
+        // can't be tricked by a different rpId on the second call).
+        metadata: { rpId: rp.rpId, rpOrigin: rp.rpOrigin },
         ttlSeconds: config.passkey.challengeTtlSeconds,
       })
       return res.json(
@@ -373,8 +407,8 @@ export function buildPasskeyRecoveryRouter(config: AppConfig): Router {
           challengeId: row.id,
           challengeBase64: b64(challenge),
           expiresAt: row.expires_at.toISOString(),
-          rpId: config.passkey.rpId ?? null,
-          rpOrigin: config.passkey.rpOrigin ?? null,
+          rpId: rp.rpId,
+          rpOrigin: rp.rpOrigin,
         }),
       )
     } catch (e) {
@@ -424,10 +458,15 @@ export function buildPasskeyRecoveryRouter(config: AppConfig): Router {
       const encPubKey = parsed.data.encPubKeyBase64
         ? decodeB64Bounded(parsed.data.encPubKeyBase64, 65, 'encPubKey')
         : undefined
-      const rpId = config.passkey.rpId
-      const origin = config.passkey.rpOrigin
+      // RP was pinned into the challenge metadata at register-init time —
+      // re-using it here closes the door on a client trying to swap rpId
+      // between -init and -complete. Fall back to env only if the challenge
+      // was issued by an older deploy (no metadata field).
+      const meta = (challenge.metadata ?? {}) as { rpId?: string; rpOrigin?: string }
+      const rpId = meta.rpId ?? config.passkey.rpId
+      const origin = meta.rpOrigin ?? config.passkey.rpOrigin
       if (!rpId || !origin) {
-        return res.status(500).json(fail('passkey: rp_id / rp_origin not configured'))
+        return res.status(412).json(fail('passkey_rp_not_configured'))
       }
       const view = await registerPasskeyCredential({
         tenantId,
@@ -518,12 +557,29 @@ export function buildPasskeyRecoveryRouter(config: AppConfig): Router {
   })
 
   // ── capabilities (read-only, no Solana hit) ──
-  router.get('/capabilities', (_req, res) => {
+  //
+  // Echoes the tenant's allowed_origins (forwarded by the gateway as
+  // `X-Andromeda-Allowed-Origins`) so the frontend knows which origins are
+  // valid for WebAuthn. When the header is absent (admin calling without a
+  // configured allowlist — Andromeda dashboard path), falls back to the env
+  // defaults.
+  router.get('/capabilities', (req, res) => {
+    const allowed = parseAllowedOrigins(req)
+    const allowedOrigins = allowed.length > 0
+      ? allowed
+      : config.passkey.rpOrigin
+        ? [config.passkey.rpOrigin]
+        : []
     res.json(
       ok({
         enabled: true,
-        rpId: config.passkey.rpId ?? null,
-        rpOrigin: config.passkey.rpOrigin ?? null,
+        allowedOrigins,
+        // Convenience defaults for clients with a single allowed origin.
+        // Multi-origin clients ignore these and pass rpId/rpOrigin per call.
+        defaultRpId: allowed.length === 1
+          ? null /* let the client derive — multiple apex strategies are valid */
+          : (config.passkey.rpId ?? null),
+        defaultRpOrigin: allowed.length === 1 ? allowed[0] : (config.passkey.rpOrigin ?? null),
         saltMode: config.passkey.saltMode,
         challengeTtlSeconds: config.passkey.challengeTtlSeconds,
         sessionTtlSeconds: config.passkey.sessionTtlSeconds,
