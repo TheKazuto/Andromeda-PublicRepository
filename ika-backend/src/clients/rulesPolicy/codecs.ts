@@ -19,6 +19,7 @@ import {
   OIDC_ADDR_SEED_LEN,
   OIDC_JWT_STAGING_ACCOUNT_DISCRIMINATOR,
   OIDC_SESSION_ACCOUNT_DISCRIMINATOR,
+  PASSKEY_SESSION_ACCOUNT_DISCRIMINATOR,
   PENDING_CHANGE_KIND_NONE,
   QUORUM_SESSION_ACCOUNT_DISCRIMINATOR,
   RULES_POLICY_ACCOUNT_DISCRIMINATOR,
@@ -39,6 +40,8 @@ export const DESTINATIONS_FLAT_SIZE = MAX_DESTINATIONS * ADDRESS_LEN // 512
 // Login Social (Fase 3b): + `next_oidc_session_nonce` + `next_staging_nonce`
 // (after `next_session_nonce`) — 16 more bytes; **all offsets after
 // `next_session_nonce` shifted accordingly.**
+// Keyspring Fase 2 (2026-05-14): + `next_passkey_session_nonce` (after
+// `next_staging_nonce`) — 8 more bytes for D1 Opção A passkey session flow.
 export const RULES_POLICY_ACCOUNT_SIZE =
   32 + // dwallet
   MEMBER_SLOT_LEN + // primary_slot
@@ -48,6 +51,7 @@ export const RULES_POLICY_ACCOUNT_SIZE =
   8 + // next_session_nonce
   8 + // next_oidc_session_nonce (Login Social)
   8 + // next_staging_nonce (Login Social)
+  8 + // next_passkey_session_nonce (Keyspring Fase 2)
   6 + // quorum_threshold + member_count + daily_limit_some + allowed_destinations_some + allowed_destinations_count + pending_change_some
   MEMBERS_FLAT_SIZE +
   DESTINATIONS_FLAT_SIZE +
@@ -112,6 +116,23 @@ export const OIDC_SESSION_ACCOUNT_SIZE =
   8 + // created_at
   8 + // closed_at
   4 // oidc_verifier_version (u32)
+
+// ── Keyspring Fase 2 — PasskeySession account size (mirror lib.rs) ──
+
+export const PASSKEY_SESSION_ACCOUNT_SIZE =
+  32 + // dwallet
+  32 + // policy
+  32 + // payer_for_close
+  32 + // credential_id_hash
+  33 + // credential_pubkey
+  1 + // _credential_pad (always 0)
+  32 + // eph_pk
+  8 + // session_nonce
+  8 + // next_use_nonce
+  8 + // not_after_unix_ts
+  8 + // expires_at
+  8 + // created_at
+  8 // closed_at
 
 // ── ByteWriter / ByteReader ─────────────────────────────────────
 
@@ -267,6 +288,8 @@ export interface RulesPolicyAccountData {
   nextOidcSessionNonce: bigint
   /** Login Social: single-use nonce space for `oidc_jwt_stage`. */
   nextStagingNonce: bigint
+  /** Keyspring Fase 2: single-use nonce space for `passkey_session_open`. */
+  nextPasskeySessionNonce: bigint
   quorumThreshold: number
   memberCount: number
   dailyLimitSome: number
@@ -314,6 +337,7 @@ export function decodeRulesPolicyAccount(raw: Uint8Array): RulesPolicyAccountDat
   const nextSessionNonce = r.readU64LE()
   const nextOidcSessionNonce = r.readU64LE()
   const nextStagingNonce = r.readU64LE()
+  const nextPasskeySessionNonce = r.readU64LE()
   const quorumThreshold = r.readU8()
   const memberCount = r.readU8()
   const dailyLimitSome = r.readU8()
@@ -341,6 +365,7 @@ export function decodeRulesPolicyAccount(raw: Uint8Array): RulesPolicyAccountDat
     nextSessionNonce,
     nextOidcSessionNonce,
     nextStagingNonce,
+    nextPasskeySessionNonce,
     quorumThreshold,
     memberCount,
     dailyLimitSome,
@@ -563,5 +588,68 @@ export function decodeOidcSessionAccount(raw: Uint8Array): OidcSessionAccountDat
     createdAt,
     closedAt,
     oidcVerifierVersion,
+  }
+}
+
+// ── Keyspring Fase 2 — PasskeySession (disc 5) ──────────────────
+
+export interface PasskeySessionAccountData {
+  dwallet: Uint8Array
+  policy: Uint8Array
+  payerForClose: Uint8Array
+  /** `sha256(credentialId)` — pinned at open (D12). */
+  credentialIdHash: Uint8Array
+  /** 33-byte compressed Secp256r1 pubkey of the passkey credential. */
+  credentialPubkey: Uint8Array
+  /** The user's ephemeral Ed25519 public key (each use signs a per-use challenge). */
+  ephPk: Uint8Array
+  sessionNonce: bigint
+  nextUseNonce: bigint
+  notAfterUnixTs: bigint
+  /** `min(notAfter, createdAt + SESSION_TTL)`. */
+  expiresAt: bigint
+  createdAt: bigint
+  /** Reserved (always 0 — the session is GC'd on close). */
+  closedAt: bigint
+}
+
+export function decodePasskeySessionAccount(raw: Uint8Array): PasskeySessionAccountData {
+  if (raw.length < ACCOUNT_DISCRIMINATOR_LEN + PASSKEY_SESSION_ACCOUNT_SIZE) {
+    throw new Error(
+      `PasskeySession account too small: got ${raw.length}, need at least ${
+        ACCOUNT_DISCRIMINATOR_LEN + PASSKEY_SESSION_ACCOUNT_SIZE
+      }`,
+    )
+  }
+  if (raw[0] !== PASSKEY_SESSION_ACCOUNT_DISCRIMINATOR) {
+    throw new Error(`PasskeySession discriminator mismatch: ${raw[0]}`)
+  }
+  const r = new ByteReader(raw.subarray(ACCOUNT_DISCRIMINATOR_LEN))
+  const dwallet = r.readBytes(32)
+  const policy = r.readBytes(32)
+  const payerForClose = r.readBytes(32)
+  const credentialIdHash = r.readBytes(32)
+  const credentialPubkey = r.readBytes(33)
+  r.skip(1) // _credential_pad — must be zero, but lenient on read
+  const ephPk = r.readBytes(32)
+  const sessionNonce = r.readU64LE()
+  const nextUseNonce = r.readU64LE()
+  const notAfterUnixTs = r.readU64LE()
+  const expiresAt = r.readI64LE()
+  const createdAt = r.readI64LE()
+  const closedAt = r.readI64LE()
+  return {
+    dwallet,
+    policy,
+    payerForClose,
+    credentialIdHash,
+    credentialPubkey,
+    ephPk,
+    sessionNonce,
+    nextUseNonce,
+    notAfterUnixTs,
+    expiresAt,
+    createdAt,
+    closedAt,
   }
 }

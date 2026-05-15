@@ -50,6 +50,8 @@ import {
   MAX_HUMAN_MESSAGE_BYTES,
   oidcPrimaryUseMessage,
   oidcSessionOpenMessage,
+  passkeyPrimaryUseMessage,
+  passkeySessionOpenMessage,
   primaryRecoverMessage,
   quorumContributeMessage,
   quorumSessionOpenMessage,
@@ -74,6 +76,13 @@ export const OP_QUORUM_CONTRIBUTE = enc.encode('quorum-contribute')
 // OIDC (Login Social) flow tags
 export const OP_OIDC_SESSION_OPEN = enc.encode('oidc-session-open')
 export const OP_OIDC_PRIMARY_USE = enc.encode('oidc-primary-use')
+
+// Passkey-primary session flow (D1 Opção A — SCHEME_WEBAUTHN). Mirrors
+// contracts/auth/src/challenge.rs::OP_PASSKEY_SESSION_OPEN /
+// OP_PASSKEY_PRIMARY_USE. Byte-identity is enforced by fixtures/passkey_prf/
+// + CI.
+export const OP_PASSKEY_SESSION_OPEN = enc.encode('passkey-session-open')
+export const OP_PASSKEY_PRIMARY_USE = enc.encode('passkey-primary-use')
 
 // Admin flow tags
 export const OP_ADMIN_ADD_MEMBER = enc.encode('admin-add-member')
@@ -455,6 +464,112 @@ export function oidcPrimaryUseChallenge(input: {
     clearSigning: {
       version: CLEAR_SIGNING_VERSION_RULES_POLICY,
       operation: 'oidc-primary-use',
+      fields: {
+        session: base58Encode32(input.session),
+        dwallet: base58Encode32(input.dwallet),
+        messageDigestHex: bytesToHex(input.messageDigest),
+        metadataDigestHex: bytesToHex(input.metadataDigest),
+        userPubkeyHex: bytesToHex(input.userPubkey),
+        signatureScheme: input.signatureScheme,
+        useNonce: input.useNonce.toString(),
+      },
+    },
+  }
+}
+
+// ── Passkey-primary session flow (D1 Opção A — SCHEME_WEBAUTHN) ───────────
+//
+// Mirrors contracts/auth/src/challenge.rs::passkey_session_open_challenge +
+// passkey_primary_use_challenge. Differences from OIDC:
+//
+//   * No `jwkRegistry` / `oidcVerifierVersion` — WebAuthn assertion is
+//     self-contained (Secp256r1 precompile + clientDataJSON parse).
+//   * `credentialIdHash` (`sha256(credentialId)`) replaces `jwtDigest`.
+
+export function passkeySessionOpenChallenge(input: {
+  dwallet: Uint8Array
+  primarySlot: Uint8Array
+  ephPk: Uint8Array
+  notAfterUnixTs: bigint
+  credentialIdHash: Uint8Array
+  sessionNonce: bigint
+}): ChallengeResult {
+  const humanMessage = passkeySessionOpenMessage({
+    dwallet: input.dwallet,
+    notAfterUnixTs: input.notAfterUnixTs,
+    ephPk: input.ephPk,
+  })
+  const hash = hashv([
+    DOMAIN,
+    OP_PASSKEY_SESSION_OPEN,
+    humanLenLe(humanMessage),
+    humanBytes(humanMessage),
+    input.dwallet,
+    input.primarySlot,
+    input.ephPk,
+    u64Le(input.notAfterUnixTs),
+    input.credentialIdHash,
+    u64Le(input.sessionNonce),
+  ])
+  return {
+    hash,
+    humanMessage,
+    clearSigning: {
+      version: CLEAR_SIGNING_VERSION_RULES_POLICY,
+      operation: 'passkey-session-open',
+      fields: {
+        dwallet: base58Encode32(input.dwallet),
+        ephPkHex: bytesToHex(input.ephPk),
+        notAfterUnixTs: input.notAfterUnixTs.toString(),
+        credentialIdHashHex: bytesToHex(input.credentialIdHash),
+        sessionNonce: input.sessionNonce.toString(),
+      },
+    },
+  }
+}
+
+export function passkeyPrimaryUseChallenge(input: {
+  session: Uint8Array
+  dwallet: Uint8Array
+  messageApproval: Uint8Array
+  messageDigest: Uint8Array
+  metadataDigest: Uint8Array
+  userPubkey: Uint8Array
+  signatureScheme: number
+  messageApprovalBump: number
+  useNonce: bigint
+  primarySlot: Uint8Array
+}): ChallengeResult {
+  const humanMessage = passkeyPrimaryUseMessage({
+    session: input.session,
+    dwallet: input.dwallet,
+    messageDigest: input.messageDigest,
+    metadataDigest: input.metadataDigest,
+    userPubkey: input.userPubkey,
+    signatureScheme: input.signatureScheme,
+  })
+  const hash = hashv([
+    DOMAIN,
+    OP_PASSKEY_PRIMARY_USE,
+    humanLenLe(humanMessage),
+    humanBytes(humanMessage),
+    input.session,
+    input.dwallet,
+    input.messageApproval,
+    input.messageDigest,
+    input.metadataDigest,
+    input.userPubkey,
+    u16Le(input.signatureScheme),
+    u8Bytes(input.messageApprovalBump),
+    u64Le(input.useNonce),
+    input.primarySlot,
+  ])
+  return {
+    hash,
+    humanMessage,
+    clearSigning: {
+      version: CLEAR_SIGNING_VERSION_RULES_POLICY,
+      operation: 'passkey-primary-use',
       fields: {
         session: base58Encode32(input.session),
         dwallet: base58Encode32(input.dwallet),

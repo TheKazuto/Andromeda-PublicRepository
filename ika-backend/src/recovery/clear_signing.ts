@@ -534,6 +534,48 @@ export function oidcPrimaryUseMessage(input: {
   })
 }
 
+// Passkey-primary session (D1 Opção A). Same shape as OIDC session messages
+// — only the "OIDC" word is swapped for "passkey" so users see what they are
+// authorising.
+export function passkeySessionOpenMessage(input: {
+  dwallet: Uint8Array
+  notAfterUnixTs: bigint
+  ephPk: Uint8Array
+}): string {
+  return renderToString((w) => {
+    w.writeStr('Open passkey session for dWallet ')
+    w.writeBase58_32(input.dwallet)
+    w.writeStr(' until ')
+    w.writeU64Dec(input.notAfterUnixTs)
+    w.writeStr(' using ephemeral key ')
+    w.writeHexLower(input.ephPk)
+  })
+}
+
+export function passkeyPrimaryUseMessage(input: {
+  session: Uint8Array
+  dwallet: Uint8Array
+  messageDigest: Uint8Array
+  metadataDigest: Uint8Array
+  userPubkey: Uint8Array
+  signatureScheme: number
+}): string {
+  return renderToString((w) => {
+    w.writeStr('Authorize passkey session ')
+    w.writeBase58_32(input.session)
+    w.writeStr(' for dWallet ')
+    w.writeBase58_32(input.dwallet)
+    w.writeStr(' message ')
+    w.writeHexLower(input.messageDigest)
+    w.writeStr(' metadata ')
+    w.writeHexLower(input.metadataDigest)
+    w.writeStr(' scheme ')
+    w.writeU16Dec(input.signatureScheme)
+    w.writeStr(' user ')
+    w.writeHexLower(input.userPubkey)
+  })
+}
+
 // ============================================================================
 // Phase 2 — allowlist-destinations admin (4)
 // ============================================================================

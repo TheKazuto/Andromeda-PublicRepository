@@ -7,6 +7,7 @@ import { buildPrimaryRouter } from './primary/routes.js'
 import { buildQuorumRouter } from './quorum/routes.js'
 import { buildPolicyRouter } from './policy/routes.js'
 import { buildOidcRecoveryRouter } from './oidc/routes.js'
+import { buildPasskeyRecoveryRouter } from './passkey/routes.js'
 import { initSolanaAdapter } from './adapters/SolanaAdapter.js'
 import { logger } from '../logger.js'
 import type { AppConfig } from '../config.js'
@@ -56,6 +57,16 @@ export async function buildRecoveryRouter(config: AppConfig): Promise<Router> {
         'Recovery Layer: Login Social (OIDC) primary flows enabled',
       )
       primaryRouter.use('/oidc', buildOidcRecoveryRouter(config))
+    }
+    // Keyspring Fase 3 — passkey primary flows under
+    // `/v1/recovery/primary/passkey/*`. Requires the policy program + gas
+    // sponsor (already ensured above) and IKA_PASSKEY_ENABLED=true.
+    if (config.passkey.enabled) {
+      logger.info(
+        { rpId: config.passkey.rpId, saltMode: config.passkey.saltMode },
+        'Recovery Layer: passkey-PRF primary flows enabled',
+      )
+      primaryRouter.use('/passkey', buildPasskeyRecoveryRouter(config))
     }
     router.use('/primary', primaryRouter)
     router.use('/quorum', buildQuorumRouter(config))

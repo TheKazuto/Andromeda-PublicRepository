@@ -71,14 +71,41 @@ const gasSponsorSchema = z.object({
   maxGasPerOpLamports: z.number().int().positive().default(20_000_000),
 })
 
+// ── Keyspring Fase 3 — passkey-PRF (D1 Opção A) — see PLAN_KEYSPRING_INTEGRATION_2026_05.md ──
+//
+// Opt-in via IKA_PASSKEY_ENABLED. When disabled the passkey routes are not
+// mounted. The on-chain `rules-policy` (`scheme = 3 = WebAuthn` session
+// flow) is the source of truth; this config drives RP ID binding (D2),
+// challenge TTL, salt strategy (D3 — `per_credential` only in prod) and
+// the off-chain pre-validation done in the routes.
+const passkeySchema = z.object({
+  enabled: z.boolean().default(false),
+  /** D2 — RP ID in production is the apex `andromedainfra.pro`. IMMUTABLE
+   *  after the first passkey is registered; rotation would orphan every
+   *  credential derived under the old value. */
+  rpId: z.string().optional(),
+  /** Origin the user's WebAuthn flow runs on (e.g. `https://app.andromedainfra.pro`). */
+  rpOrigin: z.string().optional(),
+  challengeTtlSeconds: z.number().int().positive().default(120),
+  /** D3 — only `per_credential` is accepted in production. The check at
+   *  the bottom of `loadConfig` fails-fast on `global`. */
+  saltMode: z.enum(['per_credential', 'global']).default('per_credential'),
+  /** Mirrors `contracts/rules-policy::SESSION_TTL_SECONDS = 600`. The
+   *  contract caps it on-chain anyway; this env exists so tests / dev
+   *  envs can shorten it without redeploying. */
+  sessionTtlSeconds: z.number().int().positive().default(600),
+})
+
 export interface AppConfig {
   base: z.infer<typeof baseSchema>
   recovery: z.infer<typeof recoverySchema>
   oidc: z.infer<typeof oidcSchema>
+  passkey: z.infer<typeof passkeySchema>
   gasSponsor: z.infer<typeof gasSponsorSchema>
 }
 
 export type OidcConfig = AppConfig['oidc']
+export type PasskeyConfig = AppConfig['passkey']
 
 class ConfigError extends Error {
   readonly errors: string[]
@@ -191,6 +218,48 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     }
   }
 
+  const passkeyRaw = {
+    enabled: truthy(env.IKA_PASSKEY_ENABLED),
+    rpId: env.IKA_PASSKEY_RP_ID,
+    rpOrigin: env.IKA_PASSKEY_RP_ORIGIN,
+    challengeTtlSeconds: env.IKA_PASSKEY_CHALLENGE_TTL_SECONDS
+      ? Number.parseInt(env.IKA_PASSKEY_CHALLENGE_TTL_SECONDS, 10)
+      : 120,
+    saltMode: (env.IKA_PASSKEY_SALT_MODE ?? 'per_credential') as 'per_credential' | 'global',
+    sessionTtlSeconds: env.IKA_PASSKEY_SESSION_TTL_SECONDS
+      ? Number.parseInt(env.IKA_PASSKEY_SESSION_TTL_SECONDS, 10)
+      : 600,
+  }
+  const passkeyParse = passkeySchema.safeParse(passkeyRaw)
+  if (!passkeyParse.success) {
+    for (const issue of passkeyParse.error.issues) {
+      errors.push(`passkey.${issue.path.join('.')}: ${issue.message}`)
+    }
+  } else if (passkeyParse.data.enabled) {
+    const p = passkeyParse.data
+    if (!recoveryParse.success || !recoveryParse.data.policyEnabled) {
+      errors.push(
+        'passkey: IKA_RECOVERY_POLICY_ENABLED must also be true when IKA_PASSKEY_ENABLED=true (passkey is a primary slot of the on-chain rules-policy)',
+      )
+    }
+    if (!p.rpId) {
+      errors.push(
+        'passkey.rpId (IKA_PASSKEY_RP_ID): required when IKA_PASSKEY_ENABLED=true. Production value is "andromedainfra.pro" — IMMUTABLE after first registration (D2).',
+      )
+    }
+    if (!p.rpOrigin) {
+      errors.push(
+        'passkey.rpOrigin (IKA_PASSKEY_RP_ORIGIN): required when IKA_PASSKEY_ENABLED=true',
+      )
+    }
+    // D3 fail-fast: reject the global-salt mode in production.
+    if (p.saltMode !== 'per_credential') {
+      errors.push(
+        `passkey.saltMode (IKA_PASSKEY_SALT_MODE): only 'per_credential' is accepted in production (got '${p.saltMode}'). See PLAN_KEYSPRING_INTEGRATION_2026_05.md D3.`,
+      )
+    }
+  }
+
   // Prefer the canonical ANDROMEDA_GAS_SPONSOR_KEYPAIR; fall back to the
   // legacy IKA_GAS_SPONSOR_KEYPAIR for one release for back-compat.
   const gasRaw = {
@@ -217,6 +286,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     base: baseParse.data!,
     recovery: recoveryParse.data!,
     oidc: oidcParse.data!,
+    passkey: passkeyParse.data!,
     gasSponsor: gasParse.data!,
   }
 }

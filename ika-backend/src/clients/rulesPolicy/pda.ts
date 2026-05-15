@@ -7,6 +7,7 @@ import {
   JWK_REGISTRY_PROGRAM_ID,
   OIDC_JWT_STAGING_PDA_SEED,
   OIDC_SESSION_PDA_SEED,
+  PASSKEY_SESSION_PDA_SEED,
   QUORUM_SESSION_PDA_SEED,
   RULES_POLICY_PDA_SEED,
 } from './program.js'
@@ -42,6 +43,9 @@ const OIDC_PDA_CACHE_CAP = 4096
 const oidcStagingPdaCache = new Map<string, PdaResult>()
 const oidcSessionPdaCache = new Map<string, PdaResult>()
 const jwkRegistryPdaCache = new Map<string, PdaResult>()
+
+// Keyspring Fase 2 — passkey session PDA cache.
+const passkeySessionPdaCache = new Map<string, PdaResult>()
 
 function bytesHex(bytes: Uint8Array): string {
   let s = ''
@@ -206,6 +210,34 @@ export async function findOidcSessionPda(
   })
   const result: PdaResult = { address, bump }
   lruSet(oidcSessionPdaCache, OIDC_PDA_CACHE_CAP, key, result)
+  return result
+}
+
+/**
+ * PDA: `PasskeySession` for a given (policy, dwallet, sessionNonce).
+ * seeds = [b"passkey_session", policy, dwallet, le8(sessionNonce)].
+ * Keyspring Fase 2.
+ */
+export async function findPasskeySessionPda(
+  programId: Address,
+  policy: Address,
+  dwallet: Address,
+  sessionNonce: bigint,
+): Promise<PdaResult> {
+  const key = `${programId}:${policy}:${dwallet}:${sessionNonce.toString()}`
+  const cached = lruGet(passkeySessionPdaCache, key)
+  if (cached) return cached
+  const [address, bump] = await getProgramDerivedAddress({
+    programAddress: programId,
+    seeds: [
+      PASSKEY_SESSION_PDA_SEED,
+      addrEncoder.encode(policy),
+      addrEncoder.encode(dwallet),
+      le8(sessionNonce),
+    ],
+  })
+  const result: PdaResult = { address, bump }
+  lruSet(passkeySessionPdaCache, OIDC_PDA_CACHE_CAP, key, result)
   return result
 }
 

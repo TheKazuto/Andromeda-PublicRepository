@@ -795,3 +795,144 @@ export function buildOidcJwtStagingCloseInstruction(input: {
     { address: SYSVAR_CLOCK_ADDRESS, role: AccountRole.READONLY },
   ])
 }
+
+// ── 25. passkey_session_open (Keyspring Fase 2 — D1 Opção A) ────
+
+export function buildPasskeySessionOpenInstruction(input: {
+  programId: Address
+  policyPda: Address
+  dwallet: Address
+  sessionPda: Address
+  payer: Address
+  eventAuthorityPda: Address
+  initAuthorityHash: Uint8Array
+  ephPk: Uint8Array
+  notAfterUnixTs: bigint
+  credentialIdHash: Uint8Array
+  /** `policy.next_passkey_session_nonce` observed by the client (mirrors OIDC F-1 reject-fast). */
+  expectedSessionNonce: bigint
+  /** `authenticatorData` from the WebAuthn assertion (≤ 192 bytes — D13). */
+  webauthnAuthData: Uint8Array
+  /** `clientDataJSON` from the WebAuthn assertion (≤ 192 bytes). */
+  webauthnClientDataJson: Uint8Array
+}): Instruction {
+  assertHash(input.initAuthorityHash)
+  assertLen(input.ephPk, 32, 'eph_pk')
+  assertLen(input.credentialIdHash, 32, 'credential_id_hash')
+  if (input.webauthnAuthData.length === 0 || input.webauthnAuthData.length > 192) {
+    throw new Error(`webauthn_auth_data must be 1..=192 bytes (got ${input.webauthnAuthData.length})`)
+  }
+  if (input.webauthnClientDataJson.length === 0 || input.webauthnClientDataJson.length > 192) {
+    throw new Error(
+      `webauthn_client_data_json must be 1..=192 bytes (got ${input.webauthnClientDataJson.length})`,
+    )
+  }
+
+  const w = new ByteWriter()
+  w.writeU8(RULES_POLICY_INSTRUCTION_DISCRIMINATOR.passkeySessionOpen)
+  w.writeBytes(input.initAuthorityHash)
+  w.writeBytes(input.ephPk)
+  w.writeU64LE(input.notAfterUnixTs)
+  w.writeBytes(input.credentialIdHash)
+  w.writeU64LE(input.expectedSessionNonce)
+  // Two `#[max(192, pfx = 2)]` slices — u16 length-prefix in LE then payload.
+  w.writeU16LE(input.webauthnAuthData.length)
+  w.writeBytes(input.webauthnAuthData)
+  w.writeU16LE(input.webauthnClientDataJson.length)
+  w.writeBytes(input.webauthnClientDataJson)
+
+  return ix(input.programId, w.toUint8Array(), [
+    { address: input.dwallet, role: AccountRole.READONLY },
+    { address: input.policyPda, role: AccountRole.WRITABLE },
+    { address: input.sessionPda, role: AccountRole.WRITABLE },
+    { address: input.payer, role: AccountRole.WRITABLE_SIGNER },
+    { address: SYSVAR_INSTRUCTIONS_ADDRESS, role: AccountRole.READONLY },
+    { address: SYSVAR_CLOCK_ADDRESS, role: AccountRole.READONLY },
+    { address: SYSVAR_RENT_ADDRESS, role: AccountRole.READONLY },
+    { address: SYSTEM_PROGRAM_ADDRESS, role: AccountRole.READONLY },
+    { address: input.eventAuthorityPda, role: AccountRole.READONLY },
+    { address: input.programId, role: AccountRole.READONLY },
+  ])
+}
+
+// ── 26. recover_as_primary_passkey_session (Keyspring Fase 2) ───
+
+export function buildRecoverAsPrimaryPasskeySessionInstruction(input: {
+  programId: Address
+  policyPda: Address
+  dwallet: Address
+  sessionPda: Address
+  coordinator: Address
+  messageApproval: Address
+  payer: Address
+  cpiAuthorityPda: Address
+  ikaProgramId: Address
+  eventAuthorityPda: Address
+  initAuthorityHash: Uint8Array
+  messageDigest: Uint8Array
+  metadataDigest: Uint8Array
+  userPubkey: Uint8Array
+  signatureScheme: number
+  messageApprovalBump: number
+  cpiAuthorityBump: number
+  expectedUseNonce: bigint
+}): Instruction {
+  assertHash(input.initAuthorityHash)
+  assertLen(input.messageDigest, 32, 'message_digest')
+  assertLen(input.metadataDigest, 32, 'metadata_digest')
+  assertLen(input.userPubkey, 32, 'user_pubkey')
+
+  const w = new ByteWriter()
+  w.writeU8(RULES_POLICY_INSTRUCTION_DISCRIMINATOR.recoverAsPrimaryPasskeySession)
+  w.writeBytes(input.initAuthorityHash)
+  w.writeBytes(input.messageDigest)
+  w.writeBytes(input.metadataDigest)
+  w.writeBytes(input.userPubkey)
+  w.writeU16LE(input.signatureScheme)
+  w.writeU8(input.messageApprovalBump)
+  w.writeU8(input.cpiAuthorityBump)
+  w.writeU64LE(input.expectedUseNonce)
+
+  // Account order mirrors `RecoverAsPrimaryPasskeySession` in lib.rs (no
+  // jwk_registry — passkey assertion is self-contained, unlike OIDC).
+  return ix(input.programId, w.toUint8Array(), [
+    { address: input.dwallet, role: AccountRole.READONLY },
+    { address: input.policyPda, role: AccountRole.READONLY },
+    { address: input.sessionPda, role: AccountRole.WRITABLE },
+    { address: input.coordinator, role: AccountRole.READONLY },
+    { address: input.messageApproval, role: AccountRole.WRITABLE },
+    { address: input.payer, role: AccountRole.WRITABLE_SIGNER },
+    { address: input.cpiAuthorityPda, role: AccountRole.READONLY },
+    { address: input.ikaProgramId, role: AccountRole.READONLY },
+    { address: SYSVAR_INSTRUCTIONS_ADDRESS, role: AccountRole.READONLY },
+    { address: SYSVAR_CLOCK_ADDRESS, role: AccountRole.READONLY },
+    { address: SYSTEM_PROGRAM_ADDRESS, role: AccountRole.READONLY },
+    { address: input.eventAuthorityPda, role: AccountRole.READONLY },
+    { address: input.programId, role: AccountRole.READONLY },
+  ])
+}
+
+// ── 27. passkey_session_close (Keyspring Fase 2) ────────────────
+
+export function buildPasskeySessionCloseInstruction(input: {
+  programId: Address
+  policyPda: Address
+  dwallet: Address
+  sessionPda: Address
+  rentDestination: Address
+  initAuthorityHash: Uint8Array
+}): Instruction {
+  assertHash(input.initAuthorityHash)
+
+  const w = new ByteWriter()
+  w.writeU8(RULES_POLICY_INSTRUCTION_DISCRIMINATOR.passkeySessionClose)
+  w.writeBytes(input.initAuthorityHash)
+
+  return ix(input.programId, w.toUint8Array(), [
+    { address: input.dwallet, role: AccountRole.READONLY },
+    { address: input.policyPda, role: AccountRole.READONLY },
+    { address: input.sessionPda, role: AccountRole.WRITABLE },
+    { address: input.rentDestination, role: AccountRole.WRITABLE },
+    { address: SYSVAR_CLOCK_ADDRESS, role: AccountRole.READONLY },
+  ])
+}

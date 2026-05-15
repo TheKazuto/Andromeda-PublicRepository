@@ -30,12 +30,18 @@ export const RULES_POLICY_INSTRUCTION_DISCRIMINATOR = {
   recoverAsPrimaryOidcSession: 22,
   oidcSessionClose: 23,
   oidcJwtStagingClose: 24,
+  // Keyspring Fase 2 — passkey session flow (D1 Opção A,
+  // PLAN_KEYSPRING_INTEGRATION_2026_05.md).
+  passkeySessionOpen: 25,
+  recoverAsPrimaryPasskeySession: 26,
+  passkeySessionClose: 27,
 } as const
 
 export const RULES_POLICY_ACCOUNT_DISCRIMINATOR = 1
 export const QUORUM_SESSION_ACCOUNT_DISCRIMINATOR = 2
 export const OIDC_SESSION_ACCOUNT_DISCRIMINATOR = 3
 export const OIDC_JWT_STAGING_ACCOUNT_DISCRIMINATOR = 4
+export const PASSKEY_SESSION_ACCOUNT_DISCRIMINATOR = 5
 
 export const PENDING_CHANGE_KIND_NONE = 0
 export const PENDING_CHANGE_KIND_QUORUM = 1
@@ -46,6 +52,7 @@ export const RULES_POLICY_PDA_SEED = new TextEncoder().encode('rules_policy')
 export const QUORUM_SESSION_PDA_SEED = new TextEncoder().encode('quorum_session')
 export const OIDC_JWT_STAGING_PDA_SEED = new TextEncoder().encode('oidc_jwt_staging')
 export const OIDC_SESSION_PDA_SEED = new TextEncoder().encode('oidc_session')
+export const PASSKEY_SESSION_PDA_SEED = new TextEncoder().encode('passkey_session')
 export const CPI_AUTHORITY_PDA_SEED = new TextEncoder().encode('__ika_cpi_authority')
 export const EVENT_AUTHORITY_PDA_SEED = new TextEncoder().encode('__event_authority')
 
@@ -100,6 +107,12 @@ export const RULES_POLICY_ERROR = {
   OIDC_VERIFIER_VERSION_MISMATCH: 6026,
   NOT_OIDC_PRIMARY: 6027,
   STAGING_NOT_EXPIRED: 6028,
+  // Clear-signing renderer (shared across all clear-signing v2 flows).
+  CLEAR_SIGNING_RENDER_FAILED: 6029,
+  // Keyspring Fase 2 — passkey session flow.
+  NOT_PASSKEY_PRIMARY: 6030,
+  INVALID_WEBAUTHN_PAYLOAD: 6031,
+  PASSKEY_CREDENTIAL_MISMATCH: 6032,
 } as const
 
 export const RULES_POLICY_EVENT_DISCRIMINATOR = {
@@ -107,7 +120,12 @@ export const RULES_POLICY_EVENT_DISCRIMINATOR = {
   SignatureRequested: 1,
   SignatureApproved: 2,
   OidcSessionOpened: 3,
+  PasskeySessionOpened: 4,
 } as const
+
+/** Keyspring Fase 2 — `contracts/rules-policy::SESSION_TTL_SECONDS` shared
+ *  with OIDC sessions (10 min). */
+export const PASSKEY_SESSION_TTL_SECONDS = 600
 
 // ── Member-slot schemes (mirror auth/mod.rs) ─────────────────────
 
@@ -128,7 +146,9 @@ export const MAX_DESTINATIONS = 16
 export const MAX_SESSION_TTL_SECONDS = 7 * 24 * 3600
 export const MIN_COOLDOWN_SECONDS = 3600
 
-export const WEBAUTHN_AUTH_DATA_MAX = 64
+// Keyspring Fase 0 spike (D13, 2026-05-14): bumped 64 → 192 after Samsung
+// Pass returned `authData = 84 bytes` with PRF + ED flag active.
+export const WEBAUTHN_AUTH_DATA_MAX = 192
 export const WEBAUTHN_CLIENT_DATA_JSON_MAX = 192
 
 /** Identifier byte length per scheme. */
@@ -155,6 +175,14 @@ export function buildOidcPrimarySlot(addrSeed: Uint8Array): Uint8Array {
     throw new Error(`addr_seed must be ${OIDC_ADDR_SEED_LEN} bytes, got ${addrSeed.length}`)
   }
   return buildMemberSlot(SCHEME_OIDC_JWT, addrSeed)
+}
+
+/** Builds the canonical passkey primary slot `[3, credential_pubkey(33)]`. */
+export function buildPasskeyPrimarySlot(credentialPubkey: Uint8Array): Uint8Array {
+  if (credentialPubkey.length !== 33) {
+    throw new Error(`credential_pubkey must be 33 bytes (compressed Secp256r1), got ${credentialPubkey.length}`)
+  }
+  return buildMemberSlot(SCHEME_WEBAUTHN, credentialPubkey)
 }
 
 /**

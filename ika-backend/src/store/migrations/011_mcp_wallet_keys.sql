@@ -15,7 +15,7 @@
 
 CREATE TABLE IF NOT EXISTS mcp_wallet_keys (
     id                TEXT        PRIMARY KEY,                 -- app-generated UUID
-    owner_ref         TEXT        NOT NULL,                    -- api_key_id, or the identity walletAddress when identity is enabled
+    owner_ref         TEXT        NOT NULL,                    -- api_key_id
     dwallet_address   TEXT,                                    -- NULL until DKG completes and the dWallet PDA is derived
     curve             SMALLINT    NOT NULL,                    -- DWalletCurve id (e.g. 2 = Curve25519 for Solana/Ed25519)
     signer_pubkey     BYTEA       NOT NULL,                    -- 32 bytes — the Ed25519 pubkey = dWallet owner / intended_chain_sender
