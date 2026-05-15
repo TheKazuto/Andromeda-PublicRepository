@@ -24,8 +24,12 @@
 //!  - SCHEME_SECP256R1   (33-byte compressed pubkey, raw passkey use)
 //!  - SCHEME_WEBAUTHN    (33-byte compressed pubkey, WebAuthn assertion)
 //!
-//! Primary slot accepts schemes 0/1/2 (not WebAuthn — primary is a long-lived
-//! credential, raw passkey use is the right substitute).
+//! Primary slot accepts schemes 0/1/2/3/4. SCHEME_WEBAUTHN (3) is a
+//! *session-scoped* primary: it can only be exercised through
+//! `passkey_session_open` + `recover_as_primary_passkey_session` (D1 Opção A
+//! of `PLAN_KEYSPRING_INTEGRATION_2026_05.md`), never directly via
+//! `recover_as_primary`. The contract still rejects WebAuthn as the
+//! `init_authority` (assertions are session-scoped, not long-lived).
 //!
 //! ## Quorum staging
 //!
@@ -55,7 +59,8 @@ use andromeda_auth::{
         admin_remove_member_challenge, admin_revoke_challenge,
         admin_set_cooldown_immediate_challenge, admin_set_daily_limit_immediate_challenge,
         admin_set_primary_challenge, admin_set_quorum_threshold_immediate_challenge,
-        oidc_primary_use_challenge, oidc_session_open_challenge, primary_recover_challenge,
+        oidc_primary_use_challenge, oidc_session_open_challenge,
+        passkey_primary_use_challenge, passkey_session_open_challenge, primary_recover_challenge,
         quorum_contribute_challenge, quorum_session_open_challenge, rules_policy_init_challenge,
     },
     hash::hashv,
@@ -818,6 +823,133 @@ mod rules_policy_program {
         let current_ts: i64 = ctx.accounts.clock.unix_timestamp.into();
         ctx.accounts.close(current_ts)
     }
+
+    /// 25 — open a short-lived `PasskeySession` from a WebAuthn assertion
+    /// (D1 Opção A of `PLAN_KEYSPRING_INTEGRATION_2026_05.md`). The passkey
+    /// (`SCHEME_WEBAUTHN`) sits in `policy.primary_slot`; an assertion is
+    /// session-scoped, so single-tx primary use is rejected by
+    /// `verify_primary_challenge`. The user signs `passkey_session_open_challenge`
+    /// inside the WebAuthn `clientDataJSON` and the Secp256r1 precompile in
+    /// the same tx verifies it.
+    ///
+    /// Step order:
+    ///  1. `policy.primary_slot` is `[SCHEME_WEBAUTHN, credential_pubkey, …]`;
+    ///  2. WebAuthn payload bounds (`auth_data` ≤ `WEBAUTHN_AUTH_DATA_MAX`,
+    ///     `client_data_json` ≤ `WEBAUTHN_CLIENT_DATA_JSON_MAX`);
+    ///  3. clamp effective expiry to `min(not_after, now + SESSION_TTL)`;
+    ///  4. policy nonce reject-fast (mirrors the OIDC F-1 audit pattern);
+    ///  5. derive `passkey_session_open_challenge(dwallet, primary_slot,
+    ///     eph_pk, not_after, credential_id_hash, session_nonce)` and run
+    ///     `verify_signature` over it — proves the user actually held the
+    ///     passkey at session open;
+    ///  6. create `PasskeySession`, bump `policy.next_passkey_session_nonce`.
+    #[instruction(discriminator = 25)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn passkey_session_open(
+        ctx: Ctx<PasskeySessionOpen>,
+        _init_authority_hash: Address,
+        eph_pk: [u8; 32],
+        not_after_unix_ts: u64,
+        credential_id_hash: [u8; 32],
+        expected_passkey_session_nonce: u64,
+        #[max(192, pfx = 2)] webauthn_auth_data: &[u8],
+        #[max(192, pfx = 2)] webauthn_client_data_json: &[u8],
+    ) -> Result<(), ProgramError> {
+        let current_ts: i64 = ctx.accounts.clock.unix_timestamp.into();
+        let dwallet_addr = *ctx.accounts.dwallet_account.address();
+        let policy_addr = *ctx.accounts.policy.address();
+        let session_addr = *ctx.accounts.session.address();
+        ctx.accounts.open(
+            eph_pk,
+            not_after_unix_ts,
+            credential_id_hash,
+            expected_passkey_session_nonce,
+            webauthn_auth_data,
+            webauthn_client_data_json,
+            current_ts,
+        )?;
+        ctx.accounts.program.emit_event(
+            &PasskeySessionOpened {
+                policy: policy_addr,
+                session: session_addr,
+                dwallet: dwallet_addr,
+                credential_id_hash: Address::from(credential_id_hash),
+                ts: current_ts,
+            },
+            &ctx.accounts.event_authority,
+            EventAuthority::BUMP,
+        )?;
+        Ok(())
+    }
+
+    /// 26 — authorize an Ika signature through an open `PasskeySession`.
+    ///
+    /// Re-validates: session not expired; `expected_use_nonce` matches; the
+    /// policy's primary is still `[SCHEME_WEBAUTHN, session.credential_pubkey,
+    /// …]` (a rotation/revoke of the primary kills the session immediately);
+    /// and an Ed25519 precompile in this tx signed
+    /// `passkey_primary_use_challenge(session, dwallet, message_approval,
+    /// message_digest, metadata_digest, user_pubkey, signature_scheme,
+    /// message_approval_bump, use_nonce, primary_slot)` with the session's
+    /// `eph_pk`. Then bumps `next_use_nonce` (before the CPI) and CPIs Ika
+    /// `approve_message`.
+    #[instruction(discriminator = 26)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn recover_as_primary_passkey_session(
+        ctx: Ctx<RecoverAsPrimaryPasskeySession>,
+        _init_authority_hash: Address,
+        message_digest: [u8; 32],
+        metadata_digest: [u8; 32],
+        user_pubkey: [u8; 32],
+        signature_scheme: u16,
+        message_approval_bump: u8,
+        cpi_authority_bump: u8,
+        expected_use_nonce: u64,
+    ) -> Result<(), ProgramError> {
+        let current_ts: i64 = ctx.accounts.clock.unix_timestamp.into();
+        let policy_addr = *ctx.accounts.policy.address();
+        let request_hash = Address::from(message_digest);
+        ctx.accounts.program.emit_event(
+            &SignatureRequested {
+                policy: policy_addr,
+                request_hash,
+                ts: current_ts,
+            },
+            &ctx.accounts.event_authority,
+            EventAuthority::BUMP,
+        )?;
+        ctx.accounts.recover(
+            message_digest,
+            metadata_digest,
+            user_pubkey,
+            signature_scheme,
+            message_approval_bump,
+            cpi_authority_bump,
+            expected_use_nonce,
+            current_ts,
+        )?;
+        ctx.accounts.program.emit_event(
+            &SignatureApproved {
+                policy: policy_addr,
+                request_hash,
+                ts: current_ts,
+            },
+            &ctx.accounts.event_authority,
+            EventAuthority::BUMP,
+        )?;
+        Ok(())
+    }
+
+    /// 27 — close an expired `PasskeySession`, refunding its rent to the
+    /// `payer_for_close` captured at open time.
+    #[instruction(discriminator = 27)]
+    pub fn passkey_session_close(
+        ctx: Ctx<PasskeySessionClose>,
+        _init_authority_hash: Address,
+    ) -> Result<(), ProgramError> {
+        let current_ts: i64 = ctx.accounts.clock.unix_timestamp.into();
+        ctx.accounts.close(current_ts)
+    }
 }
 
 #[error_code]
@@ -874,6 +1006,19 @@ pub enum RulesPolicyError {
     /// could not be validated because the canonical hash could not be
     /// derived from the typed params).
     ClearSigningRenderFailed,
+    // ── Passkey session (D1 Opção A) ──
+    /// `policy.primary_slot` is not `[3, credential_pubkey, …]` — the primary
+    /// is not a passkey, or it was rotated / revoked after the session was
+    /// opened.
+    NotPasskeyPrimary,
+    /// `passkey_session_open` received a WebAuthn payload (auth_data /
+    /// clientDataJSON) outside the on-chain bounds: empty or longer than
+    /// `WEBAUTHN_AUTH_DATA_MAX` / `WEBAUTHN_CLIENT_DATA_JSON_MAX`.
+    InvalidWebAuthnPayload,
+    /// `credential_id_hash` carried in the open payload does not match the
+    /// one pinned into the open session; a rebind attempt against a different
+    /// credential under the same primary slot.
+    PasskeyCredentialMismatch,
 }
 
 // ── Accounts: RulesPolicy ───────────────────────────────────────
@@ -900,6 +1045,10 @@ pub struct RulesPolicy {
     /// Single-use nonce space for OIDC JWT staging accounts (`oidc_jwt_stage`),
     /// disjoint from every other nonce.
     pub next_staging_nonce: u64,
+    /// Single-use nonce space for passkey sessions (`passkey_session_open` —
+    /// D1 Opção A of `PLAN_KEYSPRING_INTEGRATION_2026_05.md`), disjoint from
+    /// every other nonce.
+    pub next_passkey_session_nonce: u64,
     pub quorum_threshold: u8,
     pub member_count: u8,
     pub daily_limit_some: u8,
@@ -981,14 +1130,22 @@ fn validate_cooldown(cooldown_seconds: u64) -> Result<(), ProgramError> {
 }
 
 /// Validates a slot intended to be a `RulesPolicy` *primary*: schemes 0 / 1 / 2
-/// (challenge-signing wallet credentials, verified via Solana precompiles) or
-/// scheme 4 (`OidcJwt` — Login Social identity, verified via `oidc-verifier` +
-/// an Ed25519 precompile over the user's ephemeral key). WebAuthn (scheme 3) is
-/// rejected: an assertion is session-scoped, not a long-lived primary.
+/// (challenge-signing wallet credentials, verified via Solana precompiles),
+/// scheme 3 (`WebAuthn` — passkey, *session-scoped*, verified via
+/// `passkey_session_open` and the Secp256r1 precompile) or scheme 4
+/// (`OidcJwt` — Login Social identity, verified via `oidc-verifier` + an
+/// Ed25519 precompile over the user's ephemeral key).
+///
+/// WebAuthn primary is acceptable here ONLY because `verify_primary_challenge`
+/// (used by the single-tx `recover_as_primary` path) still rejects scheme 3
+/// — every passkey-primary use MUST go through a `PasskeySession`, mirroring
+/// the OIDC session pattern (D1 Opção A of
+/// `PLAN_KEYSPRING_INTEGRATION_2026_05.md`). `init_authority` rejection of
+/// scheme 3 is enforced separately in `InitPolicy::create`.
 #[inline]
 fn validate_rules_policy_primary_slot(slot: &[u8; MEMBER_SLOT_LEN]) -> Result<(), ProgramError> {
     match slot[0] {
-        SCHEME_ED25519 | SCHEME_SECP256K1 | SCHEME_SECP256R1 => {
+        SCHEME_ED25519 | SCHEME_SECP256K1 | SCHEME_SECP256R1 | SCHEME_WEBAUTHN => {
             validate_slot(slot).map_err(|_| RulesPolicyError::InvalidMemberSlot)?;
         }
         SCHEME_OIDC_JWT => {
@@ -997,6 +1154,17 @@ fn validate_rules_policy_primary_slot(slot: &[u8; MEMBER_SLOT_LEN]) -> Result<()
         _ => return Err(RulesPolicyError::UnsupportedScheme.into()),
     }
     Ok(())
+}
+
+/// Builds the canonical passkey primary slot for a 33-byte compressed
+/// Secp256r1 credential pubkey: `[3, credential_pubkey(33)]` (zero padding
+/// not needed — 1 + 33 = `MEMBER_SLOT_LEN`).
+#[inline]
+fn passkey_primary_slot(credential_pubkey: &[u8; 33]) -> [u8; MEMBER_SLOT_LEN] {
+    let mut slot = [0u8; MEMBER_SLOT_LEN];
+    slot[0] = SCHEME_WEBAUTHN;
+    slot[1..34].copy_from_slice(credential_pubkey);
+    slot
 }
 
 /// Builds the canonical OIDC primary slot for an `addr_seed`: `[4, addr_seed(32), 0]`.
@@ -1153,6 +1321,7 @@ impl InitPolicy {
             next_session_nonce: 0,
             next_oidc_session_nonce: 0,
             next_staging_nonce: 0,
+            next_passkey_session_nonce: 0,
             quorum_threshold,
             member_count: 0,
             daily_limit_some,
@@ -2657,6 +2826,371 @@ impl OidcJwtStagingClose {
     }
 }
 
+// ════════════════════════════════════════════════════════════════
+// Passkey session — `scheme = 3 = WebAuthn` (D1 Opção A of
+// `PLAN_KEYSPRING_INTEGRATION_2026_05.md`).
+//
+// Mirrors the OIDC session pattern with two differences:
+//
+//  * No external trust root (no JWK registry). The WebAuthn assertion is
+//    self-contained: the Secp256r1 precompile validates the assertion against
+//    the policy's primary passkey pubkey, and `verify_signature` parses
+//    `clientDataJSON` to bind the canonical challenge.
+//  * No staging account — a single WebAuthn assertion fits comfortably inside
+//    the 1232-byte tx limit (Samsung Pass produced `auth_data = 84 bytes`,
+//    `clientDataJSON = 174 bytes` in the Fase 0 spike; capped on-chain at 192
+//    each, see D13 in the plan).
+// ════════════════════════════════════════════════════════════════
+
+// ── Account: PasskeySession (disc 5) ────────────────────────────
+
+#[account(discriminator = 5, set_inner)]
+#[seeds(b"passkey_session", policy: Address, dwallet: Address, session_nonce: u64)]
+pub struct PasskeySession {
+    pub dwallet: Address,
+    pub policy: Address,
+    /// The account that funded this session — receives the rent refund on close.
+    pub payer_for_close: Address,
+    /// `sha256(credentialId)` — pinned at open. A different passkey under the
+    /// same primary slot (same pubkey, different credential ID; unusual but
+    /// possible) cannot reuse this session.
+    pub credential_id_hash: [u8; 32],
+    /// 33-byte compressed Secp256r1 pubkey of the passkey credential (mirror
+    /// of `policy.primary_slot[1..34]` at open time). Re-checked on every use
+    /// — a primary rotation kills the session immediately.
+    pub credential_pubkey: [u8; 33],
+    /// 1-byte zero padding so the 33-byte pubkey aligns nicely inside the
+    /// fixed account layout. Always zero.
+    pub _credential_pad: u8,
+    /// The user's ephemeral Ed25519 public key — every use is authorized by a
+    /// fresh Ed25519 precompile signature from this key over a per-use challenge.
+    pub eph_pk: [u8; 32],
+    pub session_nonce: u64,
+    /// Monotonic per-use nonce — consumed before each Ika CPI.
+    pub next_use_nonce: u64,
+    /// `not_after_unix_ts` chosen by the client at open time.
+    pub not_after_unix_ts: u64,
+    /// Effective expiry = `min(not_after, created_at + SESSION_TTL)`.
+    pub expires_at: i64,
+    pub created_at: i64,
+    /// Reserved (always 0 — the session is GC'd on close, never "closed but live").
+    pub closed_at: i64,
+}
+
+// ── PasskeySessionOpen (disc 25) ────────────────────────────────
+
+#[derive(Accounts)]
+#[instruction(init_authority_hash: Address)]
+pub struct PasskeySessionOpen {
+    pub dwallet_account: UncheckedAccount,
+
+    #[account(mut, address = RulesPolicy::seeds(
+        dwallet_account.address(),
+        &init_authority_hash
+    ))]
+    pub policy: Account<RulesPolicy>,
+
+    #[account(init,
+        payer = payer,
+        address = PasskeySession::seeds(
+            policy.address(),
+            dwallet_account.address(),
+            policy.next_passkey_session_nonce.into()
+        )
+    )]
+    pub session: Account<PasskeySession>,
+
+    #[account(mut)]
+    pub payer: Signer,
+
+    pub instructions_sysvar: UncheckedAccount,
+    pub clock: Sysvar<Clock>,
+    pub rent: Sysvar<Rent>,
+    pub system_program: Program<SystemProgram>,
+    pub event_authority: EventAuthority,
+    pub program: Program<RulesPolicyProgram>,
+}
+
+impl PasskeySessionOpen {
+    #[inline(always)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn open(
+        &mut self,
+        eph_pk: [u8; 32],
+        not_after_unix_ts: u64,
+        credential_id_hash: [u8; 32],
+        expected_passkey_session_nonce: u64,
+        webauthn_auth_data: &[u8],
+        webauthn_client_data_json: &[u8],
+        current_ts: i64,
+    ) -> Result<(), ProgramError> {
+        // 0. nonce reject-fast (mirrors audit F-1 from OIDC, 2026-05-13).
+        let policy_nonce: u64 = self.policy.next_passkey_session_nonce.into();
+        require!(
+            expected_passkey_session_nonce == policy_nonce,
+            RulesPolicyError::InvalidNonce
+        );
+
+        // 1. primary must be `[SCHEME_WEBAUTHN, credential_pubkey, …]`.
+        let primary_slot = self.policy.primary_slot;
+        require!(
+            primary_slot[0] == SCHEME_WEBAUTHN,
+            RulesPolicyError::NotPasskeyPrimary
+        );
+        validate_slot(&primary_slot).map_err(|_| RulesPolicyError::NotPasskeyPrimary)?;
+
+        // 2. WebAuthn payload bounds — the precompile path inside
+        //    `verify_signature` re-checks both, but we surface a clearer
+        //    `InvalidWebAuthnPayload` and reject before allocating the session.
+        require!(
+            !webauthn_auth_data.is_empty()
+                && webauthn_auth_data.len() <= WEBAUTHN_AUTH_DATA_MAX
+                && !webauthn_client_data_json.is_empty()
+                && webauthn_client_data_json.len() <= WEBAUTHN_CLIENT_DATA_JSON_MAX,
+            RulesPolicyError::InvalidWebAuthnPayload
+        );
+
+        // 3. effective expiry — capped at now + SESSION_TTL.
+        let not_after_i = u64_sat_i64(not_after_unix_ts);
+        let expires_at = current_ts
+            .saturating_add(SESSION_TTL_SECONDS)
+            .min(not_after_i);
+        require!(expires_at > current_ts, RulesPolicyError::InvalidSessionTtl);
+
+        // 4. derive the open challenge and verify the WebAuthn assertion via
+        //    Secp256r1 precompile (and clientDataJSON challenge anchor).
+        let dwallet_addr = *self.dwallet_account.address();
+        let session_nonce: u64 = self.policy.next_passkey_session_nonce.into();
+        let challenge = passkey_session_open_challenge(
+            &dwallet_addr,
+            &primary_slot,
+            &eph_pk,
+            not_after_unix_ts,
+            &credential_id_hash,
+            session_nonce,
+        )
+        .map_err(|_| RulesPolicyError::ClearSigningRenderFailed)?;
+        {
+            check_sysvar_addr(self.instructions_sysvar.address())?;
+            let sysvar_view = self.instructions_sysvar.to_account_view();
+            let sysvar_data = sysvar_view
+                .try_borrow()
+                .map_err(|_| RulesPolicyError::AuthFailed)?;
+            verify_signature(VerifyInput {
+                member_slot: &primary_slot,
+                challenge: &challenge,
+                instructions_sysvar_data: &sysvar_data,
+                webauthn_auth_data,
+                webauthn_client_data_json,
+            })
+            .map_err(|_| RulesPolicyError::AuthFailed)?;
+        }
+
+        // 5. pin the credential pubkey we just authenticated against (matches
+        //    `primary_slot[1..34]` — slot[0] is the scheme byte).
+        let mut credential_pubkey = [0u8; 33];
+        credential_pubkey.copy_from_slice(&primary_slot[1..34]);
+
+        // 6. create the session, bump the policy nonce.
+        let policy_addr = *self.policy.address();
+        let session_payer = *self.payer.address();
+        self.session.set_inner(PasskeySessionInner {
+            dwallet: dwallet_addr,
+            policy: policy_addr,
+            payer_for_close: session_payer,
+            credential_id_hash,
+            credential_pubkey,
+            _credential_pad: 0,
+            eph_pk,
+            session_nonce,
+            next_use_nonce: 0,
+            not_after_unix_ts,
+            expires_at,
+            created_at: current_ts,
+            closed_at: 0,
+        });
+        self.policy.next_passkey_session_nonce = (session_nonce + 1).into();
+
+        Ok(())
+    }
+}
+
+// ── RecoverAsPrimaryPasskeySession (disc 26) ────────────────────
+
+#[derive(Accounts)]
+#[instruction(init_authority_hash: Address)]
+pub struct RecoverAsPrimaryPasskeySession {
+    pub dwallet_account: UncheckedAccount,
+
+    #[account(address = RulesPolicy::seeds(
+        dwallet_account.address(),
+        &init_authority_hash
+    ))]
+    pub policy: Account<RulesPolicy>,
+
+    #[account(mut, has_one(policy))]
+    pub session: Account<PasskeySession>,
+
+    pub coordinator: UncheckedAccount,
+
+    #[account(mut)]
+    pub message_approval: UncheckedAccount,
+
+    #[account(mut)]
+    pub payer: Signer,
+
+    pub cpi_authority: UncheckedAccount,
+    pub dwallet_program: UncheckedAccount,
+    pub instructions_sysvar: UncheckedAccount,
+    pub clock: Sysvar<Clock>,
+    pub system_program: Program<SystemProgram>,
+    pub event_authority: EventAuthority,
+    pub program: Program<RulesPolicyProgram>,
+}
+
+impl RecoverAsPrimaryPasskeySession {
+    #[inline(always)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn recover(
+        &mut self,
+        message_digest: [u8; 32],
+        metadata_digest: [u8; 32],
+        user_pubkey: [u8; 32],
+        signature_scheme: u16,
+        message_approval_bump: u8,
+        cpi_authority_bump: u8,
+        expected_use_nonce: u64,
+        current_ts: i64,
+    ) -> Result<(), ProgramError> {
+        // 1. session open + unexpired.
+        let closed_at: i64 = self.session.closed_at.into();
+        require!(closed_at == 0, RulesPolicyError::SessionExpired);
+        let expires_at: i64 = self.session.expires_at.into();
+        require!(current_ts < expires_at, RulesPolicyError::SessionExpired);
+
+        // 2. use-nonce.
+        let use_nonce: u64 = self.session.next_use_nonce.into();
+        require!(
+            expected_use_nonce == use_nonce,
+            RulesPolicyError::InvalidNonce
+        );
+
+        // 2b. policy primary must still be `[SCHEME_WEBAUTHN, session.credential_pubkey, …]`.
+        //     A rotation/revoke of the primary after the open invalidates the
+        //     session immediately.
+        let credential_pubkey = self.session.credential_pubkey;
+        let expected_primary = passkey_primary_slot(&credential_pubkey);
+        let primary_slot = self.policy.primary_slot;
+        require!(
+            primary_slot == expected_primary,
+            RulesPolicyError::NotPasskeyPrimary
+        );
+
+        // 3. Ed25519 precompile over the per-use challenge with the session's eph_pk.
+        let dwallet_addr = *self.dwallet_account.address();
+        let session_addr = *self.session.address();
+        let message_approval_addr = *self.message_approval.address();
+        let eph_pk = self.session.eph_pk;
+        let challenge = passkey_primary_use_challenge(
+            &session_addr,
+            &dwallet_addr,
+            &message_approval_addr,
+            &message_digest,
+            &metadata_digest,
+            &user_pubkey,
+            signature_scheme,
+            message_approval_bump,
+            use_nonce,
+            &expected_primary,
+        )
+        .map_err(|_| RulesPolicyError::ClearSigningRenderFailed)?;
+        {
+            check_sysvar_addr(self.instructions_sysvar.address())?;
+            let sysvar_view = self.instructions_sysvar.to_account_view();
+            let sysvar_data = sysvar_view
+                .try_borrow()
+                .map_err(|_| RulesPolicyError::AuthFailed)?;
+            auth::precompile::verify_ed25519(&eph_pk, &challenge, &sysvar_data)
+                .map_err(|_| RulesPolicyError::AuthFailed)?;
+        }
+
+        // 4. consume the use-nonce BEFORE the CPI.
+        self.session.next_use_nonce = (use_nonce + 1).into();
+
+        // 5–6. CPI Ika approve_message.
+        require!(
+            validate_ika_cpi_accounts(
+                &self.dwallet_program.to_account_view(),
+                &self.dwallet_account.to_account_view(),
+            ),
+            RulesPolicyError::AuthFailed
+        );
+        let dwallet_ctx = DWalletContext {
+            dwallet_program: self.dwallet_program.to_account_view(),
+            cpi_authority: self.cpi_authority.to_account_view(),
+            caller_program: self.program.to_account_view(),
+            cpi_authority_bump,
+        };
+        dwallet_ctx.approve_message(
+            self.coordinator.to_account_view(),
+            self.message_approval.to_account_view(),
+            self.dwallet_account.to_account_view(),
+            self.payer.to_account_view(),
+            self.system_program.to_account_view(),
+            message_digest,
+            metadata_digest,
+            user_pubkey,
+            signature_scheme,
+            message_approval_bump,
+        )
+    }
+}
+
+// ── PasskeySessionClose (disc 27) ───────────────────────────────
+
+#[derive(Accounts)]
+#[instruction(init_authority_hash: Address)]
+pub struct PasskeySessionClose {
+    pub dwallet_account: UncheckedAccount,
+
+    #[account(address = RulesPolicy::seeds(
+        dwallet_account.address(),
+        &init_authority_hash
+    ))]
+    pub policy: Account<RulesPolicy>,
+
+    #[account(mut, has_one(policy))]
+    pub session: Account<PasskeySession>,
+
+    /// Receives the rent refund. Must equal `session.payer_for_close`.
+    #[account(mut)]
+    pub rent_destination: UncheckedAccount,
+
+    pub clock: Sysvar<Clock>,
+}
+
+impl PasskeySessionClose {
+    #[inline(always)]
+    pub fn close(&mut self, current_ts: i64) -> Result<(), ProgramError> {
+        let closed_at: i64 = self.session.closed_at.into();
+        require!(closed_at == 0, RulesPolicyError::SessionFinalizable);
+        let expires_at: i64 = self.session.expires_at.into();
+        require!(
+            current_ts >= expires_at,
+            RulesPolicyError::SessionFinalizable
+        );
+        let dest_addr = *self.rent_destination.address();
+        require!(
+            dest_addr == self.session.payer_for_close,
+            RulesPolicyError::AuthFailed
+        );
+        self.session
+            .close(self.rent_destination.to_account_view())
+            .map_err(|_| RulesPolicyError::AuthFailed)?;
+        Ok(())
+    }
+}
+
 // ── Event ───────────────────────────────────────────────────────
 
 #[event(discriminator = 3)]
@@ -2667,5 +3201,16 @@ pub struct OidcSessionOpened {
     /// `sha256("andromeda::oidc::addr::v1" || lp(iss) || lp(aud) || lp(sub))` —
     /// the OIDC primary identity. Never the JWT or the `sub` in clear.
     pub addr_seed: Address,
+    pub ts: i64,
+}
+
+#[event(discriminator = 4)]
+pub struct PasskeySessionOpened {
+    pub policy: Address,
+    pub session: Address,
+    pub dwallet: Address,
+    /// `sha256(credentialId)` — pinned into the session at open time. Never
+    /// the raw credential ID (D12 in the plan).
+    pub credential_id_hash: Address,
     pub ts: i64,
 }
