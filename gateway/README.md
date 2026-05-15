@@ -52,7 +52,7 @@ gateway/
 │   ├── openapi/            # Auto-generated OpenAPI 3.1
 │   ├── store/              # Postgres + migrations
 │   ├── redisclient/        # Redis pool
-│   ├── httpx/              # Small JSON response helper
+│   ├── httpx/              # JSON envelope + BindAndValidate (strict decode + go-playground/validator/v10 + custom tags: solana_pubkey, base64, base64_len, hex_len)
 │   └── config/             # Env loader
 ├── openapi.yaml
 ├── Dockerfile
@@ -268,6 +268,27 @@ Consumption order (atomic): `credits → monthly → overage`. Refund on upstrea
 
 The pricing-history applier, admin bootstrap, mailer/quota/pricing notification workers, the Stripe
 service and the gift observer moved to the `backend/` service (architecture split M1–M4).
+
+## Input validation
+
+Every gateway-native handler binds JSON bodies via `httpx.BindAndValidate(w, r, &dto, maxBytes)`:
+
+- `http.MaxBytesReader` enforces the per-call byte cap (413 on overflow).
+- `json.NewDecoder` runs in **strict mode** — unknown fields and trailing JSON are 400.
+- `go-playground/validator/v10` runs after decode using struct tags.
+
+Reusable tags (in addition to the built-in `required`, `min`, `max`, `oneof`, `len`, `url`, ...):
+
+| Tag | Meaning |
+|---|---|
+| `solana_pubkey` | base58 Solana pubkey (32 bytes) |
+| `base64` | any valid standard base64 |
+| `base64_len=N` | base64 that decodes to exactly N bytes |
+| `hex_len=N` | hex that decodes to exactly N bytes |
+
+Validator errors land on the canonical `{error, code}` envelope with `code ∈ {invalid_body,
+unknown_field, payload_too_large, invalid_field}`. Authors of new handlers should add the tags
+on the DTO and call `BindAndValidate` — avoid hand-rolled per-field `if req.X == ""` chains.
 
 ## Environment variables
 
