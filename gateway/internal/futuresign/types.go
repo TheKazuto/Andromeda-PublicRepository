@@ -73,13 +73,13 @@ type Trigger struct {
 
 // CreateRequest is the API-level request to arm a trigger.
 type CreateRequest struct {
-	PartialSigCapID  string          `json:"partialSigCapId"`
-	DWalletAddress   string          `json:"dwalletAddress"`
+	PartialSigCapID  string          `json:"partialSigCapId" validate:"required"`
+	DWalletAddress   string          `json:"dwalletAddress" validate:"required"`
 	PolicyProgramID  *string         `json:"policyProgramId,omitempty"`
-	TriggerType      TriggerType     `json:"triggerType"`
-	Condition        json.RawMessage `json:"condition"`
-	WebhookURL       string          `json:"webhookUrl"`
-	ExpiresInSeconds int             `json:"expiresInSeconds"`
+	TriggerType      TriggerType     `json:"triggerType" validate:"required"`
+	Condition        json.RawMessage `json:"condition" validate:"required"`
+	WebhookURL       string          `json:"webhookUrl" validate:"required,url"`
+	ExpiresInSeconds int             `json:"expiresInSeconds" validate:"min=0,max=2592000"`
 	// CompletePayload is the body the watcher will POST to the ika-backend at
 	// `/v1/dwallet/future-sign/complete/submit` when the trigger fires. The
 	// dev pre-builds and pre-signs the partial-user-sig client-side and supplies

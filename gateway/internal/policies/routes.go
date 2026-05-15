@@ -3,7 +3,6 @@ package policies
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -148,7 +147,7 @@ func (s *Service) listTemplates(w http.ResponseWriter, r *http.Request) {
 
 type ownerSlotJSON struct {
 	Scheme           uint8  `json:"scheme"`
-	IdentifierBase64 string `json:"identifier_base64"`
+	IdentifierBase64 string `json:"identifier_base64" validate:"required,base64"`
 }
 
 func decodeOwnerSlot(in ownerSlotJSON) ([auth.MemberSlotLen]byte, error) {
@@ -161,24 +160,24 @@ func decodeOwnerSlot(in ownerSlotJSON) ([auth.MemberSlotLen]byte, error) {
 }
 
 type initRequest struct {
-	DwalletAddress string        `json:"dwallet_address"`
-	OwnerSlot      ownerSlotJSON `json:"owner_slot"`
+	DwalletAddress string        `json:"dwallet_address" validate:"required,solana_pubkey"`
+	OwnerSlot      ownerSlotJSON `json:"owner_slot" validate:"required"`
 
 	// Audit C2 (Opção 4): init_authority signs an off-chain challenge
 	// over all init params. The hash of the slot is part of the PDA seed,
 	// so each (dwallet, init_authority) pair maps to a distinct policy
 	// PDA — squat-resistant.
-	InitAuthoritySlot             ownerSlotJSON `json:"init_authority_slot"`
-	InitAuthoritySignatureBase64  string        `json:"init_authority_signature_base64"`
-	InitAuthorityWebauthnAuthData string        `json:"init_authority_webauthn_auth_data_base64,omitempty"`
-	InitAuthorityWebauthnCDJ      string        `json:"init_authority_webauthn_cdj_base64,omitempty"`
+	InitAuthoritySlot             ownerSlotJSON `json:"init_authority_slot" validate:"required"`
+	InitAuthoritySignatureBase64  string        `json:"init_authority_signature_base64" validate:"required,base64"`
+	InitAuthorityWebauthnAuthData string        `json:"init_authority_webauthn_auth_data_base64,omitempty" validate:"omitempty,base64"`
+	InitAuthorityWebauthnCDJ      string        `json:"init_authority_webauthn_cdj_base64,omitempty" validate:"omitempty,base64"`
 
 	// Audit H6: required for session-keys to support multiple sessions
 	// per dwallet — each session_index produces a distinct PDA.
 	SessionIndex *uint32 `json:"session_index,omitempty"`
 
 	// session-keys init params
-	SessionKey     string  `json:"session_key,omitempty"`
+	SessionKey     string  `json:"session_key,omitempty" validate:"omitempty,solana_pubkey"`
 	ExpiresAtSlot  *uint64 `json:"expires_at_slot,omitempty"`
 	MaxAmountPerTx *uint64 `json:"max_amount_per_tx,omitempty"`
 	MaxUses        *uint32 `json:"max_uses,omitempty"`
@@ -189,14 +188,14 @@ type initRequest struct {
 	StartSlot            *uint64 `json:"start_slot,omitempty"`
 	EndSlot              *uint64 `json:"end_slot,omitempty"`
 	RecurringPeriodSlots *uint64 `json:"recurring_period_slots,omitempty"`
-	OracleFeed           string  `json:"oracle_feed,omitempty"`
+	OracleFeed           string  `json:"oracle_feed,omitempty" validate:"omitempty,solana_pubkey"`
 	MinPrice             *int64  `json:"min_price,omitempty"`
 	MaxPrice             *int64  `json:"max_price,omitempty"`
 	MaxAgeSlots          *uint64 `json:"max_age_slots,omitempty"`
 	MaxConfidenceBps     *uint16 `json:"max_confidence_bps,omitempty"` // Audit M1: 0 (or omit) = disabled.
 	ThresholdAmount      *uint64 `json:"threshold_amount,omitempty"`
-	PasskeyPubkeyB64     string  `json:"passkey_pubkey_base64,omitempty"`
-	FHEAuthority         string  `json:"fhe_authority,omitempty"`
+	PasskeyPubkeyB64     string  `json:"passkey_pubkey_base64,omitempty" validate:"omitempty,base64_len=33"`
+	FHEAuthority         string  `json:"fhe_authority,omitempty" validate:"omitempty,solana_pubkey"`
 	DecisionMaxAgeSlots  *uint64 `json:"decision_max_age_slots,omitempty"`
 }
 
@@ -254,15 +253,12 @@ func (s *Service) initPolicy(w http.ResponseWriter, r *http.Request) {
 	}
 	template := strings.ToLower(chi.URLParam(r, "template"))
 	var req initRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid_body", "invalid JSON body")
+	if !httpx.BindAndValidate(w, r, &req, 16<<10) {
 		return
 	}
-	dwallet, err := solana.PublicKeyFromBase58(req.DwalletAddress)
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid_dwallet", "dwallet_address must be base58")
-		return
-	}
+	// Already validated as solana_pubkey by the validator; the decode is
+	// guaranteed to succeed.
+	dwallet, _ := solana.PublicKeyFromBase58(req.DwalletAddress)
 	ownerSlot, err := decodeOwnerSlot(req.OwnerSlot)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid_owner_slot", err.Error())
@@ -506,20 +502,20 @@ func confirmationStatusString(err error) string {
 // ── Admin challenge / submit ───────────────────────────────────
 
 type adminChallengeRequest struct {
-	DwalletAddress string        `json:"dwallet_address"`
-	OwnerSlot      ownerSlotJSON `json:"owner_slot"`
+	DwalletAddress string        `json:"dwallet_address" validate:"required,solana_pubkey"`
+	OwnerSlot      ownerSlotJSON `json:"owner_slot" validate:"required"`
 
 	// Audit C2 (Opção 4): client supplies the init_authority_hash that
 	// produced this policy's PDA. The gateway does NOT recompute it from
 	// init_authority_slot here — the slot is only signed at init time and
 	// not stored client-side; only the hash is needed to identify which
 	// PDA to address. (For session-keys also session_index — Audit H6.)
-	InitAuthorityHashBase64 string  `json:"init_authority_hash_base64"`
+	InitAuthorityHashBase64 string  `json:"init_authority_hash_base64" validate:"required,base64_len=32"`
 	SessionIndex            *uint32 `json:"session_index,omitempty"`
 
-	Action               string  `json:"action"`
+	Action               string  `json:"action" validate:"required"`
 	ExpectedNonce        uint64  `json:"expected_nonce"`
-	DestinationBase64    string  `json:"destination_base64,omitempty"`
+	DestinationBase64    string  `json:"destination_base64,omitempty" validate:"omitempty,base64"`
 	MaxSigsPerWindow     *uint32 `json:"max_sigs_per_window,omitempty"`
 	WindowSlots          *uint64 `json:"window_slots,omitempty"`
 	Mode                 *uint8  `json:"mode,omitempty"`
@@ -531,10 +527,10 @@ type adminChallengeRequest struct {
 	MaxAgeSlots          *uint64 `json:"max_age_slots,omitempty"`
 	MaxConfidenceBps     *uint16 `json:"max_confidence_bps,omitempty"` // Audit M1: 0 (or omit) = disabled.
 	ThresholdAmount      *uint64 `json:"threshold_amount,omitempty"`
-	PasskeyPubkeyB64     string  `json:"passkey_pubkey_base64,omitempty"`
-	NewFHEAuthority      string  `json:"new_fhe_authority,omitempty"`
-	AllowedProgram       string  `json:"allowed_program,omitempty"`
-	Recipient            string  `json:"recipient,omitempty"`
+	PasskeyPubkeyB64     string  `json:"passkey_pubkey_base64,omitempty" validate:"omitempty,base64_len=33"`
+	NewFHEAuthority      string  `json:"new_fhe_authority,omitempty" validate:"omitempty,solana_pubkey"`
+	AllowedProgram       string  `json:"allowed_program,omitempty" validate:"omitempty,solana_pubkey"`
+	Recipient            string  `json:"recipient,omitempty" validate:"omitempty,solana_pubkey"`
 }
 
 // decodeInitAuthorityHash parses the base64 [u8; 32] init_authority_hash
@@ -562,15 +558,10 @@ func decodeInitAuthorityHash(s string) ([32]byte, error) {
 func (s *Service) adminChallenge(w http.ResponseWriter, r *http.Request) {
 	template := strings.ToLower(chi.URLParam(r, "template"))
 	var req adminChallengeRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid_body", "invalid JSON body")
+	if !httpx.BindAndValidate(w, r, &req, 8<<10) {
 		return
 	}
-	dwallet, err := solana.PublicKeyFromBase58(req.DwalletAddress)
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid_dwallet", "dwallet_address must be base58")
-		return
-	}
+	dwallet, _ := solana.PublicKeyFromBase58(req.DwalletAddress)
 	ownerSlot, err := decodeOwnerSlot(req.OwnerSlot)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid_owner_slot", err.Error())
@@ -601,9 +592,9 @@ func (s *Service) adminChallenge(w http.ResponseWriter, r *http.Request) {
 
 type adminSubmitRequest struct {
 	adminChallengeRequest
-	OwnerSignatureBase64      string `json:"owner_signature_base64"`
-	WebauthnAuthDataBase64    string `json:"webauthn_auth_data_base64,omitempty"`
-	WebauthnClientDataJSONB64 string `json:"webauthn_client_data_json_base64,omitempty"`
+	OwnerSignatureBase64      string `json:"owner_signature_base64" validate:"required,base64"`
+	WebauthnAuthDataBase64    string `json:"webauthn_auth_data_base64,omitempty" validate:"omitempty,base64"`
+	WebauthnClientDataJSONB64 string `json:"webauthn_client_data_json_base64,omitempty" validate:"omitempty,base64"`
 }
 
 // adminSubmit accepts the off-chain owner signature for a challenge, builds
@@ -618,15 +609,10 @@ func (s *Service) adminSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 	template := strings.ToLower(chi.URLParam(r, "template"))
 	var req adminSubmitRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid_body", "invalid JSON body")
+	if !httpx.BindAndValidate(w, r, &req, 16<<10) {
 		return
 	}
-	dwallet, err := solana.PublicKeyFromBase58(req.DwalletAddress)
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid_dwallet", err.Error())
-		return
-	}
+	dwallet, _ := solana.PublicKeyFromBase58(req.DwalletAddress)
 	ownerSlot, err := decodeOwnerSlot(req.OwnerSlot)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid_owner_slot", err.Error())
@@ -637,11 +623,7 @@ func (s *Service) adminSubmit(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid_init_authority_hash", err.Error())
 		return
 	}
-	sig, err := base64.StdEncoding.DecodeString(req.OwnerSignatureBase64)
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid_signature", "owner_signature_base64 must be valid base64")
-		return
-	}
+	sig, _ := base64.StdEncoding.DecodeString(req.OwnerSignatureBase64)
 	ownerSig := AdminSignature{Signature: sig}
 	if req.WebauthnAuthDataBase64 != "" {
 		raw, derr := base64.StdEncoding.DecodeString(req.WebauthnAuthDataBase64)
@@ -761,53 +743,56 @@ func (s *Service) appendGovernanceAudit(
 // ── request_signature ──────────────────────────────────────────
 
 type requestSignatureReq struct {
+	// `template` is required by the batch endpoint and ignored by the
+	// per-template endpoint (the URL `{template}` wins there) — kept
+	// optional at the DTO level; batch enforces it after dispatch.
 	Template            string `json:"template,omitempty"`
-	DwalletAddress      string `json:"dwallet_address"`
+	DwalletAddress      string `json:"dwallet_address" validate:"required,solana_pubkey"`
 	DwalletCurve        uint16 `json:"dwallet_curve"`
-	DwalletPublicKeyB64 string `json:"dwallet_public_key_base64"`
-	MessageDigestB64    string `json:"message_digest_base64"`
-	MetadataDigestB64   string `json:"metadata_digest_base64"`
-	UserPubkeyB64       string `json:"user_pubkey_base64"`
+	DwalletPublicKeyB64 string `json:"dwallet_public_key_base64" validate:"required,base64"`
+	MessageDigestB64    string `json:"message_digest_base64" validate:"required,base64_len=32"`
+	MetadataDigestB64   string `json:"metadata_digest_base64,omitempty" validate:"omitempty,base64_len=32"`
+	UserPubkeyB64       string `json:"user_pubkey_base64" validate:"required,base64_len=32"`
 	SignatureScheme     uint16 `json:"signature_scheme"`
 	CpiAuthorityBump    uint8  `json:"cpi_authority_bump"`
-	Destination         string `json:"destination,omitempty"`
+	Destination         string `json:"destination,omitempty" validate:"omitempty,solana_pubkey"`
 
 	// Audit C2 (Opção 4): client supplies init_authority_hash so the
 	// gateway can derive the policy PDA. Audit C1 removed current_slot
 	// and current_ts from this DTO — Clock sysvar handles them on-chain.
-	InitAuthorityHashBase64 string `json:"init_authority_hash_base64"`
+	InitAuthorityHashBase64 string `json:"init_authority_hash_base64" validate:"required,base64_len=32"`
 
 	// Template-specific optional fields used by the batch endpoint to
 	// support every request-signature template without per-template
 	// endpoints. Each field is ignored by templates that do not need it.
 
 	// oracle-conditional
-	OracleFeed string `json:"oracle_feed,omitempty"`
+	OracleFeed string `json:"oracle_feed,omitempty" validate:"omitempty,solana_pubkey"`
 
 	// passkey-step-up — `tx_amount` is used by both paths; the rest
 	// (assertion fields) only by the step-up path (above-threshold).
-	TxAmount               *uint64 `json:"tx_amount,omitempty"`
-	StepUp                 bool    `json:"step_up,omitempty"`
-	ExpectedStepUpNonce    *uint64 `json:"expected_step_up_nonce,omitempty"`
-	PasskeyPubkeyB64       string  `json:"passkey_pubkey_base64,omitempty"`
-	WebauthnAuthDataB64    string  `json:"webauthn_auth_data_base64,omitempty"`
-	WebauthnCDJB64         string  `json:"webauthn_client_data_json_base64,omitempty"`
-	WebauthnSignatureB64   string  `json:"webauthn_signature_base64,omitempty"`
+	TxAmount             *uint64 `json:"tx_amount,omitempty"`
+	StepUp               bool    `json:"step_up,omitempty"`
+	ExpectedStepUpNonce  *uint64 `json:"expected_step_up_nonce,omitempty"`
+	PasskeyPubkeyB64     string  `json:"passkey_pubkey_base64,omitempty" validate:"omitempty,base64_len=33"`
+	WebauthnAuthDataB64  string  `json:"webauthn_auth_data_base64,omitempty" validate:"omitempty,base64"`
+	WebauthnCDJB64       string  `json:"webauthn_client_data_json_base64,omitempty" validate:"omitempty,base64"`
+	WebauthnSignatureB64 string  `json:"webauthn_signature_base64,omitempty" validate:"omitempty,base64_len=64"`
 
 	// fhe-gated — the decision signature comes from /v1/confidential/sign.
 	DecisionCreatedSlot  *uint64 `json:"decision_created_slot,omitempty"`
 	DecisionAuthorize    *uint8  `json:"decision_authorize,omitempty"`
-	DecisionSignatureB64 string  `json:"decision_signature_base64,omitempty"`
-	FHEAuthority         string  `json:"fhe_authority,omitempty"`
+	DecisionSignatureB64 string  `json:"decision_signature_base64,omitempty" validate:"omitempty,base64_len=64"`
+	FHEAuthority         string  `json:"fhe_authority,omitempty" validate:"omitempty,solana_pubkey"`
 
 	// session-keys — the session_signer is a fully separate outer-tx
 	// signer; the dev's client must co-sign the returned partial tx
 	// with that keypair before submitting.
-	SessionIndex             *uint32 `json:"session_index,omitempty"`
-	SessionSigner            string  `json:"session_signer,omitempty"`
-	Amount                   *uint64 `json:"amount,omitempty"`
-	DestinationProgram       string  `json:"destination_program,omitempty"`
-	ExpectedSignatureNonceB  *uint64 `json:"expected_signature_nonce,omitempty"`
+	SessionIndex            *uint32 `json:"session_index,omitempty"`
+	SessionSigner           string  `json:"session_signer,omitempty" validate:"omitempty,solana_pubkey"`
+	Amount                  *uint64 `json:"amount,omitempty"`
+	DestinationProgram      string  `json:"destination_program,omitempty" validate:"omitempty,solana_pubkey"`
+	ExpectedSignatureNonceB *uint64 `json:"expected_signature_nonce,omitempty"`
 }
 
 // requestSignature handles the canonical 3-template request_signature flow.
@@ -819,51 +804,25 @@ func (s *Service) requestSignature(w http.ResponseWriter, r *http.Request) {
 	}
 	template := strings.ToLower(chi.URLParam(r, "template"))
 	var req requestSignatureReq
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid_body", "invalid JSON body")
+	if !httpx.BindAndValidate(w, r, &req, 16<<10) {
 		return
 	}
-	dwallet, err := solana.PublicKeyFromBase58(req.DwalletAddress)
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid_dwallet", err.Error())
-		return
-	}
-	initAuthorityHash, err := decodeInitAuthorityHash(req.InitAuthorityHashBase64)
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid_init_authority_hash", err.Error())
-		return
-	}
-	msg, err := decodeFixed32(req.MessageDigestB64)
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid_message_digest", err.Error())
-		return
-	}
+	// validator already accepted the strict shape: solana_pubkey for
+	// dwallet_address, base64_len=32 for the digests and the init
+	// authority hash. The decodes below are guaranteed to succeed.
+	dwallet, _ := solana.PublicKeyFromBase58(req.DwalletAddress)
+	initAuthorityHash, _ := decodeInitAuthorityHash(req.InitAuthorityHashBase64)
+	msg, _ := decodeFixed32(req.MessageDigestB64)
 	meta := [32]byte{}
 	if req.MetadataDigestB64 != "" {
-		meta, err = decodeFixed32(req.MetadataDigestB64)
-		if err != nil {
-			writeErr(w, http.StatusBadRequest, "invalid_metadata_digest", err.Error())
-			return
-		}
+		meta, _ = decodeFixed32(req.MetadataDigestB64)
 	}
-	user, err := decodeFixed32(req.UserPubkeyB64)
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid_user_pubkey", err.Error())
-		return
-	}
-	if req.DwalletPublicKeyB64 == "" {
-		writeErr(w, http.StatusBadRequest, "missing_dwallet_public_key", "dwallet_public_key_base64 is required")
-		return
-	}
-	dwalletPK, err := base64.StdEncoding.DecodeString(req.DwalletPublicKeyB64)
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid_dwallet_public_key", err.Error())
-		return
-	}
+	user, _ := decodeFixed32(req.UserPubkeyB64)
+	dwalletPK, _ := base64.StdEncoding.DecodeString(req.DwalletPublicKeyB64)
 	switch len(dwalletPK) {
 	case 32, 33, 65:
 	default:
-		writeErr(w, http.StatusBadRequest, "invalid_dwallet_public_key", "must decode to 32, 33 or 65 bytes")
+		writeErr(w, http.StatusBadRequest, "invalid_dwallet_public_key", "dwallet_public_key_base64 must decode to 32, 33 or 65 bytes")
 		return
 	}
 	_, msgBump, err := MessageApprovalPDA(s.Registry.IkaProgramID, req.DwalletCurve, dwalletPK, req.SignatureScheme, msg[:], meta[:])

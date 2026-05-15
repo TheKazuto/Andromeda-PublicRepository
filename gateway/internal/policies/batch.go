@@ -3,7 +3,6 @@ package policies
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"sort"
@@ -14,6 +13,7 @@ import (
 	"github.com/gagliardetto/solana-go/rpc"
 
 	"github.com/shinkalabs/andromeda-gateway/internal/gasponsor"
+	"github.com/shinkalabs/andromeda-gateway/internal/httpx"
 )
 
 // Auto-batching (Andromeda Features Roadmap §11) bundles N request_signature
@@ -43,9 +43,12 @@ import (
 const txSizeLimit = 1180
 
 type batchReq struct {
-	Requests []requestSignatureReq `json:"requests"`
+	// `requests` must be present and non-empty. Item-level validation is
+	// handled inline (per-template requirements vary too much for a
+	// declarative `dive`).
+	Requests []requestSignatureReq `json:"requests" validate:"required,min=1,max=64"`
 	Common   *requestSignatureReq  `json:"common,omitempty"`
-	MaxPerTx int                   `json:"max_per_tx,omitempty"` // default 8
+	MaxPerTx int                   `json:"max_per_tx,omitempty" validate:"omitempty,min=1,max=16"`
 }
 
 type batchResp struct {
@@ -79,16 +82,7 @@ func (s *Service) batch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req batchReq
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid_body", "invalid JSON body")
-		return
-	}
-	if len(req.Requests) == 0 {
-		writeErr(w, http.StatusBadRequest, "empty_batch", "requests must be non-empty")
-		return
-	}
-	if len(req.Requests) > 64 {
-		writeErr(w, http.StatusBadRequest, "batch_too_large", "max 64 requests per call")
+	if !httpx.BindAndValidate(w, r, &req, 256<<10) {
 		return
 	}
 	maxPerTx := req.MaxPerTx

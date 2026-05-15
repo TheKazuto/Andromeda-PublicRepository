@@ -13,6 +13,8 @@ import (
 
 	"github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/rpc"
+
+	"github.com/shinkalabs/andromeda-gateway/internal/httpx"
 )
 
 // simulateReq mirrors requestSignatureReq with the same fields. The handler
@@ -21,24 +23,24 @@ import (
 // can dry-run a signing call without burning gas, presigns, or a real
 // MessageApproval.
 type simulateReq struct {
-	Template             string `json:"template"`
-	DwalletAddress       string `json:"dwallet_address"`
+	Template             string `json:"template" validate:"required"`
+	DwalletAddress       string `json:"dwallet_address" validate:"required,solana_pubkey"`
 	DwalletCurve         uint16 `json:"dwallet_curve"`
-	DwalletPublicKeyB64  string `json:"dwallet_public_key_base64"`
-	PayerAddress         string `json:"payer_address"`
-	MessageDigestBase64  string `json:"message_digest_base64"`
-	MetadataDigestBase64 string `json:"metadata_digest_base64"`
-	UserPubkeyBase64     string `json:"user_pubkey_base64"`
+	DwalletPublicKeyB64  string `json:"dwallet_public_key_base64" validate:"required,base64"`
+	PayerAddress         string `json:"payer_address" validate:"required,solana_pubkey"`
+	MessageDigestBase64  string `json:"message_digest_base64" validate:"required,base64_len=32"`
+	MetadataDigestBase64 string `json:"metadata_digest_base64,omitempty" validate:"omitempty,base64_len=32"`
+	UserPubkeyBase64     string `json:"user_pubkey_base64" validate:"required,base64_len=32"`
 	SignatureScheme      uint16 `json:"signature_scheme"`
 	CpiAuthorityBump     uint8  `json:"cpi_authority_bump"`
 
 	// Audit C2 (Opção 4): client supplies init_authority_hash so the
 	// simulator addresses the correct policy PDA. Audit C1 removed
 	// current_slot — Clock sysvar handles it on-chain.
-	InitAuthorityHashBase64 string `json:"init_authority_hash_base64"`
+	InitAuthorityHashBase64 string `json:"init_authority_hash_base64" validate:"required,base64_len=32"`
 
 	// allowlist-only
-	Destination string `json:"destination,omitempty"`
+	Destination string `json:"destination,omitempty" validate:"omitempty,solana_pubkey"`
 }
 
 // SimulateResult is the dev-friendly summary returned to the caller.
@@ -55,64 +57,26 @@ type SimulateResult struct {
 
 func (s *Service) simulate(w http.ResponseWriter, r *http.Request) {
 	var req simulateReq
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid_body", "invalid JSON body")
+	if !httpx.BindAndValidate(w, r, &req, 16<<10) {
 		return
 	}
 	template := strings.ToLower(strings.TrimSpace(req.Template))
-	if template == "" {
-		writeErr(w, http.StatusBadRequest, "missing_template", "template is required")
-		return
-	}
 
-	dwallet, err := solana.PublicKeyFromBase58(req.DwalletAddress)
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid_dwallet", "dwallet_address must be base58")
-		return
-	}
-	payer, err := solana.PublicKeyFromBase58(req.PayerAddress)
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid_payer", "payer_address must be base58")
-		return
-	}
-	initAuthorityHash, err := decodeInitAuthorityHash(req.InitAuthorityHashBase64)
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid_init_authority_hash", err.Error())
-		return
-	}
-	msg, err := decodeFixed32(req.MessageDigestBase64)
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid_message_digest", err.Error())
-		return
-	}
+	dwallet, _ := solana.PublicKeyFromBase58(req.DwalletAddress)
+	payer, _ := solana.PublicKeyFromBase58(req.PayerAddress)
+	initAuthorityHash, _ := decodeInitAuthorityHash(req.InitAuthorityHashBase64)
+	msg, _ := decodeFixed32(req.MessageDigestBase64)
 	meta := [32]byte{}
 	if req.MetadataDigestBase64 != "" {
-		meta, err = decodeFixed32(req.MetadataDigestBase64)
-		if err != nil {
-			writeErr(w, http.StatusBadRequest, "invalid_metadata_digest", err.Error())
-			return
-		}
+		meta, _ = decodeFixed32(req.MetadataDigestBase64)
 	}
-	user, err := decodeFixed32(req.UserPubkeyBase64)
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid_user_pubkey", err.Error())
-		return
-	}
-	if req.DwalletPublicKeyB64 == "" {
-		writeErr(w, http.StatusBadRequest, "missing_dwallet_public_key",
-			"dwallet_public_key_base64 is required")
-		return
-	}
-	dwalletPK, err := base64.StdEncoding.DecodeString(req.DwalletPublicKeyB64)
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid_dwallet_public_key", err.Error())
-		return
-	}
+	user, _ := decodeFixed32(req.UserPubkeyBase64)
+	dwalletPK, _ := base64.StdEncoding.DecodeString(req.DwalletPublicKeyB64)
 	switch len(dwalletPK) {
 	case 32, 33, 65:
 	default:
 		writeErr(w, http.StatusBadRequest, "invalid_dwallet_public_key",
-			"dwallet_public_key must decode to 32, 33 or 65 bytes")
+			"dwallet_public_key_base64 must decode to 32, 33 or 65 bytes")
 		return
 	}
 	_, msgBump, err := MessageApprovalPDA(

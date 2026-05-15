@@ -1,13 +1,12 @@
 package api
 
 import (
-	"encoding/json"
-	"io"
 	"net/http"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/shinkalabs/andromeda-gateway/internal/httpx"
 	"github.com/shinkalabs/andromeda-gateway/internal/routes"
 )
 
@@ -99,12 +98,12 @@ func (s *Server) handlePricingCatalog(w http.ResponseWriter, r *http.Request) {
 // =============================================================================
 
 type pricingEstimateRequest struct {
-	Routes []pricingEstimateItem `json:"routes"`
+	Routes []pricingEstimateItem `json:"routes" validate:"required,min=1,max=1000,dive"`
 }
 
 type pricingEstimateItem struct {
-	Key   string `json:"key"`
-	Count int    `json:"count"` // 0 -> 1
+	Key   string `json:"key" validate:"required"`
+	Count int    `json:"count" validate:"min=0,max=1000000"` // 0 -> 1
 }
 
 type pricingEstimateResponse struct {
@@ -123,22 +122,8 @@ type pricingEstimateItemOut struct {
 }
 
 func (s *Server) handlePricingEstimate(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(io.LimitReader(r.Body, 64<<10))
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "bad_request", "could not read body")
-		return
-	}
 	var req pricingEstimateRequest
-	if err := json.Unmarshal(body, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "bad_request", "invalid JSON body")
-		return
-	}
-	if len(req.Routes) == 0 {
-		writeError(w, http.StatusBadRequest, "bad_request", "routes required")
-		return
-	}
-	if len(req.Routes) > 1000 {
-		writeError(w, http.StatusBadRequest, "bad_request", "too many routes (max 1000)")
+	if !httpx.BindAndValidate(w, r, &req, 64<<10) {
 		return
 	}
 

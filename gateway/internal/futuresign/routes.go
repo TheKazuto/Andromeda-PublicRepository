@@ -69,18 +69,12 @@ func handleCreate(opts RouteOptions) http.HandlerFunc {
 			return
 		}
 		var req CreateRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeError(w, http.StatusBadRequest, "invalid_body", "invalid JSON body")
+		if !httpx.BindAndValidate(w, r, &req, 64<<10) {
 			return
 		}
 		req.PartialSigCapID = strings.TrimSpace(req.PartialSigCapID)
 		req.DWalletAddress = strings.TrimSpace(req.DWalletAddress)
 		req.WebhookURL = strings.TrimSpace(req.WebhookURL)
-		if req.PartialSigCapID == "" || req.DWalletAddress == "" || req.WebhookURL == "" {
-			writeError(w, http.StatusBadRequest, "missing_fields",
-				"partialSigCapId, dwalletAddress and webhookUrl are required")
-			return
-		}
 		if !req.TriggerType.IsKnown() {
 			writeError(w, http.StatusBadRequest, "invalid_trigger_type",
 				"trigger_type must be one of oracle_pyth, oracle_switchboard, solana_event, slot_time, external_webhook")
