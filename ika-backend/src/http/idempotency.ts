@@ -304,7 +304,3 @@ export function idempotencyMiddleware() {
     next()
   }
 }
-
-export function _resetIdempotencyL1Cache(): void {
-  l1Cache.clear()
-}

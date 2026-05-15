@@ -80,8 +80,3 @@ export async function getCachedBlockhash(): Promise<CachedBlockhash> {
   const entry = await inFlight
   return { blockhash: entry.blockhash, lastValidBlockHeight: entry.lastValidBlockHeight }
 }
-
-export function _resetBlockhashCache(): void {
-  cachedBlockhash = null
-  inFlight = null
-}

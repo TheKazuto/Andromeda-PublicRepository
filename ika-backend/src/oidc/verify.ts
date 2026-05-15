@@ -63,11 +63,6 @@ function getJwks(provider: OidcProvider): ReturnType<typeof createRemoteJWKSet> 
   return jwks
 }
 
-/** Internal: reset the JWKS caches (tests). */
-export function _resetJwksCaches(): void {
-  jwksCache.clear()
-}
-
 export interface VerifiedIdToken {
   provider: OidcProvider
   iss: string

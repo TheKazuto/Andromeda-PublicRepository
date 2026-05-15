@@ -395,13 +395,3 @@ export async function findMessageApprovalPdaHierarchical(input: {
   })
   return { address, bump }
 }
-
-export function _resetPdaCaches(): void {
-  cpiAuthorityCache.clear()
-  eventAuthorityCache.clear()
-  policyPdaCache.clear()
-  sessionPdaCache.clear()
-  oidcStagingPdaCache.clear()
-  oidcSessionPdaCache.clear()
-  jwkRegistryPdaCache.clear()
-}
