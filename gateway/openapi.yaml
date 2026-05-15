@@ -634,6 +634,21 @@ paths:
   /v1/signatures/batch:
     post:
       summary: Bundle N request_signature calls into K transactions (auto-batched)
+      description: |
+        Packs up to 64 `request_signature` calls into the minimum number of
+        Solana transactions that fit the 1232-byte size limit. Supports every
+        request_signature template: `allowlist-destinations`, `velocity-guard`,
+        `time-lock`, `oracle-conditional`, `passkey-step-up` (below-threshold
+        and step-up paths), `session-keys`, and `fhe-gated`.
+
+        The gateway partial-signs each tx as the gas sponsor. For templates
+        that need no extra signers the returned tx is fully signed — the dev
+        just submits it. For `session-keys`, the dev must co-sign the tx with
+        the `session_signer` keypair before submitting.
+
+        Use `common` to hoist fields shared by every request (dwallet,
+        init_authority_hash, curve, public key, etc) — the "same-dWallet,
+        N messages" shorthand. Per-request fields override `common`.
       tags: [Policies]
       requestBody:
         required: true
@@ -645,13 +660,33 @@ paths:
               properties:
                 max_per_tx:
                   type: integer
-                  description: "Cap of instructions per packed tx (default 8, max 16)"
+                  description: "Cap of instructions per packed tx (default 8, max 16). Each request can contribute more than one ix (passkey step-up, fhe-gated)."
+                common:
+                  type: object
+                  description: |
+                    Optional block of fields inherited by every request when
+                    the per-request value is empty. Same shape as items in
+                    `requests`. Recommended for same-dWallet batches.
                 requests:
                   type: array
                   maxItems: 64
                   items:
                     type: object
-                    description: "Same shape as POST /v1/policies/{template}/request-signature, plus a `template` field."
+                    description: |
+                      Same shape as POST /v1/policies/{template}/request-signature,
+                      plus a `template` field. Template-specific fields:
+                      `destination` (allowlist), `oracle_feed` (oracle),
+                      `tx_amount` and optional WebAuthn fields
+                      (`step_up`, `passkey_pubkey_base64`,
+                      `webauthn_auth_data_base64`,
+                      `webauthn_client_data_json_base64`,
+                      `webauthn_signature_base64`,
+                      `expected_step_up_nonce`) for passkey-step-up,
+                      `decision_created_slot`, `decision_authorize`,
+                      `decision_signature_base64`, `fhe_authority` for
+                      fhe-gated, `session_index`, `session_signer`, `amount`,
+                      `destination_program`, `expected_signature_nonce` for
+                      session-keys.
       responses:
         "200":
           description: Packed batches
@@ -668,13 +703,29 @@ paths:
                         unsigned_tx_base64:
                           type: string
                           description: |
-                            Base64-encoded Solana transaction (full, unsigned).
-                            Deserialize with your client's transaction
-                            decoder, sign locally, then submit via
-                            `/v1/private-tx/submit`. All endpoints that
-                            return `unsigned_tx_base64` use this same format.
-                        request_indices: { type: array, items: { type: integer } }
+                            Base64-encoded Solana transaction, partial-signed
+                            by the gas sponsor. If `signers_required` is
+                            empty, submit as-is to `/v1/private-tx/submit`.
+                            Otherwise, deserialize with your client's
+                            transaction decoder, add the missing signatures
+                            (e.g. the `session_signer` keypair for
+                            session-keys), then submit.
+                        request_indices:
+                          type: array
+                          items: { type: integer }
+                          description: "Indices into the input `requests` array covered by this tx."
                         size_bytes: { type: integer }
+                        gas_sponsor_signed:
+                          type: boolean
+                          description: "Always `true` — the tx already carries the gas sponsor signature."
+                        signers_required:
+                          type: array
+                          items: { type: string }
+                          description: |
+                            Base58 pubkeys that still need to sign the tx
+                            before submission. Empty for every template
+                            except `session-keys`, where the
+                            `session_signer` of each item is listed here.
 
   /v1/policies/{address}/sdk:
     get:

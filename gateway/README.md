@@ -107,7 +107,7 @@ bodies are capped at 25 MiB.
 | **Policies** | 8 Quasar templates: rules-policy, allowlist-destinations, velocity-guard, time-lock, oracle-conditional, passkey-step-up, fhe-gated, session-keys. Endpoints: `templates`, `init`, `admin/challenge`, `admin/submit`, `request-signature`. Wallet-agnostic + gas-sponsored. | admin | gateway |
 | **SDK metadata** | `GET /v1/policies/{address}/sdk` → typed TypeScript SDK tarball location | admin | gateway |
 | **Simulate** | `POST /v1/signatures/simulate` → dry-run via `simulateTransaction` | admin | gateway |
-| **Auto-batching** | `POST /v1/signatures/batch` → up to 64 ops in K txs | admin | gateway |
+| **Auto-batching** | `POST /v1/signatures/batch` → up to 64 ops across all 7 request_signature templates packed into K txs (1232-byte limit). Supports a `common` block for same-dWallet batches (hoist dwallet/curve/init_authority_hash). Gateway partial-signs as gas sponsor before returning; `signers_required` lists extra keys the dev must add (only non-empty for session-keys). | admin | gateway |
 | **Confidential** | `POST /v1/confidential/sign` → FHE evaluation (encrypt-backend) + Vault sign + fhe-gated tx | admin | gateway |
 
 Full machine-readable catalogue of the proxied routes in `internal/routes/routes.go`; everything
