@@ -776,6 +776,38 @@ type requestSignatureReq struct {
 	// gateway can derive the policy PDA. Audit C1 removed current_slot
 	// and current_ts from this DTO — Clock sysvar handles them on-chain.
 	InitAuthorityHashBase64 string `json:"init_authority_hash_base64"`
+
+	// Template-specific optional fields used by the batch endpoint to
+	// support every request-signature template without per-template
+	// endpoints. Each field is ignored by templates that do not need it.
+
+	// oracle-conditional
+	OracleFeed string `json:"oracle_feed,omitempty"`
+
+	// passkey-step-up — `tx_amount` is used by both paths; the rest
+	// (assertion fields) only by the step-up path (above-threshold).
+	TxAmount               *uint64 `json:"tx_amount,omitempty"`
+	StepUp                 bool    `json:"step_up,omitempty"`
+	ExpectedStepUpNonce    *uint64 `json:"expected_step_up_nonce,omitempty"`
+	PasskeyPubkeyB64       string  `json:"passkey_pubkey_base64,omitempty"`
+	WebauthnAuthDataB64    string  `json:"webauthn_auth_data_base64,omitempty"`
+	WebauthnCDJB64         string  `json:"webauthn_client_data_json_base64,omitempty"`
+	WebauthnSignatureB64   string  `json:"webauthn_signature_base64,omitempty"`
+
+	// fhe-gated — the decision signature comes from /v1/confidential/sign.
+	DecisionCreatedSlot  *uint64 `json:"decision_created_slot,omitempty"`
+	DecisionAuthorize    *uint8  `json:"decision_authorize,omitempty"`
+	DecisionSignatureB64 string  `json:"decision_signature_base64,omitempty"`
+	FHEAuthority         string  `json:"fhe_authority,omitempty"`
+
+	// session-keys — the session_signer is a fully separate outer-tx
+	// signer; the dev's client must co-sign the returned partial tx
+	// with that keypair before submitting.
+	SessionIndex             *uint32 `json:"session_index,omitempty"`
+	SessionSigner            string  `json:"session_signer,omitempty"`
+	Amount                   *uint64 `json:"amount,omitempty"`
+	DestinationProgram       string  `json:"destination_program,omitempty"`
+	ExpectedSignatureNonceB  *uint64 `json:"expected_signature_nonce,omitempty"`
 }
 
 // requestSignature handles the canonical 3-template request_signature flow.

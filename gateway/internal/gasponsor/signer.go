@@ -89,6 +89,26 @@ func (s *Signer) Healthy(ctx context.Context) (bool, uint64, error) {
 	return bal >= MinHealthyBalanceLamports, bal, nil
 }
 
+// PartialSignTx fills only the gas sponsor's signature slot in `tx` and
+// leaves every other signer slot zeroed. The dev's client adds remaining
+// signatures (e.g. session-keys session_signer) before submitting via
+// /v1/private-tx/submit. Used by the batching endpoint where the gateway
+// pays gas but does not send the tx itself.
+func (s *Signer) PartialSignTx(tx *solana.Transaction) error {
+	if tx == nil {
+		return errors.New("gasponsor.PartialSignTx: nil tx")
+	}
+	if _, err := tx.PartialSign(func(key solana.PublicKey) *solana.PrivateKey {
+		if key.Equals(s.publicKey) {
+			return &s.priv
+		}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("partial-sign tx: %w", err)
+	}
+	return nil
+}
+
 // SignAndSend builds a v0 Solana transaction with the gas sponsor as fee
 // payer, signs it, sends it via RPC, and returns `(txSignature, error)`.
 func (s *Signer) SignAndSend(ctx context.Context, ixs []solana.Instruction) (solana.Signature, error) {
