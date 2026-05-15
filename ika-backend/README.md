@@ -303,7 +303,7 @@ GET  /v1/recovery/primary/passkey/capabilities     # rp_id / origin / salt mode 
 
 **Salt strategy (D3).** Only `IKA_PASSKEY_SALT_MODE=per_credential` is accepted in production. Each credential gets a stable `salt_id` (UUID v4) + `salt_hash` (sha256 of the raw salt). The raw salt itself is derived `HKDF(server_secret, salt_id)` at use time and never persisted.
 
-**RP ID (D2).** `IKA_PASSKEY_RP_ID=andromedainfra.pro` (apex) is **IMMUTABLE** after the first passkey is registered in a given environment — rotation would orphan every credential derived under the old value.
+**RP ID (D2) — per-tenant via `api_keys.allowed_origins`.** Andromeda is B2D: every client runs on its own domain. The `rp_id` / `rp_origin` of a registration is resolved from the API key's existing CORS `allowed_origins` (migration 017) — the gateway forwards that list as `X-Andromeda-Allowed-Origins` (CSV) and the passkey routes validate the client's chosen origin against it. When a key has exactly one allowed origin the client may omit `rpOrigin`; when it has multiple, the client passes `rpOrigin` per call. `rpId` defaults to the registrable apex of the host (e.g. `app.cliente.com` → `cliente.com`) but the client may pick a stricter subdomain rpId as long as it is a suffix of the host. The env defaults (`IKA_PASSKEY_RP_ID` / `IKA_PASSKEY_RP_ORIGIN`) are used only when the key has no `allowed_origins` — that path covers the Andromeda dashboard itself. **Pinned at registration**: the resolved `(rpId, rpOrigin)` pair is persisted into `passkey_credentials` and into the `register-init` challenge's metadata so a client can't swap it between `-init` and `-complete`. Once a credential is registered, its rp_id is **IMMUTABLE** for that credential — rotating the apex on the api key orphans existing credentials but does not affect new ones.
 
 **Multiple passkeys per dWallet (D6).** Up to 5 active credentials per dWallet. Cross-device use case: 1 hardware key + 1 iCloud Keychain + 1 Google Password Manager + 1 Windows Hello + 1 reserve. The limit is enforced inside a `SELECT … FOR UPDATE` transaction at `register-complete` so concurrent registers can't both win the 5th slot.
 
@@ -389,8 +389,8 @@ Mounts `/v1/recovery/primary/passkey/*`. Requires the policy recovery layer (`IK
 | Var | Default | Notes |
 |-----|---------|-------|
 | `IKA_PASSKEY_ENABLED` | `false` | Master flag. Requires `IKA_RECOVERY_POLICY_ENABLED=true`. |
-| `IKA_PASSKEY_RP_ID` | _(none)_ | WebAuthn Relying Party ID. Production: `andromedainfra.pro` (apex). **IMMUTABLE** after first registration — rotating orphans every existing credential (D2). |
-| `IKA_PASSKEY_RP_ORIGIN` | _(none)_ | Origin the WebAuthn flow runs on, e.g. `https://app.andromedainfra.pro`. Required when enabled. |
+| `IKA_PASSKEY_RP_ID` | _(none)_ | **Fallback** RP_ID when the calling api_key has no `allowed_origins`. Production (Andromeda dashboard fallback): `andromedainfra.pro`. Per-tenant clients DON'T need this — they declare origins on their API key in the dashboard. |
+| `IKA_PASSKEY_RP_ORIGIN` | _(none)_ | **Fallback** origin paired with `IKA_PASSKEY_RP_ID`. Same logic. |
 | `IKA_PASSKEY_CHALLENGE_TTL_SECONDS` | `120` | TTL of `register-init` / pre-open challenges (single-use, consumed by the matching `-complete` / `-submit`). |
 | `IKA_PASSKEY_SALT_MODE` | `per_credential` | **Only `per_credential` accepted in production.** Boot fails on `global`. See D3. |
 | `IKA_PASSKEY_SESSION_TTL_SECONDS` | `600` | UI hint for session lifetime. The on-chain `rules-policy` enforces its own `SESSION_TTL_SECONDS = 600` cap regardless. |
