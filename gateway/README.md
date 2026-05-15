@@ -88,6 +88,7 @@ bodies are capped at 25 MiB.
 | **Recovery — quorum** | `recovery/quorum/session/{open/challenge,open,contribute/challenge,contribute,finalize,close}`, `GET recovery/quorum/session/{address}` | write / read | ika |
 | **Recovery — policy** | `recovery/policy/{preview,deploy,admin/challenge,admin/submit,apply-pending}`, `GET recovery/policy/{dwalletAddress}` | write / read | ika |
 | **Recovery — Login Social (OIDC primary)** | `recovery/primary/oidc/{stage,open/challenge,open,use/challenge,use/submit,close,staging/close}`, `oidc/validate` — staged `id_token` carriers get an 8 KiB body cap | write / read | ika |
+| **Recovery — Passkey-PRF (WebAuthn primary, scheme=3 session-scoped)** | `recovery/primary/passkey/{credentials/register-init,credentials/register-complete,credentials,credentials/{id}/revoke,open/challenge,open,use/challenge,use/submit,close,capabilities}` — WebAuthn assertion at open (Secp256r1 precompile), Ed25519 ephemeral per-use. 4 KiB body cap on the assertion-carrying routes. D2 RP ID + D3 per-credential salt + D6 5/dwallet enforced upstream. | write / read | ika |
 | **OAuth broker (Login Social)** | `GET oauth/{authorize,callback}`, `POST oauth/token-exchange` — gateway-hosted Andromeda OAuth client (Google + Apple, `scope=openid` only). Authorization Code + PKCE. Free (no token cost). | write | gateway |
 | **Private TX** | `private-tx/submit`, `GET private-tx/status/{signature}` | write / read | encrypt |
 | **Ciphertext** | `ciphertext/{create,read}`, `GET ciphertext/account/{address}` | write / read | encrypt |
