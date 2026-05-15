@@ -142,6 +142,24 @@ var All = []Route{
 	// Login Social — obligatory server-side `id_token` pre-validation (JWKS) before staging.
 	{Method: "POST", Path: "/v1/oidc/validate", Upstream: UpstreamIka, Key: "ika.oidc.validate", Idempotent: true, RateClass: RateClassRead, MaxBodyBytes: 8 << 10},
 
+	// Recovery — Passkey-PRF (RulesPolicy WebAuthn primary; scheme = 3 session-scoped;
+	// PLAN_KEYSPRING_INTEGRATION_2026_05.md D1 Opção A). The user signs a
+	// WebAuthn assertion at session open (Secp256r1 precompile validates it on-chain)
+	// and per-use Ed25519 challenges with the session's ephemeral key. The on-chain
+	// cap is 192 B for authData + 192 B for clientDataJSON (D13); 4 KiB body covers
+	// both plus envelope. Credentials list/revoke + register-init/complete are
+	// off-chain bookkeeping owned by ika-backend (D4) — gateway only reverse-proxies.
+	{Method: "POST", Path: "/v1/recovery/primary/passkey/credentials/register-init", Upstream: UpstreamIka, Key: "ika.recovery.primary.passkey.credentials.register-init", Idempotent: true, RateClass: RateClassRead, MaxBodyBytes: 1 << 10},
+	{Method: "POST", Path: "/v1/recovery/primary/passkey/credentials/register-complete", Upstream: UpstreamIka, Key: "ika.recovery.primary.passkey.credentials.register-complete", Idempotent: true, RateClass: RateClassTx, MaxBodyBytes: 4 << 10},
+	{Method: "GET", Path: "/v1/recovery/primary/passkey/credentials", Upstream: UpstreamIka, Key: "ika.recovery.primary.passkey.credentials.list", RateClass: RateClassRead},
+	{Method: "POST", Path: "/v1/recovery/primary/passkey/credentials/{id}/revoke", Upstream: UpstreamIka, Key: "ika.recovery.primary.passkey.credentials.revoke", Idempotent: true, RateClass: RateClassTx, MaxBodyBytes: 1 << 10},
+	{Method: "POST", Path: "/v1/recovery/primary/passkey/open/challenge", Upstream: UpstreamIka, Key: "ika.recovery.primary.passkey.open.challenge", Idempotent: true, RateClass: RateClassRead, MaxBodyBytes: 2 << 10},
+	{Method: "POST", Path: "/v1/recovery/primary/passkey/open", Upstream: UpstreamIka, Key: "ika.recovery.primary.passkey.open", Idempotent: true, RateClass: RateClassTx, TimeoutSeconds: 90, MaxBodyBytes: 4 << 10},
+	{Method: "POST", Path: "/v1/recovery/primary/passkey/use/challenge", Upstream: UpstreamIka, Key: "ika.recovery.primary.passkey.use.challenge", RateClass: RateClassRead, MaxBodyBytes: 2 << 10},
+	{Method: "POST", Path: "/v1/recovery/primary/passkey/use/submit", Upstream: UpstreamIka, Key: "ika.recovery.primary.passkey.use.submit", Idempotent: true, RateClass: RateClassTx, TimeoutSeconds: 90, MaxBodyBytes: 2 << 10},
+	{Method: "POST", Path: "/v1/recovery/primary/passkey/close", Upstream: UpstreamIka, Key: "ika.recovery.primary.passkey.close", Idempotent: true, RateClass: RateClassTx, MaxBodyBytes: 1 << 10},
+	{Method: "GET", Path: "/v1/recovery/primary/passkey/capabilities", Upstream: UpstreamIka, Key: "ika.recovery.primary.passkey.capabilities", RateClass: RateClassRead},
+
 	// --- encrypt-backend (FHE engine) ---
 	// Private transactions
 	{Method: "POST", Path: "/v1/private-tx/submit", Upstream: UpstreamEncrypt, Key: "encrypt.private-tx.submit", Idempotent: true, RateClass: RateClassTx},
