@@ -31,8 +31,8 @@ ika-backend/
 │   │   ├── grpc-client.ts          # Ika gRPC client
 │   │   ├── solana-rpc.ts           # @solana/kit
 │   │   ├── tx-builder.ts
-│   │   ├── submit.ts               # Submit + confirm Solana txs
-│   │   ├── gas-sponsor.ts          # Fee payer keypair
+│   │   ├── submit.ts               # Submit Ika dWallet tx via gRPC (raw BCS response)
+│   │   ├── gas-sponsor.ts          # Fee-payer keypair + Solana sendTransaction + confirm
 │   │   ├── precompiles.ts          # Ed25519/Secp256k1/Secp256r1 ix
 │   │   ├── pda.ts
 │   │   ├── routes.ts               # Mounts low-level prepare/submit + high-level MCP routes
@@ -47,7 +47,6 @@ ika-backend/
 │   │   ├── ika/                    # transfer-ownership instruction codec
 │   │   ├── policies/               # Read on-chain policy account state
 │   │   └── rulesPolicy/            # Codecs + instructions + program PDA
-│   ├── identity/                   # Opt-in: OAuth, email, passkey, linking, sessions, audit, PII-at-rest
 │   ├── oidc/                       # Opt-in (Login Social): /v1/oidc/{nonce,validate} + JWT derivations
 │   ├── recovery/
 │   │   ├── verifiers/              # 7 off-chain schemes
@@ -66,7 +65,6 @@ ika-backend/
 ├── scripts/                        # gen-keypair.mjs, run-migrations.ts (dev)
 ├── docs/{RECOVERY,STATUS}.md
 ├── .env.example                    # Authoritative list of every env var
-├── PLAN.md
 ├── Dockerfile
 ├── railway.json
 └── package.json
@@ -427,5 +425,6 @@ npm run dev          # tsx watch src/server.ts
 | `npm run migrate` | Run Postgres migrations against `DATABASE_URL` (uses `dist/`; build first). |
 | `npm run migrate:dev` | Same, via `tsx` (no build). |
 | `node scripts/gen-keypair.mjs <out-path>` | Generate a Solana keypair as a JSON byte array file + print its address (for `ANDROMEDA_GAS_SPONSOR_KEYPAIR`). |
+| `tsx scripts/gen-challenge-vectors.ts` | Regenerate the cross-language drift fixtures under `fixtures/passkey_prf/v1/` (passkey + WebAuthn challenge byte vectors). Run after any change to `recovery/challenge.ts` or its Rust mirror. |
 
 Supported curves: Ed25519 (Solana, NEAR, Aptos, Cosmos Ed25519), SECP256K1 (EVM, Bitcoin, Cosmos secp256k1), SECP256R1 (P-256, WebAuthn), Ristretto (Substrate/Polkadot).
