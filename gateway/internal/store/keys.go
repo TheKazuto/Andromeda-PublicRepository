@@ -187,59 +187,6 @@ func (s *pgStore) ListAPIKeysByUser(ctx context.Context, userID string) ([]APIKe
 	return out, rows.Err()
 }
 
-// UpdateAPIKey patches the named fields. Validation of scopes / CIDRs
-// happens at the handler layer before this is called.
-func (s *pgStore) UpdateAPIKey(ctx context.Context, userID, keyID string, mut APIKeyMutation) (*APIKey, error) {
-	sets := []string{}
-	args := []any{userID, keyID}
-	add := func(col string, v any) {
-		args = append(args, v)
-		sets = append(sets, fmt.Sprintf("%s = $%d", col, len(args)))
-	}
-	if mut.Name != nil {
-		add("name", *mut.Name)
-	}
-	if mut.Scopes != nil {
-		add("scopes", mut.Scopes)
-	}
-	if mut.IPAllowlist != nil {
-		add("ip_allowlist", mut.IPAllowlist)
-	}
-	if mut.AllowedOrigins != nil {
-		add("allowed_origins", mut.AllowedOrigins)
-	}
-	if len(sets) == 0 {
-		// Nothing to update — return current state.
-		row := s.pool.QueryRow(ctx, `
-            SELECT id, user_id, name, prefix, scopes,
-                   COALESCE(ip_allowlist, '{}'::text[]),
-                   COALESCE(allowed_origins, '{}'::text[]),
-                   created_at, last_used_at, revoked_at
-            FROM api_keys WHERE id = $2 AND user_id = $1`, userID, keyID)
-		var k APIKey
-		if err := row.Scan(&k.ID, &k.UserID, &k.Name, &k.Prefix, &k.Scopes,
-			&k.IPAllowlist, &k.AllowedOrigins, &k.CreatedAt, &k.LastUsedAt, &k.RevokedAt); err != nil {
-			return nil, mapErr(err)
-		}
-		return &k, nil
-	}
-
-	q := fmt.Sprintf(`UPDATE api_keys SET %s
-                      WHERE user_id = $1 AND id = $2 AND revoked_at IS NULL
-                      RETURNING id, user_id, name, prefix, scopes,
-                                COALESCE(ip_allowlist, '{}'::text[]),
-                                COALESCE(allowed_origins, '{}'::text[]),
-                                created_at, last_used_at, revoked_at`,
-		strings.Join(sets, ", "))
-	row := s.pool.QueryRow(ctx, q, args...)
-	var k APIKey
-	if err := row.Scan(&k.ID, &k.UserID, &k.Name, &k.Prefix, &k.Scopes,
-		&k.IPAllowlist, &k.AllowedOrigins, &k.CreatedAt, &k.LastUsedAt, &k.RevokedAt); err != nil {
-		return nil, mapErr(err)
-	}
-	return &k, nil
-}
-
 func (s *pgStore) RevokeAPIKey(ctx context.Context, userID, keyID string) error {
 	tag, err := s.pool.Exec(ctx, `
         UPDATE api_keys SET revoked_at = now()

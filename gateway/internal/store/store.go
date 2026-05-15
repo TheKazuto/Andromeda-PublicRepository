@@ -9,17 +9,12 @@ import (
 )
 
 var (
-	ErrNotFound          = errors.New("not found")
-	ErrAlreadyExists     = errors.New("already exists")
-	ErrQuotaExceeded     = errors.New("quota exceeded")
-	ErrKeyRevoked        = errors.New("api key revoked")
-	ErrGiftAlreadyUsed   = errors.New("gift card already redeemed")
-	ErrGiftExpired       = errors.New("gift card expired")
-	ErrGiftRefunded      = errors.New("gift card refunded")
-	ErrGiftNotEligible   = errors.New("gift card not eligible for refund")
-	ErrCreditExpired     = errors.New("credit expired")
-	ErrAdminInactive     = errors.New("admin user is not active")
-	ErrPricingChangeBusy = errors.New("pricing change already applied or cancelled")
+	ErrNotFound      = errors.New("not found")
+	ErrAlreadyExists = errors.New("already exists")
+	ErrQuotaExceeded = errors.New("quota exceeded")
+	ErrKeyRevoked    = errors.New("api key revoked")
+	ErrCreditExpired = errors.New("credit expired")
+	ErrAdminInactive = errors.New("admin user is not active")
 )
 
 // =============================================================================
@@ -156,36 +151,6 @@ func (c Credit) Remaining(now time.Time) int64 {
 	return r
 }
 
-// GiftCard is a redeemable plan voucher. Two flavours, distinguished by
-// Source: 'paid' (bought via Stripe) or 'promo' (issued by an admin for
-// hackathons / partners — same redeem flow, free of charge).
-type GiftCard struct {
-	ID              string     `json:"id"`
-	RedeemToken     string     `json:"redeemToken"`
-	PlanCode        string     `json:"planCode"`
-	DurationMonths  int        `json:"durationMonths"` // 1 or 12
-	Source          string     `json:"source"`         // 'paid' | 'promo'
-	BuyerUserID     *string    `json:"buyerUserId,omitempty"`
-	BuyerEmail      string     `json:"buyerEmail,omitempty"`
-	PaidAmountCents *int       `json:"paidAmountCents,omitempty"`
-	StripePaymentID string     `json:"stripePaymentId,omitempty"`
-	GrantedBy       string     `json:"grantedBy,omitempty"`
-	Message         string     `json:"message"`
-	ExpiresAt       time.Time  `json:"expiresAt"`
-	RedeemedAt      *time.Time `json:"redeemedAt,omitempty"`
-	RedeemedBy      *string    `json:"redeemedBy,omitempty"`
-	RefundedAt      *time.Time `json:"refundedAt,omitempty"`
-	CreatedAt       time.Time  `json:"createdAt"`
-}
-
-// IsRedeemable returns true when the card can still be redeemed right now.
-func (g GiftCard) IsRedeemable(now time.Time) bool {
-	if g.RedeemedAt != nil || g.RefundedAt != nil {
-		return false
-	}
-	return now.Before(g.ExpiresAt)
-}
-
 // PricingChange is a scheduled mutation to plans / request_costs. The
 // gateway exposes this for /admin/pricing-changes and a background worker
 // applies pending changes once Effective_at is reached.
@@ -244,35 +209,6 @@ type AuthenticatedKey struct {
 // Mutations
 // =============================================================================
 
-// PlanMutation is a partial update for plans. Nil fields are left untouched.
-type PlanMutation struct {
-	Name              *string
-	MonthlyTokens     *int64
-	PriceCents        *int
-	AnnualPriceCents  *int
-	OveragePer1kCents *int
-	RateLimitRPS      *int
-	RateLimitBurst    *int
-	ReadRPS           *int
-	ReadBurst         *int
-	TxRPS             *int
-	TxBurst           *int
-	Features          map[string]any
-	IsActive          *bool
-	IsGiftable        *bool
-	SortOrder         *int
-}
-
-// APIKeyMutation is a partial update for api_keys. Pass nil for any
-// field to leave it unchanged. The handler validates scopes and CIDRs
-// before calling — store-level checks are basic ("non-empty").
-type APIKeyMutation struct {
-	Name           *string
-	Scopes         []string // nil = unchanged; empty slice = clear
-	IPAllowlist    []string // nil = unchanged; empty slice = clear
-	AllowedOrigins []string // nil = unchanged; empty slice = clear
-}
-
 // SubscriptionMutation is a partial update for subscriptions. Used by
 // the admin endpoints to flip overage / billing cycle / Stripe ids.
 type SubscriptionMutation struct {
@@ -292,21 +228,6 @@ type CreditGrant struct {
 	GrantedBy string
 	// Optional override of the 30-day default.
 	ExpiresAt time.Time
-}
-
-// GiftCardCreate is the input for creating a gift card.
-type GiftCardCreate struct {
-	RedeemToken     string
-	PlanCode        string
-	DurationMonths  int
-	Source          string  // 'paid' | 'promo'
-	BuyerUserID     *string // paid only
-	BuyerEmail      string  // paid only
-	PaidAmountCents *int    // paid only
-	StripePaymentID string  // paid only
-	GrantedBy       string  // promo only
-	Message         string
-	ExpiresAt       time.Time
 }
 
 // PricingChangeCreate is the input for scheduling a pricing change.
@@ -381,34 +302,6 @@ type Balance struct {
 	PeriodEnd        time.Time     `json:"periodEnd,omitempty"`
 }
 
-// GiftCardRedemption is what ApplyGiftCard returns: the gift card after
-// being marked redeemed, plus the subscription that received the benefit
-// and a label describing what happened.
-//
-//   - Action == "created"  — user had no active subscription; a new one was
-//     assigned with the gift's plan + duration.
-//   - Action == "extended" — current subscription's tokens_limit and
-//     current_period_end were bumped.
-//   - Action == "upgraded" — same as "extended" PLUS the active plan was
-//     swapped for the gift's plan (gift tier > current).
-type GiftCardRedemption struct {
-	GiftCard     *GiftCard     `json:"giftCard"`
-	Subscription *Subscription `json:"subscription"`
-	Action       string        `json:"action"`
-	AddedTokens  int64         `json:"addedTokens"`
-	AddedDays    int           `json:"addedDays"`
-}
-
-// AppliedPricingChange describes the result of running the pricing
-// applier worker once. Useful for telemetry / admin dashboards.
-type AppliedPricingChange struct {
-	ChangeID   int64
-	ChangeType string
-	TargetKey  string
-	NewValue   int64
-	Error      error
-}
-
 // UsageDailyBucket is one day's worth of consumption for a user.
 type UsageDailyBucket struct {
 	Date   time.Time `json:"date"`
@@ -457,11 +350,6 @@ type Store interface {
 	RefundTokensV2(ctx context.Context, subscriptionID string, r ConsumptionResult) error
 	// ComputeBalance returns the per-bucket remaining-token snapshot.
 	ComputeBalance(ctx context.Context, userID string) (*Balance, error)
-	// ApplyPendingPricingChanges runs the scheduler worker step: copies
-	// any pricing_history rows whose effective_at has passed into the
-	// live tables (request_costs / plans) and marks applied_at. Returns
-	// per-change outcomes for telemetry.
-	ApplyPendingPricingChanges(ctx context.Context) ([]AppliedPricingChange, error)
 
 	// --- Pricing ---
 	ListRequestCosts(ctx context.Context) ([]RequestCost, error)
@@ -493,52 +381,11 @@ type Store interface {
 	ListActiveCredits(ctx context.Context, userID string) ([]Credit, error)
 	SumActiveCredits(ctx context.Context, userID string) (int64, error)
 
-	// --- Gift cards ---
-	CreateGiftCard(ctx context.Context, in GiftCardCreate) (*GiftCard, error)
-	GetGiftCardByToken(ctx context.Context, token string) (*GiftCard, error)
-	ListGiftCardsByBuyer(ctx context.Context, userID string) ([]GiftCard, error)
-	ListGiftCardsByRecipient(ctx context.Context, userID string) ([]GiftCard, error)
-	RedeemGiftCard(ctx context.Context, token, recipientUserID string) (*GiftCard, error)
-	// ApplyGiftCard atomically redeems a gift card AND applies the
-	// benefit to the recipient's subscription. Used by the gateway's
-	// proxy hot path (gift_observer) to keep cached state fresh.
-	ApplyGiftCard(ctx context.Context, token, recipientUserID string) (*GiftCardRedemption, error)
-
-	// /admin/* surface (admin users, audit log, pricing-change CRUD,
-	// credit grants, plan/cost mutations, gift refunds, threshold
-	// notifications, applier worker) all moved to the backend service
-	// in M4. The gateway no longer needs those methods on this interface.
-
-	// --- Stripe ---
-	// SetUserStripeCustomerID associates a stripe_customer_id with the
-	// Andromeda user. Idempotent — calling with the same id is a no-op.
-	SetUserStripeCustomerID(ctx context.Context, userID, stripeCustomerID string) error
-	// GetUserByStripeCustomerID is the reverse lookup used by the Stripe
-	// webhook handler to resolve incoming events back to Andromeda users.
-	GetUserByStripeCustomerID(ctx context.Context, stripeCustomerID string) (*User, error)
-	// SetSubscriptionStripeIDs writes Stripe linkage onto a subscription.
-	// Used by the checkout completion + subscription.updated handlers.
-	SetSubscriptionStripeIDs(ctx context.Context, subscriptionID, stripeCustomerID, stripeSubscriptionID string) error
-	// SetSubscriptionStatus flips the subscription state machine: 'active'
-	// | 'past_due' | 'cancelled' | 'trialing'. Pass empty string for
-	// stripeStatus to keep the current Stripe label.
-	SetSubscriptionStatus(ctx context.Context, subscriptionID, status string) error
-	// GetSubscriptionByStripeID looks up a subscription by Stripe id,
-	// used by webhook handlers for invoice.* and subscription.* events.
-	GetSubscriptionByStripeID(ctx context.Context, stripeSubscriptionID string) (*Subscription, error)
-	// MarkStripeEventProcessed inserts the event id into stripe_events;
-	// returns true if it was the first time (caller should process).
-	// Returns false on conflict (already processed — skip).
-	MarkStripeEventProcessed(ctx context.Context, eventID, eventType, apiVersion string) (bool, error)
-	// SetSubscriptionOverageItem persists the Stripe subscription_item
-	// id created when the user opts in to overage. Empty string clears
-	// the value (used by DisableOverage).
-	SetSubscriptionOverageItem(ctx context.Context, subscriptionID, stripeItemID string) error
-	// AdvanceOverageReported atomically increments overage_reported_tokens
-	// and stamps overage_last_reported_at. Used by the reporting worker
-	// AFTER the meter event is acknowledged by Stripe — safe-restart
-	// invariant: never advance unless Stripe confirmed the event.
-	AdvanceOverageReported(ctx context.Context, subscriptionID string, delta int64) error
+	// Gift cards, Stripe webhooks, admin surface (users, audit log,
+	// pricing-change CRUD, credit grants, plan/cost mutations, gift
+	// refunds, threshold notifications, applier worker) all moved to
+	// the backend service in M1/M2/M4. The gateway no longer exposes
+	// those methods on this interface.
 
 	// --- Login Social OAuth broker ---
 	// IsTenantOAuthRedirectAllowed returns true when (user_id, redirect_uri)

@@ -3,8 +3,6 @@ package store
 import (
 	"context"
 	"encoding/json"
-	"fmt"
-	"strings"
 )
 
 // plans persistence + the plan scanner. Split out of postgres.go.
@@ -69,73 +67,3 @@ func (s *pgStore) GetPlanByCode(ctx context.Context, code string) (*Plan, error)
 	return &p, nil
 }
 
-func (s *pgStore) UpdatePlan(ctx context.Context, code string, mut PlanMutation) (*Plan, error) {
-	sets := []string{}
-	args := []any{code}
-	add := func(col string, v any) {
-		args = append(args, v)
-		sets = append(sets, fmt.Sprintf("%s = $%d", col, len(args)))
-	}
-	if mut.Name != nil {
-		add("name", *mut.Name)
-	}
-	if mut.MonthlyTokens != nil {
-		add("monthly_tokens", *mut.MonthlyTokens)
-	}
-	if mut.PriceCents != nil {
-		add("price_cents", *mut.PriceCents)
-	}
-	if mut.AnnualPriceCents != nil {
-		add("annual_price_cents", *mut.AnnualPriceCents)
-	}
-	if mut.OveragePer1kCents != nil {
-		add("overage_per_1k_cents", *mut.OveragePer1kCents)
-	}
-	if mut.RateLimitRPS != nil {
-		add("rate_limit_rps", *mut.RateLimitRPS)
-	}
-	if mut.RateLimitBurst != nil {
-		add("rate_limit_burst", *mut.RateLimitBurst)
-	}
-	if mut.ReadRPS != nil {
-		add("read_rps", *mut.ReadRPS)
-	}
-	if mut.ReadBurst != nil {
-		add("read_burst", *mut.ReadBurst)
-	}
-	if mut.TxRPS != nil {
-		add("tx_rps", *mut.TxRPS)
-	}
-	if mut.TxBurst != nil {
-		add("tx_burst", *mut.TxBurst)
-	}
-	if mut.Features != nil {
-		b, err := json.Marshal(mut.Features)
-		if err != nil {
-			return nil, fmt.Errorf("marshal features: %w", err)
-		}
-		add("features", string(b))
-	}
-	if mut.IsActive != nil {
-		add("is_active", *mut.IsActive)
-	}
-	if mut.IsGiftable != nil {
-		add("is_giftable", *mut.IsGiftable)
-	}
-	if mut.SortOrder != nil {
-		add("sort_order", *mut.SortOrder)
-	}
-	if len(sets) == 0 {
-		return s.GetPlanByCode(ctx, code)
-	}
-	sets = append(sets, "updated_at = now()")
-	q := fmt.Sprintf(`UPDATE plans SET %s WHERE code = $1 RETURNING %s`,
-		strings.Join(sets, ", "), planColumns)
-
-	row := s.pool.QueryRow(ctx, q, args...)
-	p, err := scanPlan(row)
-	if err != nil {
-		return nil, mapErr(err)
-	}
-	return &p, nil
-}
