@@ -11,6 +11,7 @@ import { buildHealthRouter } from './http/healthz.js'
 import { idempotencyMiddleware } from './http/idempotency.js'
 import { buildEngineRouter } from './engine/routes.js'
 import { closeIkaGrpcClient } from './engine/grpc-client.js'
+import { initGasSponsor } from './engine/gas-sponsor.js'
 import { buildRecoveryRouter } from './recovery/index.js'
 import { buildOidcMountRouter } from './oidc/index.js'
 import { startCleanupJob, stopCleanupJob } from './store/cleanup.js'
@@ -91,6 +92,19 @@ async function main(): Promise<void> {
 
   // Defensive idempotency mirror — primary enforcement is at the gateway.
   app.use('/v1', idempotencyMiddleware())
+
+  // Gas sponsor is required by `/v1/dwallet/transfer-ownership` (and any
+  // future on-chain submit the engine layer triggers). Initialised once at
+  // boot so subsequent calls get the cached signer.
+  if (config.gasSponsor.keypair) {
+    await initGasSponsor(config.gasSponsor.keypair, {
+      minBalanceSol: config.gasSponsor.minBalanceSol,
+      maxGasPerOpLamports: config.gasSponsor.maxGasPerOpLamports,
+    })
+    logger.info('gas sponsor initialised')
+  } else {
+    logger.warn('gas sponsor not set — POST /v1/dwallet/transfer-ownership will throw at first call (set ANDROMEDA_GAS_SPONSOR_KEYPAIR)')
+  }
 
   app.use('/v1/dwallet', buildEngineRouter(config))
 

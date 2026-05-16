@@ -170,13 +170,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     for (const issue of recoveryParse.error.issues) {
       errors.push(`recovery.${issue.path.join('.')}: ${issue.message}`)
     }
-  } else if (recoveryParse.data.policyEnabled && !recoveryParse.data.policyProgramId) {
-    errors.push('recovery.policyProgramId: required when IKA_RECOVERY_POLICY_ENABLED=true')
-  } else if (recoveryParse.data.policyEnabled && !recoveryParse.data.ikaCoordinatorAddress) {
-    errors.push(
-      'recovery.ikaCoordinatorAddress (IKA_COORDINATOR_ADDRESS): required when IKA_RECOVERY_POLICY_ENABLED=true',
-    )
   }
+  // F11b-Phase4b (2026-05-15): legacy rules-policy adapter deleted; the
+  // `policyEnabled` flag now only gates the 410-sunset routers, so the
+  // policy/coordinator/keypair fields are no longer required for boot.
 
   const oidcRaw = {
     enabled: truthy(env.IKA_OIDC_ENABLED),
@@ -197,6 +194,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       errors.push(`oidc.${issue.path.join('.')}: ${issue.message}`)
     }
   } else if (oidcParse.data.enabled) {
+    // OIDC standalone surface (`/v1/oidc/{nonce,validate}`) — providers,
+    // audiences, and the HMAC secret stay required. The legacy on-chain
+    // recovery adapter (jwkRegistryAddress / verifierVersion) was deleted
+    // in F11b-Phase4b, so those fields are no longer enforced here.
     const o = oidcParse.data
     if (!o.googleEnabled && !o.appleEnabled) {
       errors.push('oidc: at least one provider (IKA_OIDC_GOOGLE_ENABLED / IKA_OIDC_APPLE_ENABLED) must be true when IKA_OIDC_ENABLED=true')
@@ -209,9 +210,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     }
     if (o.allowedAudiences.length === 0) {
       errors.push('oidc.allowedAudiences (IKA_OIDC_ALLOWED_AUDIENCES): required (CSV, must mirror the on-chain allowlist) when IKA_OIDC_ENABLED=true')
-    }
-    if (!o.jwkRegistryAddress) {
-      errors.push('oidc.jwkRegistryAddress (IKA_OIDC_JWK_REGISTRY_ADDRESS): required when IKA_OIDC_ENABLED=true')
     }
     if (!o.logSubjectHmacSecret) {
       errors.push('oidc.logSubjectHmacSecret (IKA_OIDC_LOG_SUBJECT_HMAC_SECRET): required when IKA_OIDC_ENABLED=true')
@@ -237,11 +235,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     }
   } else if (passkeyParse.data.enabled) {
     const p = passkeyParse.data
-    if (!recoveryParse.success || !recoveryParse.data.policyEnabled) {
-      errors.push(
-        'passkey: IKA_RECOVERY_POLICY_ENABLED must also be true when IKA_PASSKEY_ENABLED=true (passkey is a primary slot of the on-chain rules-policy)',
-      )
-    }
+    // F11b-Phase4b: legacy passkey routes were deleted. Passkey recovery now
+    // flows through the PolicyEngine v3 endpoints on the gateway, which
+    // don't read these fields — but keeping the gate so anyone enabling
+    // IKA_PASSKEY_ENABLED in the back-end gets a clear error message.
     if (!p.rpId) {
       errors.push(
         'passkey.rpId (IKA_PASSKEY_RP_ID): required when IKA_PASSKEY_ENABLED=true. Production value is "andromedainfra.pro" — IMMUTABLE after first registration (D2).',
@@ -276,9 +273,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     for (const issue of gasParse.error.issues) {
       errors.push(`gasSponsor.${issue.path.join('.')}: ${issue.message}`)
     }
-  } else if (recoveryParse.success && recoveryParse.data.policyEnabled && !gasParse.data.keypair) {
-    errors.push('gasSponsor.keypair: required when IKA_RECOVERY_POLICY_ENABLED=true (set ANDROMEDA_GAS_SPONSOR_KEYPAIR)')
   }
+  // Gas sponsor is initialised by `server.ts` only when the keypair is set
+  // (used by /v1/dwallet/transfer-ownership). Boot continues without it,
+  // and the route throws a clear error on first call.
 
   if (errors.length > 0) throw new ConfigError(errors)
 
