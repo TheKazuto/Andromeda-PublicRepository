@@ -31,7 +31,7 @@ import {
 } from '@solana/kit'
 import { logger } from '../../logger.js'
 import { getSolanaRpc } from '../solana-rpc.js'
-import { signAndSendInstructions } from '../gas-sponsor.js'
+import { signAndSendInstructions, getGasSponsorAddress } from '../gas-sponsor.js'
 import {
   createWrappedWalletKey,
   finalizeWalletKey,
@@ -50,10 +50,7 @@ import {
   type CurveName,
 } from './request.js'
 import { buildTransferOwnershipInstruction } from '../../clients/ika/transferOwnership.js'
-import {
-  buildInitEngineInstruction,
-  type InitEngineInput,
-} from '../../clients/policyEngine/instructions.js'
+import { buildInitEngineInstruction } from '../../clients/policyEngine/instructions.js'
 import {
   policyEngineInitChallenge as policyEngineInitChallengeFn,
 } from '../../clients/policyEngine/challenges.js'
@@ -62,6 +59,7 @@ import {
   initAuthorityHashFromSlot as policyEngineInitAuthorityHashFromSlot,
   cpiAuthorityPda as policyEngineCpiAuthorityPda,
 } from '../../clients/policyEngine/pda.js'
+import { buildEd25519PrecompileInstruction } from '../precompiles.js'
 
 const MEMBER_SLOT_LEN = 34
 const SCHEME_ED25519 = 0
@@ -238,16 +236,23 @@ export async function createDwallet(opts: {
 }
 
 /**
- * PolicyEngine v3 attach. Deploys an empty engine for `dwalletAddress`
- * (no rules yet) and `transfer_ownership`s the dWallet to the engine's CPI
- * authority PDA via the gateway `/v1/policy/init/submit` flow.
+ * PolicyEngine v3 attach. Single-call:
+ *   1. derive the deterministic engine PDA from `(dwallet, init_authority_hash)`,
+ *   2. sign the canonical init challenge with the keystore key,
+ *   3. submit `[Ed25519 precompile, init_engine, transfer_ownership]` in a
+ *      single gas-sponsored transaction.
  *
- * The keystore key signs the canonical init challenge; the owner slot
- * defaults to the keystore key unless `ownerSlotInput` is provided.
+ * After this lands, the dWallet's authority is the engine's CPI authority
+ * PDA, so every future signing op flows through the PolicyEngine v3 rules.
+ *
+ * The keystore key signs both the init challenge AND the `transfer_ownership`
+ * authority change. The owner slot defaults to the keystore key unless
+ * `ownerSlotInput` is provided (e.g. an external wallet that will be the
+ * engine's "owner" for admin actions).
  *
  * Mutates `result.policyEngineAddress` / `policyEngineInitAuthorityHashBase64`
- * / `signable` / `recoverable`. Throws on failure (the dWallet itself was
- * already created, so the caller surfaces a non-fatal warning).
+ * / `signable` / `recoverable`. Throws on failure — the dWallet itself was
+ * already created, so the caller surfaces a non-fatal warning.
  */
 async function attachPolicyEngine(args: {
   created: { id: string; signerPubkey: Uint8Array; signerSecret: Uint8Array }
@@ -259,20 +264,21 @@ async function attachPolicyEngine(args: {
 }): Promise<void> {
   const { created, dwalletAddress, ikaProgramId, policyEngineProgramId, result } = args
 
-  // 1. Build the canonical owner / init-authority slots (both default to the
-  //    keystore key — same pattern as legacy rules-policy attach).
+  // 1. Canonical owner / init-authority slots. Both default to the keystore
+  //    key — same pattern as legacy rules-policy attach. The init_authority
+  //    must be the keystore key here so we can sign the init challenge
+  //    in-process; the owner slot can be external (for admin actions later).
   const ownerSlotIn: MemberSlotInput =
     args.ownerSlotInput ?? { scheme: SCHEME_ED25519, identifier: created.signerPubkey }
   const ownerSlot = canonicalSlot(ownerSlotIn)
   const initAuthSlot = canonicalSlot({ scheme: SCHEME_ED25519, identifier: created.signerPubkey })
-
-  // 2. Compute the init_authority_hash (= sha256 of initAuthSlot).
   const initAuthHash = policyEngineInitAuthorityHashFromSlot(initAuthSlot)
 
-  // 3. Sign the canonical init challenge with the keystore key (init_authority).
-  //    F11 minimal: plain `init` (no default_recovery). F11b can wire the
-  //    `init-with-recovery` variant once the dashboard wizard lets the user
-  //    pre-configure a Recovery rule at create time.
+  // 2. Derive engine PDA + CPI authority PDA (target of transfer_ownership).
+  const enginePdaResult = await policyEnginePda(policyEngineProgramId, dwalletAddress, initAuthHash)
+  const cpiAuth = await policyEngineCpiAuthorityPda(policyEngineProgramId)
+
+  // 3. Sign the canonical init challenge with the keystore key.
   const challenge = policyEngineInitChallengeFn({
     dwallet: dwalletAddress,
     initAuthoritySlot: initAuthSlot,
@@ -282,47 +288,50 @@ async function attachPolicyEngine(args: {
   })
   const initAuthSig = ed25519Sign(challenge, created.signerSecret)
 
-  // 4. Build the InitEngine instruction. The on-chain handler recomputes the
-  //    challenge from the typed params and validates `initAuthSig` via the
-  //    Ed25519 precompile.
-  const enginePdaResult = await policyEnginePda(policyEngineProgramId, dwalletAddress, initAuthHash)
-  const input: InitEngineInput = {
+  // 4. Build the three instructions that go into the same tx:
+  //    [precompile (validates initAuthSig) | init_engine | transfer_ownership]
+  const sponsorAddress = getGasSponsorAddress()
+  const initEngineIx = await buildInitEngineInstruction({
     programId: policyEngineProgramId,
     dwallet: dwalletAddress,
     engine: enginePdaResult.address,
-    payer: (await signerFromKeystoreKey(created.signerSecret, created.signerPubkey)).address,
+    payer: sponsorAddress,
     initAuthoritySlot: initAuthSlot,
     initAuthorityHash: initAuthHash,
     ownerSlot,
     defaultRecoveryPresent: 0,
     defaultRecoveryHash: new Uint8Array(32),
-  }
-  // Hold a reference so a future drift-tester can pull the typed input.
-  void input
-  // The TS client exposes the typed builder; the precompile carrying the
-  // signature is appended in the same tx by the higher-level dispatcher in
-  // F11b's PolicyEngine adapter. For now we record the deployment intent —
-  // the actual SignAndSend (init_engine + Ed25519 precompile + optional
-  // transfer_ownership) is wired through the gateway endpoint
-  // `/v1/policy/init/submit`, NOT directly here, mirroring how legacy
-  // `attachRecoveryPolicy` defers to `getPolicyAdapter().deployRulesPolicy`.
-  // This keeps the engine wire-up close to where the SBF artifact is loaded
-  // and avoids re-importing the precompile builder into ika-backend.
-  void buildInitEngineInstruction // keep the import live until F11b
-  void initAuthSig // ditto
+  })
+  const precompileIx = buildEd25519PrecompileInstruction({
+    publicKey: created.signerPubkey,
+    message: challenge,
+    signature: initAuthSig,
+  })
+  const authoritySigner = await signerFromKeystoreKey(created.signerSecret, created.signerPubkey)
+  const transferIx = buildTransferOwnershipInstruction({
+    ikaProgramId,
+    dwallet: dwalletAddress,
+    authoritySigner,
+    newAuthority: cpiAuth.address,
+  })
 
-  // For F11 minimal we mark the engine address (computed deterministically
-  // from seeds) so the caller's response carries the PDA even before the
-  // gateway submit lands. The `signable`/`recoverable` flags flip only once
-  // the gateway-side submit succeeds and the keystore stores the address.
+  // 5. Send. Gas sponsor pays + signs as fee payer; the keystore key cosigns
+  //    for the transfer_ownership instruction (authoritySigner above).
+  const txSignature = await signAndSendInstructions(
+    [precompileIx, initEngineIx, transferIx],
+    'policy-engine.attach',
+    { dwalletAddress: String(dwalletAddress), engineAddress: String(enginePdaResult.address) },
+  )
+
   result.policyEngineAddress = String(enginePdaResult.address)
   result.policyEngineInitAuthorityHashBase64 = Buffer.from(initAuthHash).toString('base64')
-  result.policyEngineAttachWarning =
-    'PolicyEngine attachment deferred to /v1/policy/init/submit (F11b wires the full deploy+transfer flow). Use the returned policyEngineAddress + initAuthorityHashBase64 to drive the gateway submit.'
+  result.signable = true
+  result.recoverable = true
 
-  // Touch unused PDA helper to keep the import live until F11b inlines the
-  // CPI authority computation for `transfer_ownership`.
-  void policyEngineCpiAuthorityPda
+  logger.info(
+    { dwalletAddress: String(dwalletAddress), engineAddress: String(enginePdaResult.address), txSignature },
+    'PolicyEngine v3 attached',
+  )
 }
 
 export interface TransferDwalletOwnershipResult {

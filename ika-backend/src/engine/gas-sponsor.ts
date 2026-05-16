@@ -93,7 +93,7 @@ export function getGasSponsorAddress(): Address {
 export async function signAndSendInstructions(
   instructions: Instruction[],
   opKind = 'recovery',
-  context: { dwalletAddress?: string; policyAddress?: string } = {},
+  context: { dwalletAddress?: string; policyAddress?: string; engineAddress?: string } = {},
 ): Promise<string> {
   const signer = getGasSponsor()
   const balanceBefore = await getGasSponsorBalanceLamports()
