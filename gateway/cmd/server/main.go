@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gagliardetto/solana-go"
+	"github.com/gagliardetto/solana-go/rpc"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
@@ -25,8 +26,7 @@ import (
 	gwmetrics "github.com/shinkalabs/andromeda-gateway/internal/metrics"
 	"github.com/shinkalabs/andromeda-gateway/internal/netsafety"
 	"github.com/shinkalabs/andromeda-gateway/internal/observability"
-	"github.com/shinkalabs/andromeda-gateway/internal/policies"
-	policyv3 "github.com/shinkalabs/andromeda-gateway/internal/policy"
+	"github.com/shinkalabs/andromeda-gateway/internal/policy"
 	"github.com/shinkalabs/andromeda-gateway/internal/pricing"
 	"github.com/shinkalabs/andromeda-gateway/internal/ratelimit"
 	"github.com/shinkalabs/andromeda-gateway/internal/redisclient"
@@ -170,7 +170,7 @@ func main() {
 	// dispatcher below still claims and POSTs deliveries.
 
 	// --- Policy subscriptions (policy PDA → api_key mapping) ---
-	policySubsStore := policies.NewSubscriptionsStore(db.Pool())
+	policySubsStore := policy.NewSubscriptionsStore(db.Pool())
 
 	// --- Solana log listener (Phase 2 — IDL-aware parser) ---
 	// Tenant resolver = policy_subscriptions lookup. Each on-chain event the
@@ -210,57 +210,35 @@ func main() {
 		logger.Info("future-sign watcher disabled — IKA_UPSTREAM_URL and INTERNAL_API_KEY not set")
 	}
 
-	// --- Policies service (optional — needs IKA_PROGRAM_ID + coordinator) ---
-	var policySvc *policies.Service
-	if cfg.IkaProgramID != "" && cfg.IkaCoordinatorAddress != "" && cfg.SolanaRPCURL != "" {
-		registry, err := policies.NewRegistry(
-			cfg.TemplateProgramIDsJSON, cfg.IkaProgramID, cfg.IkaCoordinatorAddress,
-		)
-		if err != nil {
-			logger.Error("policies registry init failed", "err", err)
-			os.Exit(1)
-		}
-		policySvc, err = policies.NewService(registry, cfg.SolanaRPCURL)
-		if err != nil {
-			logger.Error("policies service init failed", "err", err)
-			os.Exit(1)
-		}
-		policySvc.WithLogger(logger)
-		if cfg.GasSponsorKeypairJSON != "" {
-			sponsor, err := gasponsor.New(cfg.GasSponsorKeypairJSON, policySvc.RPCClient)
-			if err != nil {
-				logger.Error("gas sponsor init failed", "err", err)
-				os.Exit(1)
-			}
-			policySvc.WithGasSponsor(sponsor)
-			logger.Info("gas sponsor ready", "public_key", sponsor.PublicKey().String())
-		} else {
-			logger.Warn("gas sponsor disabled - set ANDROMEDA_GAS_SPONSOR_KEYPAIR to enable policy tx submission")
-		}
-		logger.Info("policies service ready", "templates_configured", len(registry.ProgramIDs))
-	} else {
-		logger.Info("policies service disabled — set IKA_PROGRAM_ID, IKA_COORDINATOR_ADDRESS and SOLANA_RPC_URL to enable")
-	}
-
 	// --- PolicyEngine v3 service (optional — needs ANDROMEDA_POLICY_ENGINE_PROGRAM_ID).
-	// Piggybacks on the legacy policySvc's RPC + gas sponsor when available so
-	// devnet/prod don't need duplicate credentials. F14 (2026-05-15) deployed the
-	// program to devnet at ARfJadMTH8mvAWprE8oMoRGNamKVDX9GV3URvudYyXgL.
-	var policyV3Svc *policyv3.Service
+	// Owns its own Solana RPC client + gas sponsor — the legacy `policies`
+	// package (8 mutually-exclusive templates) was retired on 2026-05-16 as
+	// part of F-CLEANUP-LEGACY-TOTAL. The program is deployed in devnet at
+	// ARfJadMTH8mvAWprE8oMoRGNamKVDX9GV3URvudYyXgL (F14, 2026-05-15).
+	var policyV3Svc *policy.Service
 	if cfg.PolicyEngineProgramID != "" {
 		pid, err := solana.PublicKeyFromBase58(cfg.PolicyEngineProgramID)
 		if err != nil {
 			logger.Error("policy-engine v3: invalid ANDROMEDA_POLICY_ENGINE_PROGRAM_ID", "err", err)
 			os.Exit(1)
 		}
-		policyV3Svc = policyv3.NewService(pid)
-		if policySvc != nil {
-			if policySvc.RPCClient != nil {
-				policyV3Svc.WithRPC(policySvc.RPCClient)
+		policyV3Svc = policy.NewService(pid)
+		if cfg.SolanaRPCURL != "" {
+			rpcClient := rpc.New(cfg.SolanaRPCURL)
+			policyV3Svc.WithRPC(rpcClient)
+			if cfg.GasSponsorKeypairJSON != "" {
+				sponsor, err := gasponsor.New(cfg.GasSponsorKeypairJSON, rpcClient)
+				if err != nil {
+					logger.Error("gas sponsor init failed", "err", err)
+					os.Exit(1)
+				}
+				policyV3Svc.WithGasSponsor(sponsor)
+				logger.Info("gas sponsor ready", "public_key", sponsor.PublicKey().String())
+			} else {
+				logger.Warn("gas sponsor disabled - set ANDROMEDA_GAS_SPONSOR_KEYPAIR to enable policy submit endpoints")
 			}
-			if policySvc.GasSponsor != nil {
-				policyV3Svc.WithGasSponsor(policySvc.GasSponsor)
-			}
+		} else {
+			logger.Warn("policy-engine v3: SOLANA_RPC_URL empty — /submit endpoints will return 503")
 		}
 		logger.Info("policy-engine v3 service ready", "program_id", pid.String())
 	} else {
@@ -282,7 +260,6 @@ func main() {
 		Redis:               rdb,
 		Audit:               auditRec,
 		WebhookStore:        whStore,
-		PolicyService:       policySvc,
 		PolicyV3Service:     policyV3Svc,
 		PolicySubscriptions: policySubsStore,
 		FutureSignStore:          fsStore,
