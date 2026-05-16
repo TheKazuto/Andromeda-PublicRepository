@@ -39,7 +39,7 @@
 use andromeda_auth::admin::verify_owner_admin;
 use andromeda_auth::hash::hashv;
 use andromeda_auth::human_message::{self, HumanMessageError, MAX_HUMAN_MESSAGE_BYTES};
-use andromeda_auth::precompile::check_sysvar_address;
+use andromeda_auth::precompile::{check_sysvar_address, ED25519_PRECOMPILE_ID};
 use andromeda_auth::challenge::{
     passkey_primary_use_challenge, passkey_session_open_challenge, primary_recover_challenge,
     quorum_contribute_challenge, quorum_session_open_challenge,
@@ -982,6 +982,118 @@ fn check_sysvar_addr(addr: &Address) -> Result<(), ProgramError> {
     check_sysvar_address(addr).map_err(|_| PolicyEngineError::AuthFailed.into())
 }
 
+// ── F7b — FHE-Gated sysvar walker ────────────────────────────────────────────
+//
+// Minimal Instructions-sysvar reader used by the `KIND_FHE_GATED` dispatch.
+// Mirrors the layout the runtime serialises:
+//   [0..2]  num_instructions u16 LE
+//   [2..2 + 2 * N] per-ix offset table (u16 LE pointing into the body table)
+// Each ix body:
+//   [0..2]  accounts_count u16 LE
+//   [2..2 + 33 * accounts_count] AccountMeta entries
+//   [next..+32] program_id (Pubkey)
+//   [next..+2] data_len u16 LE
+//   [next..+data_len] ix data
+//
+// `andromeda_auth::precompile` already exposes a higher-level matcher
+// (`verify_ed25519`) that searches for `(pubkey, message)` equality, but
+// FHE-Gated needs to *parse* the matched message to check the embedded
+// timestamp + authorize byte. We therefore walk the sysvar locally.
+
+#[inline]
+fn read_u16_le_local(buf: &[u8], offset: usize) -> Option<u16> {
+    let end = offset.checked_add(2)?;
+    if end > buf.len() {
+        return None;
+    }
+    Some(u16::from_le_bytes([buf[offset], buf[offset + 1]]))
+}
+
+/// Returns `(program_id_slice, ix_data_slice)` for the `i`-th instruction in
+/// the sysvar, or `None` when `i` is past the end. Returns `Err` on a
+/// malformed sysvar.
+#[allow(clippy::type_complexity)]
+fn read_ix_body_for_fhe(sysvar_data: &[u8], i: usize) -> Result<Option<(&[u8], &[u8])>, ()> {
+    const ACCOUNT_META_LEN: usize = 33;
+    const PROGRAM_ID_LEN: usize = 32;
+
+    if sysvar_data.len() < 2 {
+        return Err(());
+    }
+    let num_instructions = read_u16_le_local(sysvar_data, 0).ok_or(())? as usize;
+    if i >= num_instructions {
+        return Ok(None);
+    }
+    let table_start: usize = 2;
+    let off_ptr = table_start.checked_add(i.checked_mul(2).ok_or(())?).ok_or(())?;
+    let ix_offset = read_u16_le_local(sysvar_data, off_ptr).ok_or(())? as usize;
+    let accounts_count = read_u16_le_local(sysvar_data, ix_offset).ok_or(())? as usize;
+    let accounts_size = accounts_count.checked_mul(ACCOUNT_META_LEN).ok_or(())?;
+    let program_id_off = ix_offset
+        .checked_add(2)
+        .and_then(|x| x.checked_add(accounts_size))
+        .ok_or(())?;
+    if program_id_off
+        .checked_add(PROGRAM_ID_LEN)
+        .ok_or(())?
+        > sysvar_data.len()
+    {
+        return Err(());
+    }
+    let program_id = &sysvar_data[program_id_off..program_id_off + PROGRAM_ID_LEN];
+    let data_len_off = program_id_off + PROGRAM_ID_LEN;
+    let data_len = read_u16_le_local(sysvar_data, data_len_off).ok_or(())? as usize;
+    let data_off = data_len_off + 2;
+    if data_off.checked_add(data_len).ok_or(())? > sysvar_data.len() {
+        return Err(());
+    }
+    Ok(Some((program_id, &sysvar_data[data_off..data_off + data_len])))
+}
+
+/// Parses a long-record (Ed25519 / Secp256r1) precompile ix data buffer and
+/// returns `(pubkey_slice, message_slice)` for the first record whose offsets
+/// are self-references (`0xFFFF`). Cross-instruction references are rejected
+/// (`policy-engine` never emits them and the long-record dispatch wouldn't
+/// know how to follow them). Returns `None` on malformed data.
+fn first_ed25519_record_self(ix_data: &[u8]) -> Option<(&[u8], &[u8])> {
+    const HEADER_LEN: usize = 2;
+    const LONG_OFFSETS_LEN: usize = 14;
+    const SELF_INDEX: u16 = 0xFFFF;
+    const SIG_LEN: usize = 64;
+    const PK_LEN: usize = 32;
+
+    if ix_data.len() < HEADER_LEN + LONG_OFFSETS_LEN {
+        return None;
+    }
+    let n = ix_data[0] as usize;
+    if n == 0 {
+        return None;
+    }
+    let r = HEADER_LEN;
+    let sig_off = read_u16_le_local(ix_data, r)? as usize;
+    let sig_ix = read_u16_le_local(ix_data, r + 2)?;
+    let pk_off = read_u16_le_local(ix_data, r + 4)? as usize;
+    let pk_ix = read_u16_le_local(ix_data, r + 6)?;
+    let msg_off = read_u16_le_local(ix_data, r + 8)? as usize;
+    let msg_size = read_u16_le_local(ix_data, r + 10)? as usize;
+    let msg_ix = read_u16_le_local(ix_data, r + 12)?;
+    if sig_ix != SELF_INDEX || pk_ix != SELF_INDEX || msg_ix != SELF_INDEX {
+        return None;
+    }
+    if sig_off.checked_add(SIG_LEN)? > ix_data.len() {
+        return None;
+    }
+    let pk_end = pk_off.checked_add(PK_LEN)?;
+    if pk_end > ix_data.len() {
+        return None;
+    }
+    let msg_end = msg_off.checked_add(msg_size)?;
+    if msg_end > ix_data.len() {
+        return None;
+    }
+    Some((&ix_data[pk_off..pk_end], &ix_data[msg_off..msg_end]))
+}
+
 // ── Program entrypoints ──────────────────────────────────────────────────────
 
 #[program]
@@ -1360,13 +1472,320 @@ mod policy_engine_program {
                         PolicyEngineError::TimeLocked
                     );
                 }
-                KIND_ORACLE | KIND_PASSKEY | KIND_FHE_GATED => {
-                    // F5/F6/F7: storage layer ships in this fase, but real
-                    // enforcement requires additional context (Pyth aux feed,
-                    // Secp256r1 precompile inspection, FHE decision authority
-                    // signed instruction) that lands in F5b/F6b/F7b. For now
-                    // the rule is "declared but not enforced": the
-                    // applies_to gate above already passed, so we accept.
+                KIND_ORACLE => {
+                    // F5b — Oracle dispatch.
+                    //
+                    // Layout (mirror of ABI §3.5.4):
+                    //   sub_data[97]   config_applies_to u8
+                    //   sub_data[98]   feeds_count u8
+                    //   sub_data[99]   freshness_seconds_div16 u8
+                    //   sub_data[100]  min_confidence_bps_div4 u8
+                    //   sub_data[101..105] _pad_cfg0
+                    //   sub_data[105..105 + 80*N] feeds_flat
+                    //     each OracleFeed (80 B):
+                    //       [..32] feed_account Address
+                    //       [32..64] feed_owner Address
+                    //       [64..72] min_q64 i64 LE
+                    //       [72..80] max_q64 i64 LE
+                    //
+                    // For each feed, the caller must attach one trailing
+                    // aux account in `remaining_accounts` (after the sub-PDA)
+                    // whose `address` matches `feed_account` and whose `owner`
+                    // matches `feed_owner`. The aux account's data MUST start
+                    // with the canonical price layout (Andromeda v1):
+                    //   [0..32]  feed_id (opaque, not checked here)
+                    //   [32..40] price i64 LE
+                    //   [40..48] confidence u64 LE
+                    //   [48..56] _reserved
+                    //   [56..64] publish_time i64 LE
+                    //
+                    // Real Pyth `PriceUpdateV2` accounts ship the same three
+                    // critical fields (price / confidence / publish_time) but
+                    // at provider-defined offsets — an adapter layer on the
+                    // off-chain side normalises them into this canonical
+                    // 64-byte view before the tx is signed. Keeps the on-chain
+                    // dispatch cheap and protocol-agnostic.
+                    let count = sub_data[98] as usize;
+                    require!(
+                        count <= MAX_ORACLE_FEEDS,
+                        PolicyEngineError::InvalidRuleHeader
+                    );
+                    let freshness_secs = (sub_data[99] as i64).saturating_mul(16);
+                    // Collect feed metadata into a local buffer because we
+                    // need to drop the immutable sub_data borrow before
+                    // pulling aux accounts (some sub_data references can
+                    // still be live across the loop).
+                    let mut feeds: [([u8; 32], [u8; 32], i64, i64); MAX_ORACLE_FEEDS] =
+                        [([0u8; 32], [0u8; 32], 0i64, 0i64); MAX_ORACLE_FEEDS];
+                    for i in 0..count {
+                        let base = 105 + i * ORACLE_FEED_BYTES;
+                        let mut feed_acct = [0u8; 32];
+                        feed_acct.copy_from_slice(&sub_data[base..base + 32]);
+                        let mut feed_owner = [0u8; 32];
+                        feed_owner.copy_from_slice(&sub_data[base + 32..base + 64]);
+                        let min_q64 = i64::from_le_bytes(
+                            sub_data[base + 64..base + 72].try_into().unwrap(),
+                        );
+                        let max_q64 = i64::from_le_bytes(
+                            sub_data[base + 72..base + 80].try_into().unwrap(),
+                        );
+                        feeds[i] = (feed_acct, feed_owner, min_q64, max_q64);
+                    }
+                    drop(sub_data);
+
+                    for i in 0..count {
+                        let (expected_acct, expected_owner, min_q64, max_q64) =
+                            feeds[i];
+                        let aux_view = rem_iter
+                            .next()
+                            .ok_or(PolicyEngineError::InvalidRuleHeader)?
+                            .map_err(|_| PolicyEngineError::InvalidRuleHeader)?;
+                        require!(
+                            aux_view.address().as_array() == &expected_acct,
+                            PolicyEngineError::InvalidRuleHeader
+                        );
+                        require!(
+                            aux_view.owner().as_array() == &expected_owner,
+                            PolicyEngineError::OracleOwnerMismatch
+                        );
+                        let aux_data = aux_view
+                            .try_borrow()
+                            .map_err(|_| PolicyEngineError::InvalidRuleHeader)?;
+                        require!(
+                            aux_data.len() >= 64,
+                            PolicyEngineError::InvalidRuleHeader
+                        );
+                        let price = i64::from_le_bytes(
+                            aux_data[32..40].try_into().unwrap(),
+                        );
+                        let publish_time = i64::from_le_bytes(
+                            aux_data[56..64].try_into().unwrap(),
+                        );
+                        require!(
+                            publish_time.saturating_add(freshness_secs) >= current_ts,
+                            PolicyEngineError::OracleStale
+                        );
+                        require!(
+                            price >= min_q64 && price <= max_q64,
+                            PolicyEngineError::OracleOutOfBand
+                        );
+                    }
+                }
+                KIND_PASSKEY => {
+                    // F6b — Passkey dispatch.
+                    //
+                    // Layout (ABI §3.5.5):
+                    //   sub_data[97]  config_applies_to u8
+                    //   sub_data[98]  credentials_count u8
+                    //   sub_data[99..105] _pad_cfg0
+                    //   sub_data[105..105 + 128 * N] credentials_flat
+                    //     each PasskeyCredential (128 B):
+                    //       [..33]  pubkey (33 B compressed P-256)
+                    //       [33..64] _pad
+                    //       [64..96]  rp_id_hash
+                    //       [96..128] credential_id_hash
+                    //
+                    // The user signs the canonical `metadata_digest` via
+                    // WebAuthn — the caller attaches a Secp256r1 precompile
+                    // invocation in the same tx whose `(pubkey, message)` is
+                    // `(credential.pubkey, auth_data || sha256(cdj))`. The
+                    // clientDataJSON.challenge field MUST embed the
+                    // base64url-no-pad form of `metadata_digest`. The
+                    // dispatch routes through `andromeda_auth::verify_signature`
+                    // scheme=WEBAUTHN, which already handles the anchor check
+                    // + reconstruction + sysvar lookup.
+                    //
+                    // The caller attaches two trailing aux accounts per
+                    // passkey slot in `remaining_accounts`:
+                    //   aux[0].data = raw `authenticatorData` bytes
+                    //   aux[1].data = raw `clientDataJSON` bytes
+                    // The aux addresses are opaque (any pubkey); only the
+                    // data content matters. This avoids bloating the ix data
+                    // with two 192-byte fields on every `request_signature`.
+                    let count = sub_data[98] as usize;
+                    require!(
+                        count > 0 && count <= MAX_PASSKEY_CREDENTIALS,
+                        PolicyEngineError::InvalidRuleHeader
+                    );
+                    // Snapshot credential pubkeys (we need them after dropping
+                    // `sub_data`).
+                    let mut credentials: [[u8; 33]; MAX_PASSKEY_CREDENTIALS] =
+                        [[0u8; 33]; MAX_PASSKEY_CREDENTIALS];
+                    for i in 0..count {
+                        let base = 105 + i * PASSKEY_CREDENTIAL_BYTES;
+                        credentials[i].copy_from_slice(&sub_data[base..base + 33]);
+                    }
+                    drop(sub_data);
+
+                    // Pull aux accounts: auth_data first, then cdj.
+                    let auth_view = rem_iter
+                        .next()
+                        .ok_or(PolicyEngineError::PasskeyAssertionInvalid)?
+                        .map_err(|_| PolicyEngineError::PasskeyAssertionInvalid)?;
+                    let cdj_view = rem_iter
+                        .next()
+                        .ok_or(PolicyEngineError::PasskeyAssertionInvalid)?
+                        .map_err(|_| PolicyEngineError::PasskeyAssertionInvalid)?;
+                    let auth_data_ref = auth_view
+                        .try_borrow()
+                        .map_err(|_| PolicyEngineError::PasskeyAssertionInvalid)?;
+                    let cdj_ref = cdj_view
+                        .try_borrow()
+                        .map_err(|_| PolicyEngineError::PasskeyAssertionInvalid)?;
+
+                    // Verify the WebAuthn assertion using the metadata digest
+                    // as the canonical challenge.
+                    check_sysvar_addr(ctx.accounts.instructions_sysvar.address())?;
+                    let sysvar_view = ctx.accounts.instructions_sysvar.to_account_view();
+                    let sysvar_data_ref = sysvar_view
+                        .try_borrow()
+                        .map_err(|_| PolicyEngineError::AuthFailed)?;
+
+                    // Walk the registered credentials and accept the first one
+                    // whose pubkey matches a Secp256r1 precompile invocation
+                    // signing `(auth_data || sha256(cdj))`. `verify_signature`
+                    // also enforces the cdj anchor check on `metadata_digest`.
+                    let mut accepted = false;
+                    for i in 0..count {
+                        let mut slot = [0u8; MEMBER_SLOT_LEN];
+                        slot[0] = SCHEME_WEBAUTHN;
+                        slot[1..34].copy_from_slice(&credentials[i]);
+                        if verify_signature(VerifyInput {
+                            member_slot: &slot,
+                            challenge: &metadata_digest,
+                            instructions_sysvar_data: &sysvar_data_ref,
+                            webauthn_auth_data: &auth_data_ref,
+                            webauthn_client_data_json: &cdj_ref,
+                        })
+                        .is_ok()
+                        {
+                            accepted = true;
+                            break;
+                        }
+                    }
+                    drop(sysvar_data_ref);
+                    drop(cdj_ref);
+                    drop(auth_data_ref);
+                    require!(accepted, PolicyEngineError::PasskeyAssertionInvalid);
+                }
+                KIND_FHE_GATED => {
+                    // F7b — FHE-Gated dispatch.
+                    //
+                    // Layout (ABI §3.5.6):
+                    //   sub_data[97]  config_applies_to u8
+                    //   sub_data[98]  authorities_count u8
+                    //   sub_data[99]  freshness_seconds_div16 u8
+                    //   sub_data[100..105] _pad_cfg0
+                    //   sub_data[105..105 + 32 * N] authorities_flat
+                    //     each authority = 32-byte Ed25519 pubkey.
+                    //
+                    // The on-chain check looks for an Ed25519 precompile
+                    // invocation in the same tx whose `(pubkey, message)`
+                    // matches one of the configured authorities and a
+                    // canonical decision body of:
+                    //   `andromeda::fhe-decision::v1`
+                    //   || dwallet (32)
+                    //   || metadata_digest (32)
+                    //   || decision_timestamp (8 LE i64)
+                    //   || authorize (1 byte; MUST be 1)
+                    //
+                    // Total decision body = 27 + 32 + 32 + 8 + 1 = 100 bytes.
+                    let count = sub_data[98] as usize;
+                    require!(
+                        count > 0 && count <= MAX_FHE_AUTHORITIES,
+                        PolicyEngineError::InvalidRuleHeader
+                    );
+                    let freshness_secs = (sub_data[99] as i64).saturating_mul(16);
+                    let mut authorities: [[u8; 32]; MAX_FHE_AUTHORITIES] =
+                        [[0u8; 32]; MAX_FHE_AUTHORITIES];
+                    for i in 0..count {
+                        let base = 105 + i * 32;
+                        authorities[i].copy_from_slice(&sub_data[base..base + 32]);
+                    }
+                    drop(sub_data);
+
+                    check_sysvar_addr(ctx.accounts.instructions_sysvar.address())?;
+                    let sysvar_view = ctx.accounts.instructions_sysvar.to_account_view();
+                    let sysvar_data_ref = sysvar_view
+                        .try_borrow()
+                        .map_err(|_| PolicyEngineError::AuthFailed)?;
+
+                    const FHE_DECISION_DOMAIN: &[u8] = b"andromeda::fhe-decision::v1";
+                    const FHE_DECISION_LEN: usize = FHE_DECISION_DOMAIN.len() + 32 + 32 + 8 + 1;
+                    // Try every authority. For the matched authority, the
+                    // precompile lookup also enforces message-byte equality,
+                    // so we rebuild the canonical decision body for each
+                    // candidate timestamp range… actually the message has the
+                    // timestamp embedded, which we don't know up-front. We
+                    // therefore rely on `precompile::verify_ed25519` returning
+                    // `NoMatchingInvocation` when (pubkey, prefix) don't match
+                    // and parse the matched message ourselves once it does.
+                    //
+                    // Strategy: walk the Ed25519 precompile invocations in the
+                    // sysvar, parse each `(pubkey, message)`, and accept if
+                    // (a) pubkey ∈ authorities, (b) message length == 100,
+                    // (c) prefix == DOMAIN || dwallet || metadata_digest,
+                    // (d) authorize == 1, (e) age within freshness window.
+                    let dwallet_bytes = *dwallet_addr.as_array();
+                    let mut accepted = false;
+                    let mut idx = 0usize;
+                    while let Some((program_id, ix_data)) =
+                        read_ix_body_for_fhe(&sysvar_data_ref, idx)
+                            .map_err(|_| PolicyEngineError::FheDecisionInvalid)?
+                    {
+                        idx += 1;
+                        if program_id != ED25519_PRECOMPILE_ID.as_array().as_slice() {
+                            continue;
+                        }
+                        // Walk every record in this Ed25519 precompile ix
+                        // looking for a match. Records use the long-record
+                        // 14-byte offsets format documented in
+                        // `andromeda_auth::precompile`.
+                        if let Some((pk, msg)) = first_ed25519_record_self(ix_data) {
+                            if msg.len() != FHE_DECISION_LEN {
+                                continue;
+                            }
+                            // Match pubkey ∈ authorities.
+                            let mut found_authority = false;
+                            for a in authorities.iter().take(count) {
+                                if pk == a.as_slice() {
+                                    found_authority = true;
+                                    break;
+                                }
+                            }
+                            if !found_authority {
+                                continue;
+                            }
+                            if &msg[..FHE_DECISION_DOMAIN.len()] != FHE_DECISION_DOMAIN {
+                                continue;
+                            }
+                            let mut off = FHE_DECISION_DOMAIN.len();
+                            if &msg[off..off + 32] != &dwallet_bytes[..] {
+                                continue;
+                            }
+                            off += 32;
+                            if &msg[off..off + 32] != &metadata_digest[..] {
+                                continue;
+                            }
+                            off += 32;
+                            let ts_bytes: [u8; 8] = msg[off..off + 8]
+                                .try_into()
+                                .map_err(|_| PolicyEngineError::FheDecisionInvalid)?;
+                            let decision_ts = i64::from_le_bytes(ts_bytes);
+                            off += 8;
+                            let authorize = msg[off];
+                            if authorize != 1 {
+                                continue;
+                            }
+                            if decision_ts.saturating_add(freshness_secs) < current_ts {
+                                continue;
+                            }
+                            accepted = true;
+                            break;
+                        }
+                    }
+                    drop(sysvar_data_ref);
+                    require!(accepted, PolicyEngineError::FheDecisionMissing);
                 }
                 KIND_SESSION_KEY | KIND_RECOVERY => {
                     // F8b/F9: dedicated entrypoints handle session and
@@ -2323,6 +2742,7 @@ mod policy_engine_program {
                 primary_slot[0] == SCHEME_ED25519
                     || primary_slot[0] == SCHEME_SECP256K1
                     || primary_slot[0] == SCHEME_SECP256R1
+                    || primary_slot[0] == SCHEME_WEBAUTHN
                     || primary_slot[0] == SCHEME_OIDC_JWT,
                 PolicyEngineError::UnsupportedScheme
             );
@@ -4669,6 +5089,12 @@ pub struct RequestSignature {
     pub cpi_authority: UncheckedAccount,
     pub caller_program: UncheckedAccount,
     pub dwallet_program: UncheckedAccount,
+    // F6b/F7b: dispatch loop for `KIND_PASSKEY` and `KIND_FHE_GATED` reads the
+    // sysvar to locate the corresponding precompile invocation that signed the
+    // metadata digest / FHE decision. Older callers that only use Allowlist /
+    // Velocity / TimeLock / Oracle slots may attach the all-ones sentinel,
+    // but the slot must always be present in the accounts list.
+    pub instructions_sysvar: UncheckedAccount,
     pub clock: Sysvar<Clock>,
     pub system_program: Program<SystemProgram>,
     pub event_authority: EventAuthority,
