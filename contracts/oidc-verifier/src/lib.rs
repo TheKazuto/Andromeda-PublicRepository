@@ -224,8 +224,13 @@ pub fn verify(input: VerifyOidcInput<'_>) -> Result<ParsedOidc, OidcVerifyError>
     // ── the claims are authentic from here on ──
 
     // 6. nonce binding.
+    //
+    // L1 audit fix (2026-05-16): constant-time comparison. The recomputed
+    // nonce is derived from public inputs so the practical leak is low,
+    // but the verify path overall handles attacker-controlled JWT bytes
+    // and there's no good reason to short-circuit here.
     let nonce_recomputed = recompute_oidc_nonce(input.eph_pk, input.not_after_unix_ts, input.nonce_randomness);
-    if cl.nonce != &nonce_recomputed[..] {
+    if cl.nonce.len() != OIDC_NONCE_B64_LEN || !ct_eq(cl.nonce, &nonce_recomputed[..]) {
         return Err(E::NonceMismatch);
     }
 
@@ -283,6 +288,18 @@ pub fn recompute_oidc_nonce(eph_pk: &[u8; 32], not_after_unix_ts: u64, nonce_ran
 #[inline]
 fn contains_exact(set: &[&[u8]], v: &[u8]) -> bool {
     set.iter().any(|&e| e == v)
+}
+
+/// Constant-time slice equality (assumes equal lengths — caller MUST check
+/// `a.len() == b.len()` before calling).
+#[inline]
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    debug_assert_eq!(a.len(), b.len());
+    let mut diff: u8 = 0;
+    for i in 0..a.len() {
+        diff |= a[i] ^ b[i];
+    }
+    diff == 0
 }
 
 /// Saturating `u64 → i64`.

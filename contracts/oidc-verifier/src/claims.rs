@@ -30,7 +30,13 @@ const MAX_AUD_LEN: usize = 256;
 const MAX_SUB_LEN: usize = 512;
 const MAX_NONCE_LEN: usize = 64; // the canonical oidc_nonce is exactly 43 chars
 const MAX_INT_DIGITS: usize = 11; // a Unix-seconds timestamp is 10 digits; 11 is slack
+// M5 audit fix (2026-05-16): cap JSON nesting depth defensively. Real OIDC
+// payloads are flat; 16 is far above plausible legit content and below the
+// soft cap imposed by `MAX_PAYLOAD_DECODED = 1024`. Prevents pathological
+// inputs from chewing CU budget walking deeply nested ignored fields.
+const MAX_JSON_DEPTH: usize = 16;
 
+#[derive(Debug)]
 pub struct JwtHeader<'a> {
     pub kid: &'a [u8],
 }
@@ -96,11 +102,26 @@ impl<'a> Scanner<'a> {
                 Some(b'"') => return Ok((&self.d[start..self.i - 1], has_backslash)),
                 Some(b'\\') => {
                     has_backslash = true;
-                    // consume the escaped char (don't validate it — we only
-                    // care that it isn't the terminator); `\uXXXX` is fine,
-                    // the X's are just consumed as ordinary bytes afterwards.
-                    if self.bump().is_none() {
-                        return Err(e);
+                    // M4 audit fix (2026-05-16): validate the escape byte
+                    // against the JSON spec. Critical claims (iss/aud/sub/
+                    // nonce/kid) are rejected when `has_backslash` is set,
+                    // but enforcing strict JSON here closes the "junk passes
+                    // through ignored fields" footgun for any future caller
+                    // that consumes a non-critical claim from this scanner.
+                    match self.bump() {
+                        None => return Err(e),
+                        Some(b'"') | Some(b'\\') | Some(b'/') | Some(b'b')
+                        | Some(b'f') | Some(b'n') | Some(b'r') | Some(b't') => {}
+                        Some(b'u') => {
+                            // `\uXXXX` — require 4 hex digits.
+                            for _ in 0..4 {
+                                match self.bump() {
+                                    Some(c) if c.is_ascii_hexdigit() => {}
+                                    _ => return Err(e),
+                                }
+                            }
+                        }
+                        Some(_) => return Err(e),
                     }
                 }
                 Some(c) if c < 0x20 => return Err(e), // raw control byte — invalid JSON
@@ -127,7 +148,10 @@ impl<'a> Scanner<'a> {
                 None => return Err(e),
                 Some(b'"') => self.skip_string(e)?,
                 Some(b) if b == open => {
-                    depth += 1;
+                    depth = depth.checked_add(1).ok_or(e)?;
+                    if depth > MAX_JSON_DEPTH {
+                        return Err(e);
+                    }
                     self.i += 1;
                 }
                 Some(b) if b == close => {

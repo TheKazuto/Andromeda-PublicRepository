@@ -50,14 +50,36 @@ pub fn eq_256(a: &[u8; RSA_BYTES], b: &[u8; RSA_BYTES]) -> bool {
 
 /// `a < b` for two equal-length big-endian byte strings (used to reject a
 /// signature integer `≥ n`).
+///
+/// M3 audit fix (2026-05-16): constant-flow comparison. The classic
+/// short-circuiting variant could leak the most-significant differing-bit
+/// position via timing. `n` is public (it comes from the JWK registry), so
+/// the practical leak is minimal — but on-chain code should never rely on
+/// "the secret isn't here" arguments for crypto primitives.
+///
+/// Algorithm: walk every byte, tracking two 1-bit flags (`gt`, `lt`).
+/// `done` becomes 1 once either flag has been latched; remaining bytes are
+/// then ignored without branching on data values.
 pub fn lt_be(a: &[u8], b: &[u8]) -> bool {
     debug_assert_eq!(a.len(), b.len());
+    let mut lt: u8 = 0;
+    let mut gt: u8 = 0;
     for i in 0..a.len() {
-        if a[i] != b[i] {
-            return a[i] < b[i];
-        }
+        let ai = a[i];
+        let bi = b[i];
+        // `a_lt_b` = 1 iff ai < bi, 0 otherwise. Branchless via subtraction:
+        // (bi - ai) overflows when bi < ai, producing high bit. The XOR
+        // pattern flips the result so we get a clean 0/1.
+        let a_lt_b = ((ai as u16).wrapping_sub(bi as u16) >> 15) as u8 & 1;
+        let a_gt_b = ((bi as u16).wrapping_sub(ai as u16) >> 15) as u8 & 1;
+        // `done = gt | lt`. We only latch into lt/gt if `done == 0`, i.e.
+        // the first differing byte wins (matches big-endian semantics).
+        let done = gt | lt;
+        let mask = done ^ 1; // 1 while undecided, 0 once decided
+        lt |= mask & a_lt_b;
+        gt |= mask & a_gt_b;
     }
-    false // equal ⇒ not strictly less
+    lt == 1
 }
 
 // ── modexp: syscall on SBF, num-bigint on the host ─────────────
