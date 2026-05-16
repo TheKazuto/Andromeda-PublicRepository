@@ -14,18 +14,7 @@ describe('config', () => {
     const config = loadConfig(baseEnv as NodeJS.ProcessEnv)
     expect(config.base.serviceApiKey).toBe('test-key-with-32-chars-or-more-padding')
     expect(config.base.solanaCommitment).toBe('confirmed')
-    expect(config.recovery.enabled).toBe(false)
-  })
-
-  it('accepts policy enabled without program id (F11b-Phase4b: legacy fields no longer required)', () => {
-    // The legacy rules-policy adapter was deleted; `policyEnabled` now only
-    // gates the 410-sunset routers, so the program id / coordinator /
-    // keypair fields are optional at boot.
-    const config = loadConfig({
-      ...baseEnv,
-      IKA_RECOVERY_ENABLED: 'true',
-      IKA_RECOVERY_POLICY_ENABLED: 'true',
-    } as NodeJS.ProcessEnv)
-    expect(config.recovery.policyEnabled).toBe(true)
+    expect(config.oidc.enabled).toBe(false)
+    expect(config.passkey.enabled).toBe(false)
   })
 })

@@ -12,7 +12,6 @@ import { idempotencyMiddleware } from './http/idempotency.js'
 import { buildEngineRouter } from './engine/routes.js'
 import { closeIkaGrpcClient } from './engine/grpc-client.js'
 import { initGasSponsor } from './engine/gas-sponsor.js'
-import { buildRecoveryRouter } from './recovery/index.js'
 import { buildOidcMountRouter } from './oidc/index.js'
 import { startCleanupJob, stopCleanupJob } from './store/cleanup.js'
 import { fail } from './types.js'
@@ -107,11 +106,6 @@ async function main(): Promise<void> {
   }
 
   app.use('/v1/dwallet', buildEngineRouter(config))
-
-  if (config.recovery.enabled) {
-    logger.info({ policyEnabled: config.recovery.policyEnabled }, 'Recovery Layer enabled')
-    app.use('/v1/recovery', corsMiddleware, await buildRecoveryRouter(config))
-  }
 
   if (config.oidc.enabled) {
     logger.info(

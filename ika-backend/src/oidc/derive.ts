@@ -4,11 +4,10 @@
  * JWK-registry lookup hashes, plus the `subjectHash` used in logs/metrics.
  *
  * Wire formats are FROZEN (loginsocial.md §6.3/§6.4/§12 + `OIDC_VERIFIER_V1`).
- * Any change here MUST be matched in `contracts/oidc-verifier/src/lib.rs` and
- * `contracts/rules-policy/src/lib.rs` in the same commit.
- *
- * The `oidc-session-open` / `oidc-primary-use` challenges live in
- * `../recovery/challenge.ts` (already byte-mirrored against `contracts/auth`).
+ * Any change here MUST be matched in `contracts/oidc-verifier/src/lib.rs` in
+ * the same commit. The PolicyEngine v3 OIDC primary recovery (F9c) is blocked
+ * on `sol_big_mod_exp` and will mirror its `oidc-session-open` /
+ * `oidc-primary-use` challenges from `contracts/auth` when it lands.
  */
 
 import { createHash, createHmac } from 'node:crypto'

@@ -31,18 +31,6 @@ const baseSchema = z.object({
   allowedOrigins: z.array(z.string()).default([]),
 })
 
-const recoverySchema = z.object({
-  enabled: z.boolean().default(false),
-  policyEnabled: z.boolean().default(false),
-  policyProgramId: z.string().optional(),
-  ikaCoordinatorAddress: z.string().optional(),
-  challengeTtlSeconds: z.number().int().positive().default(300),
-  quorumSessionTtlSeconds: z.number().int().positive().default(600),
-  defaultCooldownSeconds: z.number().int().positive().default(604800),
-  minCooldownSeconds: z.number().int().positive().default(3600),
-  version: z.string().default('andromeda-ika-recovery-v1'),
-})
-
 // ── Login Social (`scheme = 4 = OidcJwt`) — see loginsocial.md §9/§17 ──
 //
 // Opt-in via IKA_OIDC_ENABLED. When disabled the surface is identical to the
@@ -98,7 +86,6 @@ const passkeySchema = z.object({
 
 export interface AppConfig {
   base: z.infer<typeof baseSchema>
-  recovery: z.infer<typeof recoverySchema>
   oidc: z.infer<typeof oidcSchema>
   passkey: z.infer<typeof passkeySchema>
   gasSponsor: z.infer<typeof gasSponsorSchema>
@@ -144,36 +131,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       errors.push(`base.${issue.path.join('.')}: ${issue.message}`)
     }
   }
-
-  const recoveryRaw = {
-    enabled: truthy(env.IKA_RECOVERY_ENABLED),
-    policyEnabled: truthy(env.IKA_RECOVERY_POLICY_ENABLED),
-    policyProgramId: env.IKA_RECOVERY_POLICY_PROGRAM_ID,
-    ikaCoordinatorAddress: env.IKA_COORDINATOR_ADDRESS,
-    challengeTtlSeconds: env.IKA_RECOVERY_CHALLENGE_TTL_SECONDS
-      ? Number.parseInt(env.IKA_RECOVERY_CHALLENGE_TTL_SECONDS, 10)
-      : 300,
-    quorumSessionTtlSeconds: env.IKA_RECOVERY_QUORUM_SESSION_TTL_SECONDS
-      ? Number.parseInt(env.IKA_RECOVERY_QUORUM_SESSION_TTL_SECONDS, 10)
-      : 600,
-    defaultCooldownSeconds: env.IKA_RECOVERY_POLICY_DEFAULT_COOLDOWN_SECONDS
-      ? Number.parseInt(env.IKA_RECOVERY_POLICY_DEFAULT_COOLDOWN_SECONDS, 10)
-      : 604_800,
-    minCooldownSeconds: env.IKA_RECOVERY_POLICY_MIN_COOLDOWN_SECONDS
-      ? Number.parseInt(env.IKA_RECOVERY_POLICY_MIN_COOLDOWN_SECONDS, 10)
-      : 3_600,
-    version: env.IKA_RECOVERY_VERSION,
-  }
-
-  const recoveryParse = recoverySchema.safeParse(recoveryRaw)
-  if (!recoveryParse.success) {
-    for (const issue of recoveryParse.error.issues) {
-      errors.push(`recovery.${issue.path.join('.')}: ${issue.message}`)
-    }
-  }
-  // F11b-Phase4b (2026-05-15): legacy rules-policy adapter deleted; the
-  // `policyEnabled` flag now only gates the 410-sunset routers, so the
-  // policy/coordinator/keypair fields are no longer required for boot.
 
   const oidcRaw = {
     enabled: truthy(env.IKA_OIDC_ENABLED),
@@ -264,8 +221,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     minBalanceSol: env.IKA_GAS_SPONSOR_MIN_BALANCE_SOL
       ? Number.parseFloat(env.IKA_GAS_SPONSOR_MIN_BALANCE_SOL)
       : 0.5,
-    maxGasPerOpLamports: env.IKA_RECOVERY_MAX_GAS_PER_OP_LAMPORTS
-      ? Number.parseInt(env.IKA_RECOVERY_MAX_GAS_PER_OP_LAMPORTS, 10)
+    maxGasPerOpLamports: env.IKA_GAS_SPONSOR_MAX_GAS_PER_OP_LAMPORTS
+      ? Number.parseInt(env.IKA_GAS_SPONSOR_MAX_GAS_PER_OP_LAMPORTS, 10)
       : 20_000_000,
   }
   const gasParse = gasSponsorSchema.safeParse(gasRaw)
@@ -282,7 +239,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
 
   return {
     base: baseParse.data!,
-    recovery: recoveryParse.data!,
     oidc: oidcParse.data!,
     passkey: passkeyParse.data!,
     gasSponsor: gasParse.data!,

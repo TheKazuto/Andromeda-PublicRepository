@@ -85,17 +85,7 @@ function requiresIdempotencyKey(req: Request): boolean {
   if (!shouldApply(req.method)) return false
   const path = requestPath(req)
   if (path.startsWith('/v1/dwallet/') && path.endsWith('/submit')) return true
-  if (path === '/v1/recovery/resolve') return true
-  return [
-    '/v1/recovery/primary/submit',
-    '/v1/recovery/quorum/session/open',
-    '/v1/recovery/quorum/session/contribute',
-    '/v1/recovery/quorum/session/finalize',
-    '/v1/recovery/quorum/session/close',
-    '/v1/recovery/policy/deploy',
-    '/v1/recovery/policy/admin/submit',
-    '/v1/recovery/policy/apply-pending',
-  ].some((prefix) => path === prefix || path.startsWith(`${prefix}/`))
+  return false
 }
 
 function hashBody(buf: Buffer | undefined): string {
