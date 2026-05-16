@@ -17,24 +17,14 @@ describe('config', () => {
     expect(config.recovery.enabled).toBe(false)
   })
 
-  it('rejects policy enabled without program id', () => {
-    expect(() =>
-      loadConfig({
-        ...baseEnv,
-        IKA_RECOVERY_ENABLED: 'true',
-        IKA_RECOVERY_POLICY_ENABLED: 'true',
-      } as NodeJS.ProcessEnv),
-    ).toThrow(/policyProgramId|gasSponsor/)
-  })
-
-  it('accepts policy enabled with program id and sponsor', () => {
+  it('accepts policy enabled without program id (F11b-Phase4b: legacy fields no longer required)', () => {
+    // The legacy rules-policy adapter was deleted; `policyEnabled` now only
+    // gates the 410-sunset routers, so the program id / coordinator /
+    // keypair fields are optional at boot.
     const config = loadConfig({
       ...baseEnv,
       IKA_RECOVERY_ENABLED: 'true',
       IKA_RECOVERY_POLICY_ENABLED: 'true',
-      IKA_RECOVERY_POLICY_PROGRAM_ID: 'RuLeSPoLiCy1111111111111111111111111111111',
-      IKA_GAS_SPONSOR_KEYPAIR: 'base58-encoded-keypair-or-path',
-      IKA_COORDINATOR_ADDRESS: 'V5giRyf1Rk9Lhn7sjq6LYnBv6TN8ZgSuRx654mPdYoA',
     } as NodeJS.ProcessEnv)
     expect(config.recovery.policyEnabled).toBe(true)
   })
