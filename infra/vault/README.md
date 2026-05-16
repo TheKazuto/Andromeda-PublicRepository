@@ -3,7 +3,7 @@
 Single-node HashiCorp Vault running on Railway. Holds the ed25519 keys for:
 
 - `andromeda-audit` — signs the gateway audit-log hash chain.
-- `andromeda-fhe` — signs FHE decisions consumed by the on-chain `fhe-gated` policy template.
+- `andromeda-fhe` — signs FHE decisions consumed by the `KIND_FHE_GATED` rule of the on-chain `policy-engine`.
 
 Vault is reachable **only** via the Railway private network. There is no public ingress. Administration happens through the Railway shell.
 
