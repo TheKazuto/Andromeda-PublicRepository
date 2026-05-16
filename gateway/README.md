@@ -124,11 +124,15 @@ challenge = sha256(
     || human_len_u16_le // 2 bytes, little-endian
     || human_message    // plain ASCII, ≤ 768 bytes
     || engine || dwallet || rule_kind || rule_index || rule_generation_le || expected_nonce_le
-    || config_hash || owner_slot || extras...
+    || config_hash || owner_slot
+    || (u16_le(len(extra[0])) || extra[0])   // M2 audit fix (2026-05-16): each
+    || (u16_le(len(extra[1])) || extra[1])   // extra is length-prefixed so two
+    || ...                                   // variable-length extras can never
+                                             // concatenate ambiguously.
 )
 ```
 
-`MAX_HUMAN_MESSAGE_BYTES = 768`. ASCII only (`0x20..=0x7E`).
+`MAX_HUMAN_MESSAGE_BYTES = 768`. ASCII only (`0x20..=0x7E`). Up to 12 extras (`ADMIN_CHALLENGE_MAX_EXTRAS`). Each extra ≤ 65 535 bytes.
 
 **Gateway response shape (`POST /v1/policy/rules/add/challenge`).**
 
