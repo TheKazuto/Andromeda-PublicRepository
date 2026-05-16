@@ -1,6 +1,6 @@
 # jwk-rotator
 
-Off-chain watcher for the Andromeda `jwk-registry` Solana program (`contracts/jwk-registry/`). Fetches the Google / Apple JWKS over TLS, diffs against the on-chain registry, and **proposes** new keys with the `authority` keypair. **Never activates / revokes / expires** — those are human (or multisig) actions after the on-chain timelock.
+Off-chain watcher for the Andromeda `jwk-registry` Solana program (`contracts/jwk-registry/`). Fetches the Google / Apple JWKS over TLS, diffs against the on-chain registry, **proposes** new keys with the `authority` keypair, and **auto-activates** PENDING entries once the timelock elapses (with a re-verification against the live JWKS — see Safety notes). **Never revokes / expires** — those are human (or multisig) actions.
 
 Used by **Login Social** (`loginsocial.md` §8): the on-chain registry is the trust root for the RSA public keys used to verify Google / Apple `id_token`s. Without this watcher running, new keys Google rotates in (every ~2 weeks) require manual `propose_jwk` calls; ACTIVE keys that disappear from the JWKS go unnoticed.
 
@@ -10,15 +10,20 @@ Stack: Node ≥ 20 · TypeScript · `tsx` · `@solana/web3.js` · Railway worker
 
 - **Google JWKS** — `https://www.googleapis.com/oauth2/v3/certs` (TLS, public).
 - **Apple JWKS** — `https://appleid.apple.com/auth/keys` (TLS, public; disabled by default).
-- **Solana RPC** — reads the on-chain `JwkRegistry` account, sends `propose_jwk` transactions signed by the `authority` keypair.
+- **Solana RPC** — reads the on-chain `JwkRegistry` account, sends `propose_jwk` and `activate_jwk` transactions signed by the `authority` + `payer` keypairs.
 - **Alert webhook** (optional) — Discord / Slack-compatible URL for ops notifications.
 
 ```
                     ┌── Google JWKS ──┐
 [jwk-rotator]──┤                  │── diff vs. on-chain ──▶ propose_jwk
                     └── Apple JWKS ───┘                            │
-                                                              alert ops
-                                                              (webhook / stdout)
+                                                                  │
+                                          re-verify JWKS ──▶ activate_jwk
+                                          (timelock elapsed)
+                                                              │
+                                                              ▼
+                                                          alert ops
+                                                          (webhook / stdout)
 ```
 
 ## Project layout
@@ -70,9 +75,11 @@ See `.env.example` for the canonical list. Highlights:
 | `JWK_REGISTRY_SEED` | no | 32 zeros | Hex-encoded 32-byte registry seed. The canonical seed is all-zero. |
 | `JWK_AUTHORITY_KEYPAIR` | one of the two | — | File path to the authority keypair JSON. Local dev. |
 | `JWK_AUTHORITY_KEYPAIR_JSON` | one of the two | — | Inline JSON array of 64 bytes. Takes precedence over the file path. Use this on Railway / PaaS. |
+| `JWK_REGISTRY_PAYER_KEYPAIR` | yes for write ops (file) | — | File path to a SEPARATE keypair that pays tx fees. MUST be a different pubkey from the authority — the on-chain `AuthorityAction` struct has authority and payer as distinct `Signer` slots; aliasing them fails with "instruction tries to borrow reference for an account which is already borrowed". |
+| `JWK_REGISTRY_PAYER_KEYPAIR_JSON` | yes for write ops (inline) | — | Inline JSON array of 64 bytes. Same role as above, for Railway / PaaS. Takes precedence over the file path. |
 | `POLL_INTERVAL_SECONDS` | no | `3600` | Watcher loop interval. |
 | `GOOGLE_ENABLED` | no | `true` | Enable the Google provider. |
-| `GOOGLE_AUDIENCE` | yes if Google enabled | — | The auth-broker `client_id` registered at Google. Must equal the on-chain `OIDC_ALLOWED_AUDIENCES` in `rules-policy`. |
+| `GOOGLE_AUDIENCE` | yes if Google enabled | — | The auth-broker `client_id` registered at Google. Must equal the on-chain `OIDC_ALLOWED_AUDIENCES` in the `policy-engine`. |
 | `APPLE_ENABLED` | no | `true` | Enable the Apple provider. |
 | `APPLE_AUDIENCE` | yes if Apple enabled | — | Apple Services ID. |
 | `ALERT_WEBHOOK_URL` | no | — | POST destination for alerts. Empty = stdout only. |
@@ -117,23 +124,26 @@ Bootstrap-mode extras (ignored in watcher mode):
 
 ## Operations
 
-The watcher proposes; **humans activate, revoke, expire**. Operational procedures (rotation, emergency revoke, expiry, role rotation) are documented in [`docs/RUNBOOK_JWK_ROTATION.md`](../docs/RUNBOOK_JWK_ROTATION.md).
+The watcher proposes and auto-activates; **humans still revoke and expire**. Operational procedures (emergency revoke, expiry, role rotation) are documented in [`docs/RUNBOOK_JWK_ROTATION.md`](../docs/RUNBOOK_JWK_ROTATION.md).
 
 Common alerts you may see:
 
 | Alert | What it means | Action |
 |---|---|---|
-| `proposed new JWK ... NEEDS ACTIVATION` | New key in the provider's JWKS; watcher proposed it. | After the timelock (1h devnet), run `activate_jwk`. |
+| `proposed new JWK ... NEEDS ACTIVATION` | New key in the provider's JWKS; watcher proposed it. | None — the next watcher cycle after the timelock (1h devnet) auto-activates if the JWKS still advertises the kid + modulus. |
+| `activated PENDING JWK slot=N ... (re-verified against live JWKS)` | A PENDING entry passed the post-timelock JWKS re-check and was activated automatically. | None — informational. |
+| `PENDING entry slot=N ... has no matching kid+modulus in the live JWKS — refusing to auto-activate` | The proposed entry doesn't match what Google / Apple currently advertise. Either the provider rotated faster than expected, or the propose was malicious. | Investigate. If legitimate, manually `expire`/`revoke` the stale PENDING and let the watcher re-propose. If malicious, emergency revoke + investigate the authority key. |
 | `ACTIVE entry slot=N has a kid that is NOT in the live JWKS` (critical) | Possible key compromise OR the key aged out before grace. | Investigate; consider emergency revoke (RUNBOOK §4). |
 | `ACTIVE entry expires at ... with no ACTIVE/PENDING successor` | Approaching expiry without a successor proposed. | Check the provider's JWKS for the new key; if not present yet, no action — provider will publish before expiry. |
 | `RegistryFull` (critical) | All 8 slots are PENDING / ACTIVE; no recyclable slot. | Expire past-grace entries to free slots (RUNBOOK §3). |
 
 ## Safety notes
 
-- **The authority key controls the registry.** A leak lets an attacker propose a malicious JWK (and after the timelock, activate it themselves if they keep the key). On devnet pre-alpha this is contained (data wiped at Alpha 1); for mainnet, **move the authority to a Squads M-of-N multisig** before any real funds rely on it (RUNBOOK §5).
-- The watcher is single-signer by design. It cannot revoke, expire or activate — even if compromised, the worst it can do is fill the registry with PENDING entries (caps at 8 slots; ops can revoke + expire to clean up).
-- `JWK_AUTHORITY_KEYPAIR_JSON` in Railway is encrypted at rest and visible only to project members. For local dev, keep `JWK_AUTHORITY_KEYPAIR` files in `.secrets/` (root `.gitignore` covers that path).
-- The watcher posts a `JwkProposed` event on-chain when it successfully proposes — the audit trail is on-chain regardless of whether the alert webhook fires.
+- **The authority key controls the registry.** A leak lets an attacker propose a malicious JWK; after the timelock, the watcher would auto-activate it (with a JWKS re-verification — see "Auto-activate" below — but a sufficiently sophisticated attacker could time their attempt around the JWKS state). On devnet pre-alpha this is contained (data wiped at Alpha 1); for mainnet, **move the authority to a Squads M-of-N multisig** before any real funds rely on it (RUNBOOK §5).
+- **Auto-activate with JWKS re-verification.** When a PENDING entry's timelock elapses, the watcher re-fetches the provider's JWKS over TLS and only calls `activate_jwk` if the entry's `(iss, aud, kid)` AND `modulus` byte-for-byte match a key currently advertised by Google / Apple. A forged JWK proposed by a compromised authority cannot be activated unless the attacker also makes Google / Apple advertise the same modulus — which is impossible. The TLS roots of the JWKS endpoints are the actual trust anchor.
+- **`JWK_REGISTRY_PAYER_KEYPAIR` is MANDATORY for mainnet, dedicated.** The on-chain `AuthorityAction` struct has authority and payer as distinct Signer slots — they cannot alias. On devnet pre-alpha you may reuse the Solana CLI operator key (also the program upgrade authority) as the payer for convenience; **on mainnet this is forbidden**: a payer keypair must be generated specifically for this worker, funded with a small SOL balance (~0.1 SOL is enough for years of tx fees), and stored separately. Otherwise a Railway secret leak gives the attacker BOTH the upgrade authority of the `jwk-registry` program AND the payer that signs the watcher's txs — a compounded blast radius.
+- `JWK_AUTHORITY_KEYPAIR_JSON` and `JWK_REGISTRY_PAYER_KEYPAIR_JSON` in Railway are encrypted at rest and visible only to project members. For local dev, keep `*_KEYPAIR` files in `.secrets/` (root `.gitignore` covers that path).
+- The watcher posts `JwkProposed` and `JwkActivated` events on-chain — the audit trail is on-chain regardless of whether the alert webhook fires.
 
 ## See also
 
