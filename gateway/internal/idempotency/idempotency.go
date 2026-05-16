@@ -59,6 +59,14 @@ type MiddlewareOptions struct {
 	// audit-log the replay. Errors from the callback are logged but never
 	// fail the response.
 	OnReplay func(r *http.Request, key string, status int)
+	// RequireKey, when set and returning true for the request, makes the
+	// `Idempotency-Key` header MANDATORY: missing header → 400
+	// `missing_idempotency_key`. Wire this from the route catalogue so
+	// destructive mutating routes (init, add/update/remove rule,
+	// pause/resume/revoke, request-signature submit, sign/presign submit,
+	// recovery primary submit, DKG submit, future-sign submit) cannot be
+	// retried without a key.
+	RequireKey func(*http.Request) bool
 }
 
 // New returns a chi-style middleware. When Redis is nil it returns a no-op
@@ -92,6 +100,14 @@ func handle(w http.ResponseWriter, r *http.Request, next http.Handler, opts Midd
 	}
 	key := strings.TrimSpace(r.Header.Get(HeaderName))
 	if key == "" {
+		// Hard-fail when the route requires the header. Keeps dashboard
+		// retries from accidentally submitting the same destructive
+		// mutation twice on a transient network blip.
+		if opts.RequireKey != nil && opts.RequireKey(r) {
+			writeJSONError(w, http.StatusBadRequest, "missing_idempotency_key",
+				"Idempotency-Key header is required for this route")
+			return
+		}
 		next.ServeHTTP(w, r)
 		return
 	}

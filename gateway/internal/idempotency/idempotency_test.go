@@ -88,6 +88,30 @@ func TestMissingKeyIsPassthrough(t *testing.T) {
 	}
 }
 
+// F10: RequireKey predicate forces 400 when the header is missing on routes
+// catalogued with `RequiresIdempotencyKey: true`.
+func TestMissingKeyRejectedWhenRequired(t *testing.T) {
+	var calls int32
+	mw, _ := newMW(t, MiddlewareOptions{
+		RequireKey: func(r *http.Request) bool { return r.URL.Path == "/must" },
+	})
+	rec := do(t, mw, countingHandler(201, `{}`, &calls), http.MethodPost, "/must", `{}`, nil)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("missing key on required route: code=%d, want 400", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "missing_idempotency_key") {
+		t.Fatalf("body=%q, want missing_idempotency_key", rec.Body.String())
+	}
+	if calls != 0 {
+		t.Fatalf("handler should not run, ran %d times", calls)
+	}
+	// Same predicate but path doesn't match → passthrough.
+	rec2 := do(t, mw, countingHandler(201, `{}`, &calls), http.MethodPost, "/optional", `{}`, nil)
+	if rec2.Code != 201 || calls != 1 {
+		t.Fatalf("non-required route passthrough: code=%d calls=%d", rec2.Code, calls)
+	}
+}
+
 func TestKeyLengthBounds(t *testing.T) {
 	var calls int32
 	mw, _ := newMW(t, MiddlewareOptions{})

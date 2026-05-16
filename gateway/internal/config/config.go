@@ -64,6 +64,13 @@ type Config struct {
 	IkaCoordinatorAddress  string
 	GasSponsorKeypairJSON  string
 
+	// PolicyEngineProgramID is the on-chain address of the deployed
+	// PolicyEngine v3 program (the unified successor to the 8 legacy
+	// templates). When empty, every /v1/policy/* mutating route returns
+	// 503 from `policy.Service.requireSubmitWiring`.
+	// Devnet: ARfJadMTH8mvAWprE8oMoRGNamKVDX9GV3URvudYyXgL (deployed 2026-05-15).
+	PolicyEngineProgramID string
+
 	// Base URL for SDK artifacts published by the build-sdk GitHub Action
 	// (e.g. https://github.com/shinkalabs/andromeda/releases/download).
 	// /v1/policies/{address}/sdk concatenates `<base>/<tag>/<template>-ts-client.tgz`.
@@ -166,6 +173,7 @@ func Load() *Config {
 		IkaProgramID:           getenv("IKA_PROGRAM_ID", ""),
 		IkaCoordinatorAddress:  getenv("IKA_COORDINATOR_ADDRESS", ""),
 		GasSponsorKeypairJSON:  getenv("ANDROMEDA_GAS_SPONSOR_KEYPAIR", ""),
+		PolicyEngineProgramID:  getenv("ANDROMEDA_POLICY_ENGINE_PROGRAM_ID", ""),
 		SDKBaseURL:             strings.TrimRight(getenv("ANDROMEDA_SDK_BASE_URL", ""), "/"),
 		SDKVersionTag:          getenv("ANDROMEDA_SDK_VERSION_TAG", "sdk-v0.1.0"),
 		DashboardBaseURL:       strings.TrimRight(getenv("ANDROMEDA_DASHBOARD_BASE_URL", ""), "/"),

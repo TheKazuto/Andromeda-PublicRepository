@@ -10,6 +10,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 
 	"github.com/shinkalabs/andromeda-gateway/internal/auth"
+	"github.com/shinkalabs/andromeda-gateway/internal/mcp"
 	"github.com/shinkalabs/andromeda-gateway/internal/ratelimit"
 	"github.com/shinkalabs/andromeda-gateway/internal/routes"
 	"github.com/shinkalabs/andromeda-gateway/internal/store"
@@ -215,6 +216,15 @@ func rateLimitFor(sub *store.Subscription, class string) (rps, burst int) {
 func (s *Server) chargeQuota(routeKey string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// F13b: an MCP loopback call has already been charged by the
+			// per-tool mcpCharger at the JSON-RPC entry point — billing
+			// twice would double-debit the tenant. The marker is set only
+			// by makeLoopbackHandler inside the gateway process, so it
+			// cannot be spoofed by an external caller.
+			if mcp.IsLoopback(r.Context()) {
+				next.ServeHTTP(w, r)
+				return
+			}
 			a := authFrom(r)
 			if a == nil || a.Subscription == nil {
 				writeError(w, http.StatusForbidden, "no_active_subscription", "no active subscription")

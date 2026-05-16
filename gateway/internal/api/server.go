@@ -23,6 +23,7 @@ import (
 	gwmetrics "github.com/shinkalabs/andromeda-gateway/internal/metrics"
 	"github.com/shinkalabs/andromeda-gateway/internal/netsafety"
 	"github.com/shinkalabs/andromeda-gateway/internal/policies"
+	policyv3 "github.com/shinkalabs/andromeda-gateway/internal/policy"
 	"github.com/shinkalabs/andromeda-gateway/internal/pricing"
 	"github.com/shinkalabs/andromeda-gateway/internal/ratelimit"
 	"github.com/shinkalabs/andromeda-gateway/internal/routes"
@@ -46,6 +47,7 @@ type Server struct {
 	auditReader      *audit.Reader
 	webhookStore     *webhooks.Store
 	policyService    *policies.Service
+	policyV3Service  *policyv3.Service
 	futureSignStore          *futuresign.Store
 	futureSignWatcherRunning bool
 	mcpTools                 *mcp.ToolRegistry
@@ -72,6 +74,7 @@ type Deps struct {
 	Audit               *audit.Recorder
 	WebhookStore        *webhooks.Store
 	PolicyService       *policies.Service
+	PolicyV3Service     *policyv3.Service
 	PolicySubscriptions *policies.SubscriptionsStore
 	FutureSignStore     *futuresign.Store
 	// FutureSignWatcherRunning signals that the in-process watcher goroutines
@@ -92,6 +95,11 @@ func NewServer(d Deps) *Server {
 		Redis:           d.Redis,
 		Logger:          d.Logger,
 		APIKeyIDFromCtx: apiKeyIDFromRequest,
+		// F10 hardening: enforce mandatory `Idempotency-Key` on routes that
+		// catalogue themselves with `RequiresIdempotencyKey: true`. The
+		// predicate matches by method + literal path *prefix* (handles chi's
+		// `{param}` placeholders by stripping the trailing segment match).
+		RequireKey: routes.RequiresIdempotencyKeyForRequest,
 	}
 	if d.Audit != nil {
 		idemOpts.OnReplay = func(r *http.Request, key string, status int) {
@@ -170,6 +178,7 @@ func NewServer(d Deps) *Server {
 		auditReader:      reader,
 		webhookStore:     d.WebhookStore,
 		policyService:    d.PolicyService,
+		policyV3Service:  d.PolicyV3Service,
 		futureSignStore:          d.FutureSignStore,
 		futureSignWatcherRunning: d.FutureSignWatcherRunning,
 		mcpTools:                 tools,
@@ -243,7 +252,13 @@ func (s *Server) Router() http.Handler {
 	}
 
 	// ----- Public proxied API -----
+	// Local routes (PolicyEngine v3) are not proxied — they're mounted
+	// directly by the PolicyEngine service in its own group below. The
+	// catalogue entry still feeds pricing / metrics / OpenAPI / MCP tools.
 	for _, route := range routes.All {
+		if route.Local {
+			continue
+		}
 		s.registerProxyRoute(r, route)
 	}
 
@@ -292,6 +307,27 @@ func (s *Server) Router() http.Handler {
 			sub.Use(s.chargeQuota("gateway.policies.admin"))
 			s.policyService.MountRoutes(sub)
 			s.policyService.MountSDKRoute(sub)
+		})
+	}
+
+	// ----- PolicyEngine v3 (F11b: unified successor of the 8 legacy templates) -----
+	// The v3 surface lives at `/v1/policy/*`. Routes in the catalogue are
+	// flagged `Local: true` so registerProxyRoute skips them — the handlers
+	// build Solana transactions locally (init, add_rule, items, request_signature,
+	// recover_as_primary, quorum_session_*, passkey_session_*).
+	//
+	// Auth: per-route scope comes from the catalogue (AdminScope for init /
+	// add_rule / items; ScopeWrite for the user-facing recover / use / submit
+	// flows). The route-level `chargeQuota(route.Key)` charges per-tool cost
+	// via the same pricer as MCP.
+	if s.policyV3Service != nil {
+		r.Group(func(sub chi.Router) {
+			sub.Use(s.requireAPIKey)
+			sub.Use(s.requireSubscription)
+			sub.Use(s.applyRateLimitFor(routes.RateClassTx))
+			sub.Use(s.idempotencyChain)
+			sub.Use(s.chargeQuota("gateway.policy-engine"))
+			s.policyV3Service.MountRoutes(sub)
 		})
 	}
 
@@ -350,6 +386,16 @@ func (s *Server) Router() http.Handler {
 
 	// ----- /admin/* moved entirely to the backend service (M4). The
 	// gateway only keeps the shared-secret guard on /metrics. -----
+
+	// F13b: wire the MCP loopback handler. Local routes (PolicyEngine v3)
+	// catalogue themselves as MCP tools but are served in-process — when
+	// an MCP client calls one, the tool handler synthesises a sibling
+	// *http.Request and serves it on this very mux. The registry was
+	// built in NewServer (before the router existed), so we forward-inject
+	// the reference here.
+	if s.mcpTools != nil {
+		s.mcpTools.SetLoopbackHandler(r)
+	}
 
 	return r
 }
