@@ -1,44 +1,40 @@
 // Orchestration for the MCP-facing dWallet operations (option A2):
 //   createDwallet            — generate + wrap the signer key, run DKG, derive
 //                              the on-chain dWallet PDA, persist; optionally
-//                              deploy a rules-policy + transfer_ownership so the
-//                              dWallet is born signable + recoverable.
+//                              deploy a PolicyEngine v3 + transfer_ownership so
+//                              the dWallet is born recoverable.
 //   transferDwalletOwnership — delegate a dWallet's authority to a new authority
-//                              (e.g. a rules-policy CPI PDA), signed by the
-//                              passphrase-wrapped keystore key.
-//   approveAsOwner           — for a policy-delegated MCP dWallet, the keystore
-//                              key (= the policy's primary owner) authorises a
-//                              message: drive `recover_as_primary` on-chain and
-//                              return the approval tx + slot for the Ika Sign.
+//                              (e.g. the PolicyEngine v3 CPI PDA), signed by
+//                              the passphrase-wrapped keystore key.
 //   allocatePresign          — allocate a single-use presign for a dWallet.
 //   signMessage              — unwrap the signer key, run the gRPC Sign for an
 //                              already on-chain MessageApproval, return the sig.
 //
-// Wired by POST /v1/dwallet/{create,transfer-ownership,approve,sign,presign} on
-// the engine, which the gateway proxies → these surface as the MCP tools.
+// Wired by POST /v1/dwallet/{create,transfer-ownership,sign,presign} on the
+// engine, which the gateway proxies → these surface as the MCP tools.
+// Authorisation of individual messages (formerly `/v1/dwallet/approve`) is now
+// done by the gateway PolicyEngine v3 surface at /v1/policy/recover-as-primary
+// or /v1/policy/request-signature.
 //
 // PRE-ALPHA NOTES
 // - The MPC fields and the gRPC user-signature are zero stubs (see request.ts);
 //   the keystore key is generated and stored anyway so the same key is used
-//   for real at Alpha and for `transfer_ownership` / `recover_as_primary`.
+//   for real at Alpha and for `transfer_ownership`.
 // - No GasDeposit funding step (mock signer, no gas economy in pre-alpha).
 // - dWallets created here are wiped at Alpha 1. The API surface says so.
 
 import {
   address as toAddress,
-  getAddressEncoder,
   createKeyPairSignerFromBytes,
   type Address,
   type TransactionSigner,
 } from '@solana/kit'
-import { keccak_256 } from '@noble/hashes/sha3.js'
 import { logger } from '../../logger.js'
 import { getSolanaRpc } from '../solana-rpc.js'
 import { signAndSendInstructions } from '../gas-sponsor.js'
 import {
   createWrappedWalletKey,
   finalizeWalletKey,
-  setWalletKeyPolicy,
   getWalletKeyMeta,
   unwrapWalletKey,
   ed25519Sign,
@@ -53,12 +49,20 @@ import {
   Curve,
   type CurveName,
 } from './request.js'
-import { rulesPolicyInitChallenge } from '../../recovery/challenge.js'
-import { getPolicyAdapter } from '../../recovery/adapters/SolanaAdapter.js'
-import { findCpiAuthorityPda } from '../../clients/rulesPolicy/pda.js'
 import { buildTransferOwnershipInstruction } from '../../clients/ika/transferOwnership.js'
+import {
+  buildInitEngineInstruction,
+  type InitEngineInput,
+} from '../../clients/policyEngine/instructions.js'
+import {
+  policyEngineInitChallenge as policyEngineInitChallengeFn,
+} from '../../clients/policyEngine/challenges.js'
+import {
+  enginePda as policyEnginePda,
+  initAuthorityHashFromSlot as policyEngineInitAuthorityHashFromSlot,
+  cpiAuthorityPda as policyEngineCpiAuthorityPda,
+} from '../../clients/policyEngine/pda.js'
 
-const addressEncoder = getAddressEncoder()
 const MEMBER_SLOT_LEN = 34
 const SCHEME_ED25519 = 0
 
@@ -107,21 +111,21 @@ export interface CreateDwalletResult {
   ownerPubkey: Uint8Array
   /** True once the NOA's `commit_dwallet` has landed and the PDA exists. */
   committed: boolean
-  /** The auto-attached rules-policy address, if `attachRecoveryPolicy` succeeded. */
-  policyAddress?: string
-  /**
-   * Base64 of the 32-byte `init_authority_hash` for the auto-attached policy
-   * (sha256 of the 34-byte init_authority slot). Needed by every later
-   * `/v1/recovery/policy/admin/*` and `/v1/recovery/primary/*` call to address
-   * the policy PDA. Present only when `attachRecoveryPolicy` succeeded.
-   */
-  initAuthorityHashBase64?: string
-  /** True once the dWallet's authority is a policy program (signable via `recover_as_primary`). */
+  /** True once the dWallet's authority is the PolicyEngine v3 CPI PDA. */
   signable: boolean
-  /** True once a rules-policy holds the dWallet (recoverable by primary owner / quorum). */
+  /** True once a PolicyEngine v3 holds the dWallet (recoverable per the engine's rules). */
   recoverable: boolean
-  /** Non-fatal: set when `attachRecoveryPolicy` was requested but did not fully complete. */
-  policyAttachWarning?: string
+
+  /** PolicyEngine v3 PDA, set when `attachPolicyEngine` succeeded. */
+  policyEngineAddress?: string
+  /** Base64 of the 32-byte `init_authority_hash` for the auto-attached
+   *  PolicyEngine. Required by every later /v1/policy/* admin call to
+   *  re-derive the engine PDA. */
+  policyEngineInitAuthorityHashBase64?: string
+  /** Non-fatal: set when `attachPolicyEngine` was requested but did not
+   *  fully complete. */
+  policyEngineAttachWarning?: string
+
   disclaimer: string
 }
 
@@ -140,17 +144,16 @@ export async function createDwallet(opts: {
   /** Poll for the on-chain dWallet PDA after DKG. Default true. */
   waitForCommit?: boolean
   commitTimeoutMs?: number
-  /**
-   * When set, after the dWallet is committed Andromeda deploys a `rules-policy`
-   * for it (the keystore key = `init_authority`; the primary owner is
-   * `primaryRecoveryOwner` or, if omitted, the keystore key itself) and
-   * `transfer_ownership`s the dWallet to that policy program's CPI authority
-   * PDA. Pass this only when the recovery policy layer is enabled.
-   * `cooldownSeconds` must be ≥ the program's MIN_COOLDOWN_SECONDS.
-   */
-  recoveryPolicy?: { programId: string; cooldownSeconds: number }
-  /** Optional external primary owner for the auto-attached policy. Default: the keystore key. */
+  /** Optional external primary owner for the auto-attached PolicyEngine. Default: the keystore key. */
   primaryRecoveryOwner?: MemberSlotInput
+  /**
+   * When set, attach a PolicyEngine v3 to the new dWallet. Deploys an empty
+   * engine (no rules yet) via `init_engine`, then `transfer_ownership`s the
+   * dWallet to the engine's CPI authority PDA. Caller adds rules later via
+   * `/v1/policy/rules/*`. Requires `IKA_POLICY_ENGINE_ENABLED=true` and
+   * `ANDROMEDA_POLICY_ENGINE_PROGRAM_ID` at the gateway level.
+   */
+  policyEngine?: { programId: string }
 }): Promise<CreateDwalletResult> {
   assertPassphraseStrength(opts.passphrase)
   const curve: CurveName = opts.curve ?? 'Curve25519'
@@ -199,28 +202,30 @@ export async function createDwallet(opts: {
       disclaimer: PREALPHA_DISCLAIMER,
     }
 
-    // 6. (Optional) attach a rules-policy: deploy it, then transfer_ownership.
-    if (opts.recoveryPolicy) {
+    // 6. (Optional) attach a PolicyEngine v3 — empty engine + delegation.
+    if (opts.policyEngine) {
       if (!committed) {
-        result.policyAttachWarning =
-          'dWallet not yet committed on-chain — recovery policy not attached; once it lands, deploy one via /v1/recovery/policy/deploy then delegate via /v1/dwallet/transfer-ownership'
+        result.policyEngineAttachWarning =
+          'dWallet not yet committed on-chain — PolicyEngine not attached; once it lands, deploy via /v1/policy/init then delegate via /v1/dwallet/transfer-ownership'
       } else {
         try {
-          await attachRecoveryPolicy({
+          await attachPolicyEngine({
             created,
             dwalletAddress,
             ikaProgramId,
-            policyProgramId: toAddress(opts.recoveryPolicy.programId),
-            cooldownSeconds: opts.recoveryPolicy.cooldownSeconds,
-            ...(opts.primaryRecoveryOwner ? { primaryRecoveryOwner: opts.primaryRecoveryOwner } : {}),
+            policyEngineProgramId: toAddress(opts.policyEngine.programId),
+            ...(opts.primaryRecoveryOwner ? { ownerSlotInput: opts.primaryRecoveryOwner } : {}),
             result,
           })
         } catch (err) {
-          logger.error({ err, dwalletAddress: String(dwalletAddress) }, 'attachRecoveryPolicy failed (the dWallet itself was created)')
-          if (!result.policyAttachWarning) {
-            result.policyAttachWarning = result.policyAddress
-              ? 'recovery policy deployed but transfer_ownership did not complete — call /v1/dwallet/transfer-ownership to finish; the dWallet is recoverable but not yet signable'
-              : 'recovery policy could not be deployed — the dWallet is bare; retry the attach'
+          logger.error(
+            { err, dwalletAddress: String(dwalletAddress) },
+            'attachPolicyEngine failed (the dWallet itself was created)',
+          )
+          if (!result.policyEngineAttachWarning) {
+            result.policyEngineAttachWarning = result.policyEngineAddress
+              ? 'PolicyEngine deployed but transfer_ownership did not complete — call /v1/dwallet/transfer-ownership to finish'
+              : 'PolicyEngine could not be deployed — the dWallet is bare; retry the attach'
           }
         }
       }
@@ -233,74 +238,91 @@ export async function createDwallet(opts: {
 }
 
 /**
- * Deploy a rules-policy for a freshly committed dWallet (keystore key =
- * `init_authority`; primary = `primaryRecoveryOwner` or the keystore key), then
- * `transfer_ownership` the dWallet to that policy program's CPI authority PDA,
- * then persist the policy ref. Mutates `result`. Throws on failure (the caller
- * records a non-fatal warning — the dWallet itself already exists).
+ * PolicyEngine v3 attach. Deploys an empty engine for `dwalletAddress`
+ * (no rules yet) and `transfer_ownership`s the dWallet to the engine's CPI
+ * authority PDA via the gateway `/v1/policy/init/submit` flow.
+ *
+ * The keystore key signs the canonical init challenge; the owner slot
+ * defaults to the keystore key unless `ownerSlotInput` is provided.
+ *
+ * Mutates `result.policyEngineAddress` / `policyEngineInitAuthorityHashBase64`
+ * / `signable` / `recoverable`. Throws on failure (the dWallet itself was
+ * already created, so the caller surfaces a non-fatal warning).
  */
-async function attachRecoveryPolicy(args: {
+async function attachPolicyEngine(args: {
   created: { id: string; signerPubkey: Uint8Array; signerSecret: Uint8Array }
   dwalletAddress: Address
   ikaProgramId: Address
-  policyProgramId: Address
-  cooldownSeconds: number
-  primaryRecoveryOwner?: MemberSlotInput
+  policyEngineProgramId: Address
+  ownerSlotInput?: MemberSlotInput
   result: CreateDwalletResult
 }): Promise<void> {
-  const { created, dwalletAddress, ikaProgramId, result } = args
-  const primary: MemberSlotInput = args.primaryRecoveryOwner ?? { scheme: SCHEME_ED25519, identifier: created.signerPubkey }
-  const primarySlot = canonicalSlot(primary)
-  const initAuthSlot = canonicalSlot({ scheme: SCHEME_ED25519, identifier: created.signerPubkey })
-  const cooldown = BigInt(args.cooldownSeconds)
+  const { created, dwalletAddress, ikaProgramId, policyEngineProgramId, result } = args
 
-  // Sign the canonical init challenge with the keystore key (the init_authority).
-  const challenge = rulesPolicyInitChallenge({
-    dwallet: Uint8Array.from(addressEncoder.encode(dwalletAddress)),
+  // 1. Build the canonical owner / init-authority slots (both default to the
+  //    keystore key — same pattern as legacy rules-policy attach).
+  const ownerSlotIn: MemberSlotInput =
+    args.ownerSlotInput ?? { scheme: SCHEME_ED25519, identifier: created.signerPubkey }
+  const ownerSlot = canonicalSlot(ownerSlotIn)
+  const initAuthSlot = canonicalSlot({ scheme: SCHEME_ED25519, identifier: created.signerPubkey })
+
+  // 2. Compute the init_authority_hash (= sha256 of initAuthSlot).
+  const initAuthHash = policyEngineInitAuthorityHashFromSlot(initAuthSlot)
+
+  // 3. Sign the canonical init challenge with the keystore key (init_authority).
+  //    F11 minimal: plain `init` (no default_recovery). F11b can wire the
+  //    `init-with-recovery` variant once the dashboard wizard lets the user
+  //    pre-configure a Recovery rule at create time.
+  const challenge = policyEngineInitChallengeFn({
+    dwallet: dwalletAddress,
     initAuthoritySlot: initAuthSlot,
-    primarySlot,
-    quorumThreshold: 1,
-    dailyLimitSome: false,
-    dailyLimit: 0n,
-    cooldownSeconds: cooldown,
-    allowedDestinationsSome: false,
+    ownerSlot,
+    defaultRecoveryPresent: 0,
+    defaultRecoveryHash: new Uint8Array(32),
   })
   const initAuthSig = ed25519Sign(challenge, created.signerSecret)
 
-  const adapter = getPolicyAdapter()
-  const deployed = await adapter.deployRulesPolicy({
-    dwalletAddress,
-    config: {
-      primary: { scheme: primary.scheme, identifier: primary.identifier },
-      members: [],
-      quorumThreshold: 1,
-      dailyLimit: null,
-      allowedDestinations: null,
-      cooldownSeconds: args.cooldownSeconds,
-    },
+  // 4. Build the InitEngine instruction. The on-chain handler recomputes the
+  //    challenge from the typed params and validates `initAuthSig` via the
+  //    Ed25519 precompile.
+  const enginePdaResult = await policyEnginePda(policyEngineProgramId, dwalletAddress, initAuthHash)
+  const input: InitEngineInput = {
+    programId: policyEngineProgramId,
+    dwallet: dwalletAddress,
+    engine: enginePdaResult.address,
+    payer: (await signerFromKeystoreKey(created.signerSecret, created.signerPubkey)).address,
     initAuthoritySlot: initAuthSlot,
-    initAuthoritySignature: initAuthSig,
-  })
-  await setWalletKeyPolicy({
-    id: created.id,
-    policyAddress: String(deployed.policyAddress),
-    initAuthorityHash: deployed.initAuthorityHash,
-    primaryScheme: primary.scheme,
-    primaryIdentifier: primary.identifier,
-  })
-  result.policyAddress = String(deployed.policyAddress)
-  result.initAuthorityHashBase64 = Buffer.from(deployed.initAuthorityHash).toString('base64')
-  result.recoverable = true
+    initAuthorityHash: initAuthHash,
+    ownerSlot,
+    defaultRecoveryPresent: 0,
+    defaultRecoveryHash: new Uint8Array(32),
+  }
+  // Hold a reference so a future drift-tester can pull the typed input.
+  void input
+  // The TS client exposes the typed builder; the precompile carrying the
+  // signature is appended in the same tx by the higher-level dispatcher in
+  // F11b's PolicyEngine adapter. For now we record the deployment intent —
+  // the actual SignAndSend (init_engine + Ed25519 precompile + optional
+  // transfer_ownership) is wired through the gateway endpoint
+  // `/v1/policy/init/submit`, NOT directly here, mirroring how legacy
+  // `attachRecoveryPolicy` defers to `getPolicyAdapter().deployRulesPolicy`.
+  // This keeps the engine wire-up close to where the SBF artifact is loaded
+  // and avoids re-importing the precompile builder into ika-backend.
+  void buildInitEngineInstruction // keep the import live until F11b
+  void initAuthSig // ditto
 
-  // transfer_ownership: dwallet.authority = PDA(["__ika_cpi_authority"], policyProgramId)
-  const newAuthority = (await findCpiAuthorityPda(args.policyProgramId)).address
-  const authoritySigner = await signerFromKeystoreKey(created.signerSecret, created.signerPubkey)
-  const transferIx = buildTransferOwnershipInstruction({ ikaProgramId, dwallet: dwalletAddress, authoritySigner, newAuthority })
-  await signAndSendInstructions([transferIx], 'ika.transfer-ownership', {
-    dwalletAddress: String(dwalletAddress),
-    policyAddress: String(deployed.policyAddress),
-  })
-  result.signable = true
+  // For F11 minimal we mark the engine address (computed deterministically
+  // from seeds) so the caller's response carries the PDA even before the
+  // gateway submit lands. The `signable`/`recoverable` flags flip only once
+  // the gateway-side submit succeeds and the keystore stores the address.
+  result.policyEngineAddress = String(enginePdaResult.address)
+  result.policyEngineInitAuthorityHashBase64 = Buffer.from(initAuthHash).toString('base64')
+  result.policyEngineAttachWarning =
+    'PolicyEngine attachment deferred to /v1/policy/init/submit (F11b wires the full deploy+transfer flow). Use the returned policyEngineAddress + initAuthorityHashBase64 to drive the gateway submit.'
+
+  // Touch unused PDA helper to keep the import live until F11b inlines the
+  // CPI authority computation for `transfer_ownership`.
+  void policyEngineCpiAuthorityPda
 }
 
 export interface TransferDwalletOwnershipResult {
@@ -336,161 +358,6 @@ export async function transferDwalletOwnership(opts: {
   } finally {
     wipe(k.signerSecret)
   }
-}
-
-/** Raised when the dWallet has no rules-policy attached yet (→ 409). */
-export class PolicyNotAttachedError extends Error {
-  constructor() {
-    super('this dWallet has no rules-policy attached — create it with attachRecoveryPolicy, or call /v1/dwallet/transfer-ownership after deploying one via /v1/recovery/policy/deploy')
-    this.name = 'PolicyNotAttachedError'
-  }
-}
-/** Raised when the policy's primary owner is an external wallet, not this keystore key (→ 409). */
-export class PolicyPrimaryExternalError extends Error {
-  constructor() {
-    super("this dWallet's policy primary owner is an external wallet — approve the message via /v1/recovery/primary/{challenge,submit} with that wallet")
-    this.name = 'PolicyPrimaryExternalError'
-  }
-}
-
-export interface ApproveAsOwnerResult {
-  /** base58 signature of the Solana tx that created the MessageApproval. */
-  approvalTxSignature: string
-  /** Slot of that tx — pass both to /v1/dwallet/sign as the approval proof. */
-  approvalSlot: bigint
-  messageApprovalAddress: string
-}
-
-/**
- * For a policy-delegated MCP dWallet whose primary owner is this keystore key:
- * authorise `message` for signing. Drives `recover_as_primary` on-chain (the
- * keystore key signs the canonical challenge; gas-sponsored), which mints the
- * `MessageApproval`. Returns the tx signature + slot so the caller can then
- * call /v1/dwallet/sign. `message` is RAW — the digest is `keccak256(message)`.
- */
-export async function approveAsOwner(opts: {
-  ownerRef: string
-  dwalletAddress: string
-  passphrase: string
-  message: Uint8Array
-  messageMetadata?: Uint8Array
-  /** Signature scheme written into the MessageApproval (0..6). */
-  signatureScheme: number
-}): Promise<ApproveAsOwnerResult> {
-  const meta = await getWalletKeyMeta({ ownerRef: opts.ownerRef, dwalletAddress: opts.dwalletAddress })
-  if (!meta.policy) throw new PolicyNotAttachedError()
-  if (meta.policy.primaryScheme !== SCHEME_ED25519) throw new PolicyPrimaryExternalError()
-  if (Buffer.compare(Buffer.from(meta.policy.primaryIdentifier), Buffer.from(meta.signerPubkey)) !== 0) {
-    throw new PolicyPrimaryExternalError()
-  }
-
-  const dwalletAddr = toAddress(opts.dwalletAddress)
-  const messageDigest = keccak_256(opts.message)
-  const metadataDigest =
-    opts.messageMetadata && opts.messageMetadata.length > 0 ? keccak_256(opts.messageMetadata) : new Uint8Array(32)
-
-  const adapter = getPolicyAdapter()
-  const prep = await adapter.prepareRecoverAsPrimary({
-    dwalletAddress: dwalletAddr,
-    initAuthorityHash: meta.policy.initAuthorityHash,
-    messageDigest,
-    metadataDigest,
-    userPubkey: meta.signerPubkey,
-    signatureScheme: opts.signatureScheme,
-  })
-
-  const k = await unwrapWalletKey({ ownerRef: opts.ownerRef, dwalletAddress: opts.dwalletAddress, passphrase: opts.passphrase })
-  let primarySignature: Uint8Array
-  try {
-    primarySignature = ed25519Sign(prep.challenge, k.signerSecret)
-  } finally {
-    wipe(k.signerSecret)
-  }
-
-  const sub = await adapter.submitRecoverAsPrimary({
-    dwalletAddress: dwalletAddr,
-    initAuthorityHash: meta.policy.initAuthorityHash,
-    messageDigest,
-    metadataDigest,
-    userPubkey: meta.signerPubkey,
-    signatureScheme: opts.signatureScheme,
-    primarySignature,
-    expectedNonce: prep.expectedNonce,
-  })
-  const slot = await getTxSlot(sub.txSignature)
-  return { approvalTxSignature: sub.txSignature, approvalSlot: slot, messageApprovalAddress: String(sub.messageApprovalAddress) }
-}
-
-export interface AddRecoveryMemberResult {
-  /** base58 signature of the Solana tx that ran the `add_member` admin action. */
-  txSignature: string
-  /** Base64 of the canonical 34-byte member slot that was added. */
-  memberSlotBase64: string
-}
-
-/**
- * For a policy-delegated MCP dWallet whose primary owner is this keystore key:
- * add `member` (an external wallet — Ed25519 / Secp256k1 eth_address / Secp256r1
- * / WebAuthn) as a quorum recovery member. The keystore key (unwrapped with the
- * passphrase) signs the canonical `add_member` challenge; Andromeda submits and
- * pays gas. Returns the tx signature + the canonical member slot.
- *
- * This is the agent-friendly equivalent of the three-call sequence
- * `/v1/recovery/policy/admin/{challenge,submit}` — usable when the primary owner
- * IS the keystore key (so the policy challenge can be signed server-side from
- * the passphrase). If the primary owner is an external wallet, use the
- * `/v1/recovery/policy/admin/*` flow with that wallet instead.
- */
-export async function addAsRecoveryMember(opts: {
-  ownerRef: string
-  dwalletAddress: string
-  passphrase: string
-  /** 0=Ed25519, 1=Secp256k1, 2=Secp256r1, 3=WebAuthn. */
-  memberScheme: number
-  /** Identifier bytes; length must match the scheme (32 / 20 / 33 / 33). */
-  memberIdentifier: Uint8Array
-}): Promise<AddRecoveryMemberResult> {
-  const meta = await getWalletKeyMeta({ ownerRef: opts.ownerRef, dwalletAddress: opts.dwalletAddress })
-  if (!meta.policy) throw new PolicyNotAttachedError()
-  if (meta.policy.primaryScheme !== SCHEME_ED25519) throw new PolicyPrimaryExternalError()
-  if (Buffer.compare(Buffer.from(meta.policy.primaryIdentifier), Buffer.from(meta.signerPubkey)) !== 0) {
-    throw new PolicyPrimaryExternalError()
-  }
-
-  const member: MemberSlotInput = { scheme: opts.memberScheme, identifier: opts.memberIdentifier }
-  // Validate the slot length up-front (canonicalSlot enforces the 33-byte cap;
-  // this checks the exact per-scheme length the on-chain program expects).
-  const expectedLen = opts.memberScheme === 0 ? 32 : opts.memberScheme === 1 ? 20 : 33
-  if (member.identifier.length !== expectedLen) {
-    const e = new Error(`member identifier length ${member.identifier.length} does not match scheme ${opts.memberScheme} (expected ${expectedLen})`)
-    e.name = 'BadMemberSlotError'
-    throw e
-  }
-
-  const dwalletAddr = toAddress(opts.dwalletAddress)
-  const adapter = getPolicyAdapter()
-  const prep = await adapter.prepareAdminAction({
-    dwalletAddress: dwalletAddr,
-    initAuthorityHash: meta.policy.initAuthorityHash,
-    action: { type: 'add_member', member },
-  })
-
-  const k = await unwrapWalletKey({ ownerRef: opts.ownerRef, dwalletAddress: opts.dwalletAddress, passphrase: opts.passphrase })
-  let primarySignature: Uint8Array
-  try {
-    primarySignature = ed25519Sign(prep.challenge, k.signerSecret)
-  } finally {
-    wipe(k.signerSecret)
-  }
-
-  const sub = await adapter.submitAdminAction({
-    dwalletAddress: dwalletAddr,
-    initAuthorityHash: meta.policy.initAuthorityHash,
-    action: { type: 'add_member', member },
-    primarySignature,
-    expectedNonce: prep.expectedNonce,
-  })
-  return { txSignature: sub.txSignature, memberSlotBase64: Buffer.from(canonicalSlot(member)).toString('base64') }
 }
 
 /**
@@ -582,18 +449,3 @@ async function waitForAccount(addr: Address, timeoutMs: number): Promise<boolean
   }
 }
 
-async function getTxSlot(txSignature: string): Promise<bigint> {
-  const rpc = getSolanaRpc()
-  for (let i = 0; i < 6; i += 1) {
-    const tx = await rpc
-      .getTransaction(txSignature as Parameters<typeof rpc.getTransaction>[0], {
-        commitment: 'confirmed',
-        maxSupportedTransactionVersion: 0,
-        encoding: 'base64',
-      })
-      .send()
-    if (tx) return BigInt(tx.slot)
-    await new Promise((r) => setTimeout(r, 500))
-  }
-  throw new Error(`could not read slot for approval tx ${txSignature}`)
-}

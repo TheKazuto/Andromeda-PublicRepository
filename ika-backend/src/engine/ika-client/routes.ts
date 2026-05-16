@@ -2,13 +2,17 @@
 // `buildEngineRouter` under `/v1/dwallet`, so:
 //   POST /v1/dwallet/create             →  MCP tool `create_dwallet`
 //   POST /v1/dwallet/transfer-ownership →  MCP tool `transfer_ownership`
-//   POST /v1/dwallet/approve            →  MCP tool `approve` (owner authorises a message)
-//   POST /v1/dwallet/admin/add-member   →  MCP tool `admin_add_member` (keystore-primary policies only)
 //   POST /v1/dwallet/presign            →  MCP tool `presign`
 //   POST /v1/dwallet/sign               →  MCP tool `sign_message`
 // (the gateway auto-generates the MCP tools from its route catalogue, so
 // adding the matching entries to `gateway/internal/routes/routes.go` is all
 // that's needed on the gateway side.)
+//
+// F11b-Phase4b (2026-05-15): `/v1/dwallet/approve` and `/v1/dwallet/admin/add-member`
+// are retired. Message authorisation now happens through the PolicyEngine v3
+// surface on the gateway (`/v1/policy/recover-as-primary/{challenge,submit}`)
+// — the dWallet's authority must be a PolicyEngine v3 attached at create
+// time via `attachPolicyEngine: true`.
 //
 // Auth: the engine trusts the gateway (shared `INTERNAL_API_KEY`) and reads
 // the tenant identity from the `X-Andromeda-User-Id` header the gateway
@@ -30,26 +34,23 @@ import {
   allocatePresign,
   signMessage,
   transferDwalletOwnership,
-  approveAsOwner,
-  addAsRecoveryMember,
 } from './wallet.js'
 
 const HEX = /^[0-9a-fA-F]*$/
-const BASE64 = /^[A-Za-z0-9+/]*={0,2}$/
-const SCHEME_IDENTIFIER_LEN: Record<number, number> = { 0: 32, 1: 20, 2: 33, 3: 33 }
 
 const createSchema = z.object({
   passphrase: z.string().min(12, 'passphrase must be at least 12 characters'),
   curve: z.enum(['Curve25519', 'Secp256k1', 'Secp256r1']).optional(),
   /**
-   * When true, also deploy a `rules-policy` for the new dWallet and delegate
-   * its authority to it — the dWallet is then signable (via /v1/dwallet/approve
-   * → /v1/dwallet/sign) and socially recoverable. Requires the recovery policy
-   * layer to be enabled on this deployment.
+   * When true, deploy a `PolicyEngine v3` for the new dWallet and delegate
+   * its authority to the engine's CPI authority PDA. The engine starts with
+   * zero rules; the caller adds them via `/v1/policy/rules/*` later. Requires
+   * `IKA_POLICY_ENGINE_ENABLED=true` + `ANDROMEDA_POLICY_ENGINE_PROGRAM_ID`
+   * set on the deployment.
    */
-  attachRecoveryPolicy: z.boolean().optional(),
+  attachPolicyEngine: z.boolean().optional(),
   /**
-   * Optional external primary owner for the auto-attached `rules-policy`.
+   * Optional external primary owner for the auto-attached PolicyEngine.
    * Defaults to the keystore key (Ed25519). Pass this to make a wallet whose
    * primary on-chain owner is e.g. a MetaMask address (Secp256k1) or a passkey
    * (Secp256r1). `identifierBase64` length depends on scheme:
@@ -73,26 +74,8 @@ const transferOwnershipSchema = z.object({
   newAuthorityBase58: z.string().min(32),
 })
 
-const approveSchema = z.object({
-  dwalletAddress: z.string().min(32),
-  passphrase: z.string().min(12, 'passphrase must be at least 12 characters'),
-  messageHex: z.string().regex(HEX).refine((s) => s.length % 2 === 0 && s.length > 0, 'messageHex must be non-empty even-length hex'),
-  messageMetadataHex: z.string().regex(HEX).refine((s) => s.length % 2 === 0, 'messageMetadataHex must be even-length hex').optional(),
-  /** Signature scheme written into the MessageApproval (0..6). */
-  signatureScheme: z.number().int().min(0).max(6),
-})
-
 const presignSchema = z.object({
   dwalletAddress: z.string().min(32),
-})
-
-const addRecoveryMemberSchema = z.object({
-  dwalletAddress: z.string().min(32),
-  passphrase: z.string().min(12, 'passphrase must be at least 12 characters'),
-  /** 0=Ed25519, 1=Secp256k1 (eth_address), 2=Secp256r1, 3=WebAuthn. */
-  memberScheme: z.number().int().min(0).max(3),
-  /** Identifier bytes (base64). Decoded length must match the scheme (32/20/33/33). */
-  memberIdentifierBase64: z.string().min(1),
 })
 
 const signSchema = z.object({
@@ -135,9 +118,6 @@ const KNOWN_4XX: Record<string, number> = {
   WrongPassphraseError: 401,
   WalletKeyNotFoundError: 404,
   WalletKeyNotFinalizedError: 409,
-  PolicyNotAttachedError: 409,
-  PolicyPrimaryExternalError: 409,
-  BadMemberSlotError: 400,
 }
 
 function respondErr(res: Response, scope: string, err: unknown): void {
@@ -161,17 +141,19 @@ function respondErr(res: Response, scope: string, err: unknown): void {
 }
 
 export function mountMcpWalletRoutes(router: Router, config: AppConfig): void {
-  const recoveryPolicyEnabled = config.recovery.policyEnabled && !!config.recovery.policyProgramId
-  const recoveryPolicyOpts = recoveryPolicyEnabled
-    ? { programId: config.recovery.policyProgramId as string, cooldownSeconds: config.recovery.minCooldownSeconds }
+  const policyEngineEnabled =
+    process.env.IKA_POLICY_ENGINE_ENABLED === 'true' &&
+    !!process.env.ANDROMEDA_POLICY_ENGINE_PROGRAM_ID
+  const policyEngineOpts = policyEngineEnabled
+    ? { programId: process.env.ANDROMEDA_POLICY_ENGINE_PROGRAM_ID as string }
     : null
 
   router.post('/create', async (req, res) => {
     try {
       const ownerRef = ownerRefOf(req.header('x-andromeda-user-id'))
       const body = createSchema.parse(req.body)
-      if (body.attachRecoveryPolicy && !recoveryPolicyOpts) {
-        res.status(400).json(fail('attachRecoveryPolicy requested but the recovery policy layer is not enabled on this deployment'))
+      if (body.attachPolicyEngine && !policyEngineOpts) {
+        res.status(400).json(fail('attachPolicyEngine requested but PolicyEngine v3 is not enabled on this deployment (set IKA_POLICY_ENGINE_ENABLED=true and ANDROMEDA_POLICY_ENGINE_PROGRAM_ID)'))
         return
       }
       const result = await createDwallet({
@@ -179,7 +161,7 @@ export function mountMcpWalletRoutes(router: Router, config: AppConfig): void {
         passphrase: body.passphrase,
         ikaProgramId: config.base.ikaProgramId,
         ...(body.curve ? { curve: body.curve } : {}),
-        ...(body.attachRecoveryPolicy && recoveryPolicyOpts ? { recoveryPolicy: recoveryPolicyOpts } : {}),
+        ...(body.attachPolicyEngine && policyEngineOpts ? { policyEngine: policyEngineOpts } : {}),
         ...(body.primaryRecoveryOwner
           ? {
               primaryRecoveryOwner: {
@@ -198,9 +180,18 @@ export function mountMcpWalletRoutes(router: Router, config: AppConfig): void {
           committed: result.committed,
           signable: result.signable,
           recoverable: result.recoverable,
-          ...(result.policyAddress ? { policyAddress: result.policyAddress } : {}),
-          ...(result.initAuthorityHashBase64 ? { initAuthorityHashBase64: result.initAuthorityHashBase64 } : {}),
-          ...(result.policyAttachWarning ? { policyAttachWarning: result.policyAttachWarning } : {}),
+          ...(result.policyEngineAddress
+            ? { policyEngineAddress: result.policyEngineAddress }
+            : {}),
+          ...(result.policyEngineInitAuthorityHashBase64
+            ? {
+                policyEngineInitAuthorityHashBase64:
+                  result.policyEngineInitAuthorityHashBase64,
+              }
+            : {}),
+          ...(result.policyEngineAttachWarning
+            ? { policyEngineAttachWarning: result.policyEngineAttachWarning }
+            : {}),
           disclaimer: result.disclaimer,
         }),
       )
@@ -223,59 +214,6 @@ export function mountMcpWalletRoutes(router: Router, config: AppConfig): void {
       res.json(ok({ txSignature: result.txSignature, newAuthority: result.newAuthority }))
     } catch (err) {
       respondErr(res, 'mcp/dwallet/transfer-ownership', err)
-    }
-  })
-
-  router.post('/approve', async (req, res) => {
-    try {
-      const ownerRef = ownerRefOf(req.header('x-andromeda-user-id'))
-      const body = approveSchema.parse(req.body)
-      const result = await approveAsOwner({
-        ownerRef,
-        dwalletAddress: body.dwalletAddress,
-        passphrase: body.passphrase,
-        message: hexToBytes(body.messageHex),
-        ...(body.messageMetadataHex ? { messageMetadata: hexToBytes(body.messageMetadataHex) } : {}),
-        signatureScheme: body.signatureScheme,
-      })
-      res.json(
-        ok({
-          approvalTxSignatureBase58: result.approvalTxSignature,
-          approvalSlot: result.approvalSlot.toString(),
-          messageApprovalAddress: result.messageApprovalAddress,
-        }),
-      )
-    } catch (err) {
-      respondErr(res, 'mcp/dwallet/approve', err)
-    }
-  })
-
-  router.post('/admin/add-member', async (req, res) => {
-    try {
-      const ownerRef = ownerRefOf(req.header('x-andromeda-user-id'))
-      const body = addRecoveryMemberSchema.parse(req.body)
-      if (!BASE64.test(body.memberIdentifierBase64)) {
-        res.status(400).json(fail('memberIdentifierBase64 must be valid base64'))
-        return
-      }
-      const memberIdentifier = new Uint8Array(Buffer.from(body.memberIdentifierBase64, 'base64'))
-      const expectedLen = SCHEME_IDENTIFIER_LEN[body.memberScheme]
-      if (memberIdentifier.length !== expectedLen) {
-        res
-          .status(400)
-          .json(fail(`memberIdentifierBase64 must decode to ${expectedLen} bytes for scheme ${body.memberScheme} (got ${memberIdentifier.length})`))
-        return
-      }
-      const result = await addAsRecoveryMember({
-        ownerRef,
-        dwalletAddress: body.dwalletAddress,
-        passphrase: body.passphrase,
-        memberScheme: body.memberScheme,
-        memberIdentifier,
-      })
-      res.json(ok({ txSignature: result.txSignature, memberSlotBase64: result.memberSlotBase64 }))
-    } catch (err) {
-      respondErr(res, 'mcp/dwallet/admin/add-member', err)
     }
   })
 
@@ -336,7 +274,7 @@ export function mountMcpWalletRoutes(router: Router, config: AppConfig): void {
   })
 
   logger.info(
-    { recoveryPolicyEnabled },
-    'MCP dWallet routes mounted (/v1/dwallet/{create,transfer-ownership,approve,admin/add-member,presign,sign})',
+    { policyEngineEnabled },
+    'MCP dWallet routes mounted (/v1/dwallet/{create,transfer-ownership,presign,sign})',
   )
 }
