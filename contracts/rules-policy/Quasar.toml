@@ -1,8 +1,0 @@
-[program]
-name = "rules_policy"
-
-[toolchain]
-type = "solana"
-
-[deploy]
-cluster = "devnet"
