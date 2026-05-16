@@ -23,6 +23,8 @@ const b = (n: number, fill: number): Uint8Array => new Uint8Array(n).fill(fill)
 // digests = 32B, destination = 32B.
 const dwallet = b(32, 0x11)
 const session = b(32, 0x22)
+const policy = b(32, 0x23)
+const messageApproval = b(32, 0x24)
 const initAuthoritySlot = b(34, 0x33)
 const primarySlot = b(34, 0x44)
 const newPrimarySlot = b(34, 0x45)
@@ -30,7 +32,10 @@ const memberSlot = b(34, 0x55)
 const messageDigest = b(32, 0x66)
 const metadataDigest = b(32, 0x77)
 const destination = b(32, 0x88)
+const userPubkey = b(32, 0x99)
 const nonce = 42n
+const signatureScheme = 5
+const messageApprovalBump = 254
 const amount = 1_000_000n
 const expiresAt = 1_900_000_000n
 const dailyLimit = 5_000_000n
@@ -47,64 +52,72 @@ const vectors: Record<string, { inputs: Record<string, unknown>; expectedChallen
     expectedChallengeHex: hex(C.initAuthorityHashFromSlot(initAuthoritySlot)),
   },
   primary_recover: {
-    inputs: { dwallet: hex(dwallet), messageDigest: hex(messageDigest), metadataDigest: hex(metadataDigest), nonce: nonce.toString(), primarySlot: hex(primarySlot) },
-    expectedChallengeHex: hex(C.primaryRecoverChallenge({ dwallet, messageDigest, metadataDigest, nonce, primarySlot })),
+    inputs: { dwallet: hex(dwallet), messageApproval: hex(messageApproval), messageDigest: hex(messageDigest), metadataDigest: hex(metadataDigest), userPubkey: hex(userPubkey), signatureScheme, messageApprovalBump, nonce: nonce.toString(), primarySlot: hex(primarySlot) },
+    expectedChallengeHex: hex(C.primaryRecoverChallenge({ dwallet, messageApproval, messageDigest, metadataDigest, userPubkey, signatureScheme, messageApprovalBump, nonce, primarySlot })),
   },
   quorum_session_open: {
-    inputs: { dwallet: hex(dwallet), messageDigest: hex(messageDigest), metadataDigest: hex(metadataDigest), amount: amount.toString(), destination: hex(destination), expiresAt: expiresAt.toString(), sessionNonce: nonce.toString(), primarySlot: hex(primarySlot) },
-    expectedChallengeHex: hex(C.quorumSessionOpenChallenge({ dwallet, messageDigest, metadataDigest, amount, destination, expiresAt, sessionNonce: nonce, primarySlot })),
+    inputs: { dwallet: hex(dwallet), messageDigest: hex(messageDigest), metadataDigest: hex(metadataDigest), userPubkey: hex(userPubkey), signatureScheme, messageApprovalBump, amount: amount.toString(), destination: hex(destination), expiresAt: expiresAt.toString(), sessionNonce: nonce.toString(), primarySlot: hex(primarySlot) },
+    expectedChallengeHex: hex(C.quorumSessionOpenChallenge({ dwallet, messageDigest, metadataDigest, userPubkey, signatureScheme, messageApprovalBump, amount, destination, expiresAt, sessionNonce: nonce, primarySlot })),
   },
   quorum_contribute: {
     inputs: { session: hex(session), memberSlot: hex(memberSlot) },
     expectedChallengeHex: hex(C.quorumContributeChallenge({ session, memberSlot })),
   },
   admin_add_member: {
-    inputs: { dwallet: hex(dwallet), newMemberSlot: hex(memberSlot), nonce: nonce.toString(), primarySlot: hex(primarySlot) },
-    expectedChallengeHex: hex(C.adminAddMemberChallenge({ dwallet, newMemberSlot: memberSlot, nonce, primarySlot })),
+    inputs: { dwallet: hex(dwallet), policy: hex(policy), newMemberSlot: hex(memberSlot), nonce: nonce.toString(), primarySlot: hex(primarySlot) },
+    expectedChallengeHex: hex(C.adminAddMemberChallenge({ dwallet, policy, newMemberSlot: memberSlot, nonce, primarySlot })),
   },
   admin_remove_member: {
-    inputs: { dwallet: hex(dwallet), memberSlotToRemove: hex(memberSlot), nonce: nonce.toString(), primarySlot: hex(primarySlot) },
-    expectedChallengeHex: hex(C.adminRemoveMemberChallenge({ dwallet, memberSlotToRemove: memberSlot, nonce, primarySlot })),
+    inputs: { dwallet: hex(dwallet), policy: hex(policy), memberSlotToRemove: hex(memberSlot), nonce: nonce.toString(), primarySlot: hex(primarySlot) },
+    expectedChallengeHex: hex(C.adminRemoveMemberChallenge({ dwallet, policy, memberSlotToRemove: memberSlot, nonce, primarySlot })),
   },
   admin_add_destination: {
-    inputs: { dwallet: hex(dwallet), destination: hex(destination), nonce: nonce.toString(), primarySlot: hex(primarySlot) },
-    expectedChallengeHex: hex(C.adminAddDestinationChallenge({ dwallet, destination, nonce, primarySlot })),
+    inputs: { dwallet: hex(dwallet), policy: hex(policy), destination: hex(destination), nonce: nonce.toString(), primarySlot: hex(primarySlot) },
+    expectedChallengeHex: hex(C.adminAddDestinationChallenge({ dwallet, policy, destination, nonce, primarySlot })),
   },
   admin_remove_destination: {
-    inputs: { dwallet: hex(dwallet), destination: hex(destination), nonce: nonce.toString(), primarySlot: hex(primarySlot) },
-    expectedChallengeHex: hex(C.adminRemoveDestinationChallenge({ dwallet, destination, nonce, primarySlot })),
+    inputs: { dwallet: hex(dwallet), policy: hex(policy), destination: hex(destination), nonce: nonce.toString(), primarySlot: hex(primarySlot) },
+    expectedChallengeHex: hex(C.adminRemoveDestinationChallenge({ dwallet, policy, destination, nonce, primarySlot })),
   },
   admin_revoke: {
-    inputs: { dwallet: hex(dwallet), nonce: nonce.toString(), primarySlot: hex(primarySlot) },
-    expectedChallengeHex: hex(C.adminRevokeChallenge({ dwallet, nonce, primarySlot })),
+    inputs: { dwallet: hex(dwallet), policy: hex(policy), nonce: nonce.toString(), primarySlot: hex(primarySlot) },
+    expectedChallengeHex: hex(C.adminRevokeChallenge({ dwallet, policy, nonce, primarySlot })),
   },
   admin_set_primary: {
-    inputs: { dwallet: hex(dwallet), newPrimarySlot: hex(newPrimarySlot), nonce: nonce.toString(), currentPrimarySlot: hex(primarySlot) },
-    expectedChallengeHex: hex(C.adminSetPrimaryChallenge({ dwallet, newPrimarySlot, nonce, currentPrimarySlot: primarySlot })),
+    inputs: { dwallet: hex(dwallet), policy: hex(policy), newPrimarySlot: hex(newPrimarySlot), nonce: nonce.toString(), currentPrimarySlot: hex(primarySlot) },
+    expectedChallengeHex: hex(C.adminSetPrimaryChallenge({ dwallet, policy, newPrimarySlot, nonce, currentPrimarySlot: primarySlot })),
   },
   admin_set_quorum_threshold_immediate: {
-    inputs: { dwallet: hex(dwallet), newThreshold: threshold, nonce: nonce.toString(), primarySlot: hex(primarySlot) },
-    expectedChallengeHex: hex(C.adminSetQuorumThresholdImmediateChallenge({ dwallet, newThreshold: threshold, nonce, primarySlot })),
+    inputs: { dwallet: hex(dwallet), policy: hex(policy), newThreshold: threshold, nonce: nonce.toString(), primarySlot: hex(primarySlot) },
+    expectedChallengeHex: hex(C.adminSetQuorumThresholdImmediateChallenge({ dwallet, policy, newThreshold: threshold, nonce, primarySlot })),
   },
   admin_set_daily_limit_immediate: {
-    inputs: { dwallet: hex(dwallet), newSome: true, newLimit: dailyLimit.toString(), nonce: nonce.toString(), primarySlot: hex(primarySlot) },
-    expectedChallengeHex: hex(C.adminSetDailyLimitImmediateChallenge({ dwallet, newSome: true, newLimit: dailyLimit, nonce, primarySlot })),
+    inputs: { dwallet: hex(dwallet), policy: hex(policy), newSome: true, newLimit: dailyLimit.toString(), nonce: nonce.toString(), primarySlot: hex(primarySlot) },
+    expectedChallengeHex: hex(C.adminSetDailyLimitImmediateChallenge({ dwallet, policy, newSome: true, newLimit: dailyLimit, nonce, primarySlot })),
   },
   admin_set_cooldown_immediate: {
-    inputs: { dwallet: hex(dwallet), newCooldownSeconds: cooldownSeconds.toString(), nonce: nonce.toString(), primarySlot: hex(primarySlot) },
-    expectedChallengeHex: hex(C.adminSetCooldownImmediateChallenge({ dwallet, newCooldownSeconds: cooldownSeconds, nonce, primarySlot })),
+    inputs: { dwallet: hex(dwallet), policy: hex(policy), newCooldownSeconds: cooldownSeconds.toString(), nonce: nonce.toString(), primarySlot: hex(primarySlot) },
+    expectedChallengeHex: hex(C.adminSetCooldownImmediateChallenge({ dwallet, policy, newCooldownSeconds: cooldownSeconds, nonce, primarySlot })),
   },
   admin_propose_quorum_threshold: {
-    inputs: { dwallet: hex(dwallet), newThreshold: threshold, nonce: nonce.toString(), primarySlot: hex(primarySlot) },
-    expectedChallengeHex: hex(C.adminProposeQuorumThresholdChallenge({ dwallet, newThreshold: threshold, nonce, primarySlot })),
+    inputs: { dwallet: hex(dwallet), policy: hex(policy), newThreshold: threshold, nonce: nonce.toString(), primarySlot: hex(primarySlot) },
+    expectedChallengeHex: hex(C.adminProposeQuorumThresholdChallenge({ dwallet, policy, newThreshold: threshold, nonce, primarySlot })),
   },
   admin_propose_daily_limit: {
-    inputs: { dwallet: hex(dwallet), newSome: true, newLimit: dailyLimit.toString(), nonce: nonce.toString(), primarySlot: hex(primarySlot) },
-    expectedChallengeHex: hex(C.adminProposeDailyLimitChallenge({ dwallet, newSome: true, newLimit: dailyLimit, nonce, primarySlot })),
+    inputs: { dwallet: hex(dwallet), policy: hex(policy), newSome: true, newLimit: dailyLimit.toString(), nonce: nonce.toString(), primarySlot: hex(primarySlot) },
+    expectedChallengeHex: hex(C.adminProposeDailyLimitChallenge({ dwallet, policy, newSome: true, newLimit: dailyLimit, nonce, primarySlot })),
   },
   admin_propose_cooldown: {
-    inputs: { dwallet: hex(dwallet), newCooldownSeconds: cooldownSeconds.toString(), nonce: nonce.toString(), primarySlot: hex(primarySlot) },
-    expectedChallengeHex: hex(C.adminProposeCooldownChallenge({ dwallet, newCooldownSeconds: cooldownSeconds, nonce, primarySlot })),
+    inputs: { dwallet: hex(dwallet), policy: hex(policy), newCooldownSeconds: cooldownSeconds.toString(), nonce: nonce.toString(), primarySlot: hex(primarySlot) },
+    expectedChallengeHex: hex(C.adminProposeCooldownChallenge({ dwallet, policy, newCooldownSeconds: cooldownSeconds, nonce, primarySlot })),
+  },
+  oidc_session_open: {
+    inputs: { dwallet: hex(dwallet), primarySlot: hex(primarySlot), ephPk: hex(userPubkey), notAfterUnixTs: expiresAt.toString(), jwtDigest: hex(messageDigest), jwkRegistry: hex(policy), oidcVerifierVersion: 1, sessionNonce: nonce.toString() },
+    expectedChallengeHex: hex(C.oidcSessionOpenChallenge({ dwallet, primarySlot, ephPk: userPubkey, notAfterUnixTs: expiresAt, jwtDigest: messageDigest, jwkRegistry: policy, oidcVerifierVersion: 1, sessionNonce: nonce })),
+  },
+  oidc_primary_use: {
+    inputs: { session: hex(session), dwallet: hex(dwallet), messageApproval: hex(messageApproval), messageDigest: hex(messageDigest), metadataDigest: hex(metadataDigest), userPubkey: hex(userPubkey), signatureScheme, messageApprovalBump, useNonce: nonce.toString(), primarySlot: hex(primarySlot) },
+    expectedChallengeHex: hex(C.oidcPrimaryUseChallenge({ session, dwallet, messageApproval, messageDigest, metadataDigest, userPubkey, signatureScheme, messageApprovalBump, useNonce: nonce, primarySlot })),
   },
 }
 
