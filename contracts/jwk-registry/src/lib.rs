@@ -16,7 +16,7 @@
 //!    the registry has zero entries (genesis), skips it.
 //!  * `emergency_revoker` (a SEPARATE key) can only `revoke_jwk` — immediate,
 //!    ignores the grace period, kills open sessions.
-//!  * the off-chain watcher (`scripts/jwk-rotator/`) fetches the providers'
+//!  * the off-chain watcher (`jwk-rotator/`) fetches the providers'
 //!    JWKS, compares with the on-chain state, and `propose_jwk`s new keys —
 //!    it never activates anything.
 //!

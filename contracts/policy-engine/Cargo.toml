@@ -1,0 +1,35 @@
+[package]
+name = "policy_engine"
+version = "0.1.0"
+edition = "2021"
+description = "Andromeda PolicyEngine v3 — single authority program that hosts 8 rule kinds (allowlist, velocity, time-lock, oracle, passkey step-up, fhe-gated, session-keys, recovery) for Ika dWallets on Solana. Spec: docs/POLICY_ENGINE_ABI_V3.md."
+license = "Apache-2.0 OR MIT"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[features]
+# Forwards `oidc-rsa` to `andromeda_oidc_verifier`. Default ON — flip OFF on
+# the build line (`cargo build-sbf --no-default-features`) for clusters where
+# `sol_big_mod_exp` is inactive (e.g. devnet pre-alpha 2026-05). With this
+# feature OFF, the `recover_as_primary_oidc` / `oidc_session_open` paths fail
+# at JWT verify; everything else (admin, normal signing, quorum recovery,
+# passkey recovery, sessions) works.
+default = ["oidc-rsa"]
+oidc-rsa = ["andromeda_oidc_verifier/oidc-rsa"]
+
+[dependencies]
+quasar-lang = { git = "https://github.com/blueshift-gg/quasar", rev = "096c8f7c7c37e373758da8a65b7528cb2230e20e" }
+ika-dwallet-quasar = { git = "https://github.com/dwallet-labs/ika-pre-alpha", rev = "3bd7945e012950e54fb4d0057b72a7d466556fc1" }
+solana-address = { version = "2.2.0", features = ["curve25519"] }
+andromeda_auth = { path = "../auth" }
+andromeda_policy_shared = { path = "../shared" }
+andromeda_oidc_verifier = { path = "../oidc-verifier", default-features = false }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }
+
+[profile.release]
+overflow-checks = true
+lto = "fat"
+codegen-units = 1

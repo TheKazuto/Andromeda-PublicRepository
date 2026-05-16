@@ -20,7 +20,7 @@ Two **separate** privileged roles, both real Solana transaction signers (this pr
 - **`authority`** — devnet: a single ops key (Fase -1 decision). Later: an M-of-N multisig (Squads), reached via `rotate_role` → timelock → `activate_role_rotation`. Can `propose_jwk`, `activate_jwk` (only after `timelock_seconds`), `expire_jwk`, `bootstrap_jwk` (genesis only), and rotate either role. **Cannot bypass the timelock for an `ACTIVE` key.**
 - **`emergency_revoker`** — a deliberately separate, lower-privilege key. Can **only** `revoke_jwk` — immediate, ignores the grace period, and (via `rules-policy`'s per-use re-check) kills already-open `OidcSession`s.
 
-The off-chain watcher (`scripts/jwk-rotator/`) fetches the providers' JWKS, diffs against the on-chain state, and `propose_jwk`s new keys — **it never activates anything**. A human (the `authority` holder / multisig) approves the activation after the timelock.
+The off-chain watcher (`jwk-rotator/`) fetches the providers' JWKS, diffs against the on-chain state, and `propose_jwk`s new keys — **it never activates anything**. A human (the `authority` holder / multisig) approves the activation after the timelock.
 
 What a compromised `authority` can do: add a bogus key for a legitimate issuer after the timelock — mitigated by the timelock window + the public watcher (which alerts if a key appears on-chain that is not in the real JWKS) + `emergency_revoker` (which can kill it before the timelock elapses). What a compromised backend / gateway **cannot** do: anything — the RSA signature of the provider is verified by the Solana runtime; the registry only stores public moduli.
 
@@ -67,7 +67,7 @@ On devnet the single ops key is both `authority`/`revoker` and `payer` — pass 
 
 ## Companion / consumers
 
-- `scripts/jwk-rotator/` — the off-chain watcher: fetches Google/Apple JWKS, diffs vs. on-chain, `propose_jwk`s new keys, alerts ops. Never activates.
+- `jwk-rotator/` — the off-chain watcher: fetches Google/Apple JWKS, diffs vs. on-chain, `propose_jwk`s new keys, alerts ops. Never activates.
 - `docs/RUNBOOK_JWK_ROTATION.md` — normal rotation + emergency revoke runbook (how `valid_until_ts` is computed, when to recycle, fast activation).
 - `scripts/test_jwk_registry.go` — devnet integration test (init → bootstrap/propose → activate → revoke → expire → role rotation), analogous to the other `scripts/test_*.go`. Run **after** deploy.
 - `contracts/oidc-verifier/` (Fase 2) — re-derives `sha256(iss)/sha256(aud)/sha256(kid)` from the JWT and looks up the ACTIVE entry; mirrors the strict RSA-2048/RS256 profile check.
