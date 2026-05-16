@@ -46,5 +46,8 @@ pub fn verify_owner_admin(
         webauthn_auth_data: &[],
         webauthn_client_data_json: &[],
     })?;
-    Ok(on_chain_nonce + 1)
+    // M1 audit fix (2026-05-16): even though `u64::MAX` admin txs is
+    // astronomical, nonces are part of the replay defense and MUST be
+    // monotonic by construction.
+    on_chain_nonce.checked_add(1).ok_or(AuthError::InvalidNonce)
 }

@@ -521,6 +521,13 @@ pub fn quorum_contribute_challenge_with_rendered_message(
 
 // ── Admin (primary signs, clear-signing v2) ─────────────────────
 
+/// Maximum extras the legacy `auth` admin format accepts (mirror of
+/// `ADMIN_CHALLENGE_MAX_EXTRAS` in `policy_engine`).
+pub const ADMIN_HASH_MAX_EXTRAS: usize = 6;
+
+/// M2 audit fix (2026-05-16): each `extras[i]` is prefixed with a `u16 LE`
+/// length tag so two variable-length extras can never be concatenated into
+/// an ambiguous byte string. Off-chain mirrors MUST emit the same format.
 #[inline]
 #[allow(clippy::too_many_arguments)]
 fn admin_hash_with_human(
@@ -534,9 +541,10 @@ fn admin_hash_with_human(
 ) -> [u8; 32] {
     let h_len = human_len_le(human);
     let nonce_le = nonce.to_le_bytes();
-    // Up to: DOMAIN(1) + op(1) + h_len(1) + human(1) + dwallet(1) + policy(1)
-    // + nonce(1) + primary(1) + extras (up to 4 today) = 12. Reserve 16.
-    let mut parts: [&[u8]; 16] = [&[]; 16];
+    // 8 fixed parts + up to 6 extras × 2 (length + payload) = 20 slots.
+    let mut parts: [&[u8]; 20] = [&[]; 20];
+    let mut extra_lens: [[u8; 2]; ADMIN_HASH_MAX_EXTRAS] =
+        [[0u8; 2]; ADMIN_HASH_MAX_EXTRAS];
     parts[0] = DOMAIN;
     parts[1] = op_tag;
     parts[2] = &h_len;
@@ -546,12 +554,17 @@ fn admin_hash_with_human(
     parts[6] = &nonce_le;
     parts[7] = primary_slot;
     let mut n = 8usize;
-    for &e in extras {
-        if n >= parts.len() {
+    let extra_count = extras.len().min(ADMIN_HASH_MAX_EXTRAS);
+    for i in 0..extra_count {
+        extra_lens[i] = (extras[i].len() as u16).to_le_bytes();
+    }
+    for i in 0..extra_count {
+        if n + 1 >= parts.len() {
             break;
         }
-        parts[n] = e;
-        n += 1;
+        parts[n] = &extra_lens[i];
+        parts[n + 1] = extras[i];
+        n += 2;
     }
     hashv(&parts[..n])
 }
