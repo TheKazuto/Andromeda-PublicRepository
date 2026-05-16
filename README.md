@@ -10,7 +10,7 @@
   <p>
     <img src="https://img.shields.io/badge/license-Apache--2.0%20OR%20MIT-blue.svg" alt="License" />
     <img src="https://img.shields.io/badge/status-devnet%20pre--alpha-orange.svg" alt="Status" />
-    <img src="https://img.shields.io/badge/Solana%20programs-9-9945ff.svg" alt="Solana programs" />
+    <img src="https://img.shields.io/badge/Solana%20programs-3-9945ff.svg" alt="Solana programs" />
     <img src="https://img.shields.io/badge/MCP-tools%20auto--generated-7c3aed.svg" alt="MCP" />
     <img src="https://img.shields.io/badge/OpenAPI-3.1-6BA539.svg" alt="OpenAPI" />
   </p>
@@ -31,13 +31,13 @@ Andromeda removes all of that. You call an HTTPS endpoint. We run the engines, t
 ## Why it matters
 
 - **Multi-chain is still mostly glue code.** Every team rebuilds key management, recovery, and per-chain signing from scratch. Andromeda is one API for all of it.
-- **"Smart wallet" usually means "trust our backend."** Andromeda's policies (allowlists, velocity guards, time-locks, oracle circuit breakers, session keys) are enforced by Solana programs that hold the dWallet authority. The gateway literally cannot bypass them.
+- **"Smart wallet" usually means "trust our backend."** Andromeda's policies (allowlists, velocity guards, time-locks, oracle circuit breakers, session keys, FHE-gated confidential decisions, passkey step-up, recovery) are enforced by a single Solana program — the **PolicyEngine v3** — that holds the dWallet authority. The gateway literally cannot bypass it.
 - **Recovery is crypto's unsolved UX problem.** Andromeda does social recovery where the user proves ownership of *any* credential they already have (MetaMask, Phantom, a BTC cold wallet, Gmail, Apple, a passkey) by signing a 32-byte challenge. Andromeda pays the gas and submits the Solana transaction. Zero attestor: every signature is checked by a Solana runtime precompile, so a compromised Andromeda backend still cannot forge anyone's approval.
 - **AI agents need to sign things.** Every REST route is auto-mirrored as an MCP tool, so an agent in Claude Desktop or Cursor can do signing, recovery and policy operations natively, with no SDK and no glue code.
 
 ### Built on Ika + Encrypt
 
-Andromeda doesn't reimplement the cryptography; it wraps it. Ika provides the 2PC-MPC dWallets; Encrypt provides the FHE evaluation; Andromeda provides everything around them: 9 audited Solana programs (8 policy templates + the OIDC JWK registry), the recovery layer, Login Social, gas sponsorship, MCP, HMAC-signed webhooks, an externally verifiable ed25519 audit log, and OpenAPI 3.1. The hard cryptographic guarantees come from those networks; the developer experience comes from us.
+Andromeda doesn't reimplement the cryptography; it wraps it. Ika provides the 2PC-MPC dWallets; Encrypt provides the FHE evaluation; Andromeda provides everything around them: 3 audited Solana programs (the PolicyEngine v3 unifies all rule kinds in one program, plus the `jwk-registry` and `oidc-verifier` libraries that back Login Social), gas sponsorship, MCP, HMAC-signed webhooks, an externally verifiable ed25519 audit log, and OpenAPI 3.1. The hard cryptographic guarantees come from those networks; the developer experience comes from us.
 
 Reference docs: [Ika](https://docs.ika.xyz/) · [Encrypt](https://docs.encrypt.xyz/).
 
@@ -61,8 +61,8 @@ Cases that Andromeda specifically unblocks, not generic Web3 use cases.
 
 - **Cross-chain smart wallets.** Same identity drives signing across EVM, Solana, Bitcoin, Cosmos, NEAR and Aptos. The user signs into the app once and the same dWallet works on every chain.
 - **Onboarding without a wallet (Login Social).** The user signs in with Google or Apple and gets a cross-chain dWallet immediately, with no wallet to install, no seed phrase, no SOL to hold. The same Google/Apple account derives the same dWallet in any app on Andromeda: one identity, one wallet, every chain.
-- **DAO treasuries with on-chain rule enforcement.** A Solana Quasar program (allowlist-destinations + velocity-guard) holds the dWallet authority. The treasury can only interact with whitelisted programs, capped at N signatures per slot window, with no ability for the gateway to bypass the policy.
-- **Trading bots with scoped delegation.** The session-keys template grants a temporary key with on-chain limits on slot expiry, number of uses, amount per transaction, and allowed destination programs. Multiple sessions per dWallet (up to 2^32 concurrent), each with its own monotonic replay nonce.
+- **DAO treasuries with on-chain rule enforcement.** A single Solana Quasar program — the PolicyEngine v3 — holds the dWallet authority with a composable allowlist + velocity rule attached. The treasury can only interact with whitelisted programs, capped at N signatures per slot window, with no ability for the gateway to bypass the policy.
+- **Trading bots with scoped delegation.** The `KIND_SESSION_KEY` rule of the PolicyEngine grants a temporary key with on-chain limits on slot expiry, number of uses, amount per transaction, and allowed destination programs. Multiple sessions per dWallet (up to 2^32 concurrent), each with its own monotonic replay nonce.
 - **AI agents that sign transactions.** Every REST route on the gateway is auto-mirrored as an MCP tool. Drop the endpoint into Claude Desktop or Cursor and the agent can call signing, recovery, or policy operations natively.
 - **Social recovery with the wallet you already have.** A dWallet can be configured with a primary owner plus a roster of recovery owners: another device's passkey, a hardware wallet, trusted friends or family, a backup service. If the user ever loses their seed phrase, the dWallet is restored when any M-of-N of those owners each sign a 32-byte challenge with whatever they already use (MetaMask, Phantom, a BTC cold wallet, Gmail, Apple, and a passkey). Andromeda sponsors the gas and submits the on-chain transaction; the user needs no SDK and no extra wallet.
 - **FHE-gated confidential signing.** Authorisation logic that runs on encrypted inputs. The decision is signed by an ed25519 key held in HashiCorp Vault, then validated on-chain by a Quasar program before the Ika signature is released. Useful for compliance checks, sealed-bid auctions, and private treasury rules.
@@ -80,21 +80,21 @@ Capabilities beyond the core Ika and Encrypt primitives: the surrounding product
 ### Wallet-agnostic + gas sponsor
 - **Gas sponsor.** Andromeda absorbs Solana fees on every flow it controls. End users sign 32-byte canonical challenges with whatever wallet they already own; the gateway pays gas and submits.
 
-### Custody-free recovery
-- **Recovery layer (primary + M-of-N quorum).** Primary single-sig flow plus multi-tx PDA staging quorum. No bound on quorum size.
-- **Cross-chain recovery schemes.** 7 off-chain ownership-proof schemes plus 4 on-chain credential schemes, all validated by Solana precompiles. Zero attestor.
-- **On-chain RulesPolicy.** Quasar program that holds dWallet authority with the policy PDA seeded by an init-authority hash (front-running protected), the Solana clock as the only time source, and strict pattern matching on the WebAuthn challenge field.
-- **Clear signing on every governance approval.** 40 templates render a deterministic ASCII message the approver reads before signing; the on-chain program recomputes the same text and embeds it into the challenge hash, so a compromised gateway cannot swap destination, member, amount, nonce or session without the approver seeing the swap.
+### Custody-free recovery (`KIND_RECOVERY` rule)
+- **Recovery rule (primary + M-of-N quorum).** Primary single-sig flow plus multi-tx PDA staging quorum. No bound on quorum size. Lives as one rule slot inside the PolicyEngine.
+- **Cross-chain credentials.** 4 on-chain credential schemes (Ed25519, Secp256k1, Secp256r1, WebAuthn) validated by Solana precompiles. Zero attestor.
+- **Init-authority-hash seeded PDA.** The `PolicyEngine` PDA is seeded by a hash that includes the init authority — the address cannot be front-run.
+- **Clear signing on every governance approval.** Every challenge renders a deterministic ASCII message the approver reads before signing; the on-chain program recomputes the same text and embeds it into the challenge hash, so a compromised gateway cannot swap destination, member, amount, nonce or session without the approver seeing the swap. See [`Gitbook/security/clear-signing.md`](Gitbook/security/clear-signing.md).
 
-### Policy templates
-- **8 Quasar policy templates.** rules-policy, allowlist-destinations, velocity-guard, time-lock, oracle-conditional, passkey-step-up, fhe-gated, session-keys. All audited, all wallet-agnostic.
+### PolicyEngine v3
+- **One Quasar program, 8 composable rule kinds.** `KIND_ALLOWLIST`, `KIND_VELOCITY`, `KIND_TIME_LOCK`, `KIND_ORACLE`, `KIND_PASSKEY`, `KIND_FHE_GATED`, `KIND_SESSION_KEY`, `KIND_RECOVERY`. Up to 16 active rule slots per dWallet, each with its own sub-PDA and per-rule generation counter. Hot-path `request_signature` walks every active slot's sub-PDA, runs the per-kind dispatch, and CPIs Ika `approve_message` as the last side-effect — fail-closed by design.
 - **Session keys with multi-session.** Up to 2^32 concurrent sessions per dWallet, each with a monotonic replay nonce that binds the message digest, amount, destination program, and signature nonce together.
 
 ### Login Social
 - **Sign in with Google or Apple, get a dWallet immediately.** No wallet to install, no seed phrase, no SOL. Identity is verified entirely on-chain (RSA over the `id_token`, zero attestor). A compromised Andromeda backend still cannot forge anyone's login. The same Google/Apple account derives the same dWallet in any app on Andromeda: one identity, one wallet, every chain.
 
 ### Confidential computing
-- **Confidential Workflows pipeline.** Encrypt FHE evaluation flows into Vault Transit ed25519, then into the Quasar fhe-gated policy, then into the Ika signature. An on-chain authority allowlist plus a non-zero decision-age window are enforced before any signature is released.
+- **Confidential Workflows pipeline.** Encrypt FHE evaluation flows into Vault Transit ed25519, then into the PolicyEngine v3 `KIND_FHE_GATED` rule, then into the Ika signature. An on-chain authority allowlist plus a non-zero decision-age window are enforced before any signature is released.
 
 ### On-chain awareness + future-sign
 - **Webhook-driven Future-Sign.** Arm a trigger (oracle / slot / event / external webhook), Andromeda fires the signature when the condition matches.
@@ -148,9 +148,10 @@ Capabilities beyond the core Ika and Encrypt primitives: the surrounding product
                 network                   (devnet)
 
      ┌────────────────────────────────────────────────────┐
-     │  Solana devnet: 8 policy programs + jwk-registry   │
-     │  Hold dWallet authority, validate every signature  │
-     │  via runtime precompiles (zero attestor)           │
+     │  Solana devnet: PolicyEngine v3 + jwk-registry +   │
+     │  oidc-verifier. Hold dWallet authority, validate   │
+     │  every signature via runtime precompiles (zero     │
+     │  attestor).                                        │
      └────────────────────────────────────────────────────┘
                           ▲
                           │ propose_jwk (authority)
@@ -164,12 +165,12 @@ Capabilities beyond the core Ika and Encrypt primitives: the surrounding product
      Stripe + SMTP (backend service)  |   Cloudflare Pages (dashboard)
 ```
 
-The product surface is composed of **6 services** plus **9 on-chain programs**.
+The product surface is composed of **6 services** plus **3 on-chain programs**.
 
 | Service | Stack | Role |
 |---------|-------|------|
-| gateway | Go 1.25, chi, pgx, Redis | Hot path. Auth, quota, rate limit, MCP server, reverse-proxy to engines, audit log. |
-| ika-backend | Node 24, Express 5, @grpc/grpc-js, @solana/kit | MPC engine. gRPC to Ika validator network, recovery layer, Login Social. |
+| gateway | Go 1.25, chi, pgx, Redis | Hot path. Auth, quota, rate limit, MCP server, reverse-proxy to engines, audit log, PolicyEngine v3 admin surface (`/v1/policy/*`). |
+| ika-backend | Node 24, Express 5, @grpc/grpc-js, @solana/kit | MPC engine. gRPC to Ika validator network, dWallet lifecycle, OIDC pre-flow helpers. |
 | encrypt-backend | Node 22, Hono 4, @encrypt.xyz/pre-alpha-solana-client | FHE engine. 22 Encrypt instructions + high-level wallet primitives. |
 | backend | Go 1.25, chi, pgx, Stripe | Product surface. Auth, customer endpoints, billing, admin console. |
 | dashboard | Next.js 16, React 19, Tailwind 4 | Static export. Customer dashboard + admin console + landing. |
@@ -198,33 +199,37 @@ For authenticated endpoints, request a devnet API key by signing up at https://a
 
 ### Wallet-agnostic recovery (signature flow)
 
-Demonstrates the gas-sponsored, challenge-based UX. The user signs a 32-byte challenge with whatever wallet they already own; Andromeda assembles, signs and submits the Solana transaction.
+Demonstrates the gas-sponsored, challenge-based UX. The user signs a 32-byte challenge with whatever wallet they already own; Andromeda assembles, signs and submits the Solana transaction. Both endpoints are served locally by the gateway — the PolicyEngine v3 transaction is built in-process, signed as gas sponsor, and broadcast in one round-trip per step.
 
 ```bash
 # 1. Request a recovery challenge
-curl -X POST https://api.andromedainfra.pro/v1/recovery/primary/challenge \
+curl -X POST https://api.andromedainfra.pro/v1/policy/recover-as-primary/challenge \
   -H "X-Api-Key: $ANDROMEDA_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "dwalletAddress": "<DWALLET_ADDRESS>",
-    "messageHashHex": "<32-BYTE-HEX>"
+    "dwallet_address": "<DWALLET_ADDRESS>",
+    "message_digest_hex": "<32-BYTE-HEX>",
+    "destination_hex": "<32-BYTE-HEX>",
+    "user_pubkey_hex": "<32-BYTE-HEX>"
   }'
-# returns { "challengeBase64": "...", "expectedNonce": 7, "primaryScheme": "Ed25519" }
+# returns { "challenge_hex": "...", "human_message": "...", "primary_scheme": 0, ... }
 
-# 2. User signs `challengeBase64` off-chain with their credential
-#    (MetaMask, Phantom, BTC cold wallet, Gmail, Apple, passkey, etc.)
+# 2. User signs `challenge_hex` off-chain with their credential
+#    (MetaMask, Phantom, BTC cold wallet, a passkey, etc.)
 
 # 3. Submit the signature. Andromeda pays gas and broadcasts
-curl -X POST https://api.andromedainfra.pro/v1/recovery/primary/submit \
+curl -X POST https://api.andromedainfra.pro/v1/policy/recover-as-primary/submit \
   -H "X-Api-Key: $ANDROMEDA_KEY" \
+  -H "Idempotency-Key: $(uuidgen)" \
   -H "Content-Type: application/json" \
   -d '{
-    "dwalletAddress": "<DWALLET_ADDRESS>",
-    "messageHashHex": "<32-BYTE-HEX>",
-    "signatureBase64": "<USER_SIGNATURE>",
-    "expectedNonce": 7
+    "dwallet_address": "<DWALLET_ADDRESS>",
+    "message_digest_hex": "<32-BYTE-HEX>",
+    "destination_hex": "<32-BYTE-HEX>",
+    "user_pubkey_hex": "<32-BYTE-HEX>",
+    "signature_base64": "<USER_SIGNATURE>"
   }'
-# returns { "txSignature": "...", "messageApprovalAddress": "..." }
+# returns { "tx_signature": "...", "engine_address": "..." }
 ```
 
 The end user never holds SOL, never installs a new wallet, never sees an RPC endpoint.
@@ -246,7 +251,7 @@ Drop the gateway endpoint into any MCP client (Claude Desktop, Cursor, custom):
 }
 ```
 
-The agent can immediately call any of the auto-generated tools, covering signing, recovery, Login Social, policy operations, webhooks, audit log queries, and the full Encrypt FHE surface.
+The agent can immediately call any of the auto-generated tools, covering signing, PolicyEngine v3 admin and recovery flows (`policy.engine.*`), OIDC pre-flow, webhooks, audit log queries, and the full Encrypt FHE surface.
 
 ### Run locally
 
@@ -313,15 +318,9 @@ All artefacts live on Solana **devnet** during pre-alpha.
 
 | Program | Address | Purpose |
 |---------|---------|---------|
-| rules-policy | 6TX7qG47Fsocuwmgsgo2q3NLCHrbomoQxQLifapU8Thr | Recovery primary + M-of-N quorum + cooldown + daily limit |
-| allowlist-destinations | 91hycWu3sTbRELUDBTkqbyaEse1fVFDX3RmW9uPNQqFx | Restrict signing to whitelisted destination programs |
-| velocity-guard | DVAkrYe4SWzihvbh94GC6aB7ESf1h4yxiSDyetq1jkdW | Rate-limit signatures per slot window |
-| time-lock | 2i4bE6s7oc8kkziQETy55SGWQXxwotkpERr9XMv7Q7qs | Restrict signing to allowed slot ranges |
-| oracle-conditional | Wi6x2Y4YTYcv4aMz7AQRF2UELE36fZNKhsAoCFq2ssM | Pyth Pull V2 circuit breaker |
-| passkey-step-up | 7xNwfNHtN11kf5JFNhsQTuciBskmWmZ8XcHSAeNdvorC | Require passkey proof above threshold |
-| fhe-gated | 6NhfKThEydSHH6R7gBm94reo3simopRJmb4nDzkKU7np | Gate signing on confidential FHE evaluation |
-| session-keys | 3Y2QaXiJH3aSiooDnGQsZQhYN72r47mYYbHp9YWyiASm | Multi-session scoped delegation |
+| policy-engine | ARfJadMTH8mvAWprE8oMoRGNamKVDX9GV3URvudYyXgL | The unified policy / recovery / signing engine. Holds dWallet authority. Composable rule slots: `KIND_ALLOWLIST`, `KIND_VELOCITY`, `KIND_TIME_LOCK`, `KIND_ORACLE`, `KIND_PASSKEY`, `KIND_FHE_GATED`, `KIND_SESSION_KEY`, `KIND_RECOVERY` (primary + M-of-N quorum + cooldown + daily limit). |
 | jwk-registry | 8xL2mrQ2amDpinQMHJPaEELbgEXWRVGn4PQ7kzDm7vNM | On-chain trust root for OIDC RSA-2048 keys (Google/Apple). Login Social. |
+| oidc-verifier | _(library)_ | On-chain RSA-2048 verification of provider `id_token`s. Reads the `jwk-registry`. Gated on the Solana `sol_big_mod_exp` syscall. |
 
 ### Omniboard: retail showcase (in development)
 
@@ -335,8 +334,8 @@ All artefacts live on Solana **devnet** during pre-alpha.
 
 - Ika integration runs against the public pre-alpha validator network with a single mock signer. No cryptographic MPC guarantee yet.
 - Encrypt integration runs against the public pre-alpha network. No real FHE confidentiality guarantee yet.
-- All 8 Quasar policy programs were security-audited internally in May 2026 (front-running, time source, replay protection, type confusion, oracle owner check).
-- Login Social (the `jwk-registry` program, the `oidc-verifier` library, and the `rules-policy` `scheme=4` paths) was security-audited separately in May 2026; see `docs/AUDIT_LOGINSOCIAL_2026_05.md`. Two hardening recommendations (F-1, F-2) applied.
+- The PolicyEngine v3 program (including every rule kind) was security-audited internally in May 2026 (front-running, time source, replay protection, type confusion, oracle owner check).
+- Login Social (the `jwk-registry` program, the `oidc-verifier` library, and the `scheme=4` OIDC primary path inside the PolicyEngine) was security-audited separately in May 2026; see `docs/AUDIT_LOGINSOCIAL_2026_05.md`. Two hardening recommendations (F-1, F-2) applied. The on-chain OIDC primary path is currently gated on the Solana `sol_big_mod_exp` syscall.
 - Pre-mainnet third-party audit pending across the whole on-chain surface.
 
 ---
