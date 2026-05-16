@@ -41,8 +41,9 @@ use andromeda_auth::hash::hashv;
 use andromeda_auth::human_message::{self, HumanMessageError, MAX_HUMAN_MESSAGE_BYTES};
 use andromeda_auth::precompile::{check_sysvar_address, ED25519_PRECOMPILE_ID};
 use andromeda_auth::challenge::{
-    passkey_primary_use_challenge, passkey_session_open_challenge, primary_recover_challenge,
-    quorum_contribute_challenge, quorum_session_open_challenge,
+    oidc_primary_use_challenge, oidc_session_open_challenge, passkey_primary_use_challenge,
+    passkey_session_open_challenge, primary_recover_challenge, quorum_contribute_challenge,
+    quorum_session_open_challenge,
 };
 use andromeda_auth::{
     validate_slot, verify_signature, AuthError, VerifyInput, MEMBER_SLOT_LEN, SCHEME_ED25519,
@@ -135,6 +136,7 @@ pub const OP_ADD_SESSION_KEY: &[u8] = b"add-rule-session-key";
 pub const OP_ADD_RECOVERY: &[u8] = b"add-rule-recovery";
 pub const OP_UPDATE_ALLOWLIST: &[u8] = b"update-rule-allowlist";
 pub const OP_UPDATE_RECOVERY: &[u8] = b"update-rule-recovery";
+pub const OP_UPDATE_FHE_AUTH: &[u8] = b"update-rule-fhe-authorities";
 pub const OP_REMOVE_RULE: &[u8] = b"remove-rule";
 pub const OP_PAUSE: &[u8] = b"pause";
 pub const OP_RESUME: &[u8] = b"resume";
@@ -154,6 +156,9 @@ pub const SEED_QUORUM_SESSION: &[u8] = b"quorum_session";
 
 // F9d: passkey session ops (challenges via `andromeda_auth::challenge`).
 pub const SEED_PASSKEY_SESSION: &[u8] = b"passkey_session";
+
+// C1: OIDC session ops (challenges via `andromeda_auth::challenge`).
+pub const SEED_OIDC_SESSION: &[u8] = b"oidc_session";
 
 pub const MAX_RECOVERY_MEMBERS: usize = 16;
 pub const MAX_RECOVERY_DESTINATIONS: usize = 16;
@@ -215,6 +220,7 @@ pub enum PolicyEngineError {
     SessionCapExceeded,
     SessionDestinationNotAllowed,
     SessionNotFound,
+    OracleConfidenceExceeded,
 
     RecoveryQuorumNotReached = 6050,
     RecoveryMemberNotInQuorum,
@@ -231,6 +237,17 @@ pub enum PolicyEngineError {
     OidcIssuerMismatch,
     PasskeyAssertionInvalid,
     PasskeySessionExpired,
+    /// C1: `oidc_session_open` could not match `(iss, aud, kid)` from the JWT
+    /// against any ACTIVE entry of the supplied JWK registry.
+    OidcJwkInactive,
+    /// C1: `recover_as_primary_oidc` — the verifier version pinned at open
+    /// time does not equal the current `OIDC_VERIFIER_V1`. Block downgrade
+    /// attacks across verifier upgrades.
+    OidcVerifierMismatch,
+    /// C1: `recover_as_primary_oidc` — `parsed.addr_seed` did not match
+    /// `rule_pda.primary_slot[1..33]` (a different OIDC identity is trying
+    /// to recover this dWallet).
+    OidcAddrSeedMismatch,
 
     IkaCpiAccountMismatch = 6070,
     IkaCpiFailed,
@@ -658,6 +675,64 @@ pub struct FheGatedRule {
 
 pub const MAX_FHE_AUTHORITIES: usize = 4;
 
+// ── Allowlists (H1, C2) ────────────────────────────────────────────────────
+//
+// Defense-in-depth lists for two trust boundaries the audit (2026-05-16)
+// flagged as "trust the owner key that creates the rule":
+//
+// - `ALLOWED_ORACLE_OWNERS` constrains `feed_owner` values referenced from
+//   `KIND_ORACLE` rules. Population SHOULD include the real Pyth Pull V2
+//   program ID + any official Andromeda v1 adapter program IDs before
+//   mainnet. Empty list = permissive (devnet default).
+//
+// - `ALLOWED_FHE_AUTHORITIES` constrains pubkeys registered in
+//   `KIND_FHE_GATED.authorities_flat` via `update_rule_fhe_gated_authorities`
+//   (disc 126). Empty list = permissive (devnet default).
+//
+// Both lists are `&[]` placeholders in devnet builds. Adding the
+// `mainnet` cargo feature enforces non-empty content via a `const assert!`
+// at compile time so deploys cannot accidentally ship a permissive list.
+pub const ALLOWED_ORACLE_OWNERS: &[Address] = &[];
+pub const ALLOWED_FHE_AUTHORITIES: &[Address] = &[];
+
+#[cfg(feature = "mainnet")]
+const _: () = assert!(
+    !ALLOWED_ORACLE_OWNERS.is_empty(),
+    "ALLOWED_ORACLE_OWNERS must be populated for mainnet builds"
+);
+
+#[cfg(feature = "mainnet")]
+const _: () = assert!(
+    !ALLOWED_FHE_AUTHORITIES.is_empty(),
+    "ALLOWED_FHE_AUTHORITIES must be populated for mainnet builds"
+);
+
+#[inline]
+fn is_oracle_owner_allowed(owner: &[u8; 32]) -> bool {
+    if ALLOWED_ORACLE_OWNERS.is_empty() {
+        return true;
+    }
+    for allowed in ALLOWED_ORACLE_OWNERS {
+        if allowed.as_array() == owner {
+            return true;
+        }
+    }
+    false
+}
+
+#[inline]
+fn is_fhe_authority_allowed(authority: &[u8; 32]) -> bool {
+    if ALLOWED_FHE_AUTHORITIES.is_empty() {
+        return true;
+    }
+    for allowed in ALLOWED_FHE_AUTHORITIES {
+        if allowed.as_array() == authority {
+            return true;
+        }
+    }
+    false
+}
+
 // ─── SessionKeyRule (ABI §3.5.7, F8b — storage layer) ───────────────────────
 //
 // The SessionKeyRule slot is the engine's per-dWallet *policy surface* for
@@ -811,6 +886,147 @@ pub const PASSKEY_SESSION_TTL_SECONDS: i64 = 600;
 pub const WEBAUTHN_AUTH_DATA_MAX: usize = 192;
 pub const WEBAUTHN_CLIENT_DATA_JSON_MAX: usize = 192;
 
+// ─── OidcSession (C1 — Login Social on-chain) ──────────────────────────────
+//
+// One OidcSession PDA per in-flight OIDC recovery, addressed by
+// `(engine, oidc_session_nonce_u64)`. Opened by `oidc_session_open` (OIDC
+// JWT verified via the `oidc-verifier` library — Google/Apple JWT proves
+// the user's identity, off-chain → on-chain), consumed by
+// `recover_as_primary_oidc` (ephemeral Ed25519 key signs use challenges →
+// CPI Ika), closed after expiry.
+//
+// Mirrors the PasskeySession layout to keep the gateway/dashboard code
+// paths parallel between passkey and OIDC recovery.
+#[account(discriminator = 6, set_inner)]
+#[seeds(b"oidc_session", engine: Address, oidc_session_nonce: u64)]
+pub struct OidcSession {
+    pub engine: Address,
+    pub rule_pda: Address,
+    pub payer_for_close: Address,
+    /// `addr_seed = sha256("andromeda::oidc::addr::v1" || lp(iss) || lp(aud)
+    /// || lp(sub))` derived from the JWT at open time. Re-checked against
+    /// `rule_pda.primary_slot[1..33]` on every use — a primary rotation
+    /// (different OIDC identity) kills the session.
+    pub addr_seed: [u8; 32],
+    /// `sha256(header.payload)` of the JWT used at open time — diagnostic
+    /// only (audit trail). The signature verify already happened.
+    pub jwt_digest: [u8; 32],
+    /// User's ephemeral Ed25519 public key — every use authorized by a fresh
+    /// Ed25519 precompile signature from this key.
+    pub eph_pk: [u8; 32],
+    pub session_nonce: u64,
+    pub next_use_nonce: u64,
+    pub not_after_unix_ts: u64,
+    pub expires_at: i64,
+    pub created_at: i64,
+    /// `OIDC_VERIFIER_V1` snapshot at open time; pinned so a verifier
+    /// upgrade doesn't silently widen the trust surface of an open session.
+    pub verifier_version: u32,
+    /// Mirror of `PasskeySession.is_closed` — explicit flag because
+    /// `Clock.unix_timestamp == 0` in quasar-svm tests.
+    pub is_closed: u8,
+    pub _pad: [u8; 3],
+}
+
+pub const OIDC_SESSION_TTL_SECONDS: i64 = 600;
+/// Hard cap on the JWT byte length the engine accepts in a single ix data
+/// blob. Solana single-tx ix data ≈ 1232 bytes total; minus disc + fixed
+/// args (~150 bytes) leaves ~1000 bytes for the JWT. Google/Apple `openid`
+/// id_tokens are ~700–900 bytes, fitting comfortably.
+pub const MAX_OIDC_JWT_BYTES: usize = 1024;
+
+// ── Allowed OIDC issuers / audiences (C1 placeholder, mainnet-gated) ──────
+//
+// On devnet pre-alpha these lists are empty so any (iss, aud) parsed from
+// a JWT bypasses the allowlist (the `oidc-verifier` itself rejects empty
+// lists with `BadConfig`, so we route empties through a permissive
+// fallback). For mainnet the `mainnet` cargo feature enforces non-empty
+// content via a `const assert!` — deploying without proper allowlists
+// fails to compile.
+pub const ALLOWED_OIDC_ISSUERS: &[&[u8]] = &[];
+pub const ALLOWED_OIDC_AUDIENCES: &[&[u8]] = &[];
+
+#[cfg(feature = "mainnet")]
+const _: () = assert!(
+    !ALLOWED_OIDC_ISSUERS.is_empty(),
+    "ALLOWED_OIDC_ISSUERS must be populated for mainnet builds"
+);
+
+#[cfg(feature = "mainnet")]
+const _: () = assert!(
+    !ALLOWED_OIDC_AUDIENCES.is_empty(),
+    "ALLOWED_OIDC_AUDIENCES must be populated for mainnet builds"
+);
+
+/// Devnet fallback set so `oidc-verifier` doesn't reject with `BadConfig`
+/// when the production allowlist is empty (placeholder). Mainnet builds
+/// always have non-empty `ALLOWED_OIDC_ISSUERS`/`ALLOWED_OIDC_AUDIENCES`
+/// (compile-time enforced) and never hit this path.
+#[cfg(not(feature = "mainnet"))]
+const DEVNET_FALLBACK_ISSUERS: &[&[u8]] = &[
+    b"https://accounts.google.com",
+    b"https://appleid.apple.com",
+];
+#[cfg(not(feature = "mainnet"))]
+const DEVNET_FALLBACK_AUDIENCES: &[&[u8]] = &[b"andromeda-devnet"];
+
+// ── JwkRegistry layout mirrors (see contracts/jwk-registry/src/lib.rs) ────
+//
+// Used by `oidc_session_open` to extract the active JWK material from an
+// `UncheckedAccount` without depending on the `andromeda_jwk_registry`
+// crate (would pull a heavy import for a 256-byte read).
+
+pub const JWK_REGISTRY_MAX_ENTRIES: usize = 8;
+pub const JWK_ENTRY_LEN: usize = 400;
+/// 1 disc + 1 version + 1 entry_count + 6 reserved + 32×4 (roles) + 8×5
+/// (timelock + grace + grace_post_revoke + 2 rotation_ready_at) = 162.
+pub const JWK_HEADER_LEN: usize = 1 + 1 + 1 + 6 + 32 * 4 + 8 * 5;
+const JWK_ACCOUNT_DISCRIMINATOR: u8 = 1;
+const JWK_STATUS_ACTIVE: u8 = 2;
+
+// Per-entry offsets (mirror of `EO_*` in jwk-registry/src/lib.rs).
+const JWK_EO_STATUS: usize = 0;
+const JWK_EO_ISSUER_HASH: usize = 8;
+const JWK_EO_AUDIENCE_HASH: usize = 40;
+const JWK_EO_KID_HASH: usize = 72;
+const JWK_EO_MODULUS: usize = 104;
+const JWK_EO_EXPONENT: usize = 360;
+
+/// Read one JWK entry from a `JwkRegistry` account's raw data, validating
+/// the entry status is `ACTIVE`. Returns `(modulus_n_256B, exponent_e,
+/// issuer_hash, audience_hash, kid_hash)`.
+#[allow(clippy::type_complexity)]
+fn read_jwk_entry(
+    data: &[u8],
+    entry_idx: usize,
+) -> Result<([u8; 256], u32, [u8; 32], [u8; 32], [u8; 32]), ProgramError> {
+    if data.is_empty() || data[0] != JWK_ACCOUNT_DISCRIMINATOR {
+        return Err(PolicyEngineError::OidcJwkNotFound.into());
+    }
+    let entry_base = JWK_HEADER_LEN + entry_idx * JWK_ENTRY_LEN;
+    if entry_base + JWK_ENTRY_LEN > data.len() {
+        return Err(PolicyEngineError::OidcJwkNotFound.into());
+    }
+    let entry = &data[entry_base..entry_base + JWK_ENTRY_LEN];
+    if entry[JWK_EO_STATUS] != JWK_STATUS_ACTIVE {
+        return Err(PolicyEngineError::OidcJwkInactive.into());
+    }
+    let mut modulus = [0u8; 256];
+    modulus.copy_from_slice(&entry[JWK_EO_MODULUS..JWK_EO_MODULUS + 256]);
+    let exponent = u32::from_le_bytes(
+        entry[JWK_EO_EXPONENT..JWK_EO_EXPONENT + 4]
+            .try_into()
+            .map_err(|_| PolicyEngineError::OidcJwkNotFound)?,
+    );
+    let mut iss = [0u8; 32];
+    iss.copy_from_slice(&entry[JWK_EO_ISSUER_HASH..JWK_EO_ISSUER_HASH + 32]);
+    let mut aud = [0u8; 32];
+    aud.copy_from_slice(&entry[JWK_EO_AUDIENCE_HASH..JWK_EO_AUDIENCE_HASH + 32]);
+    let mut kid = [0u8; 32];
+    kid.copy_from_slice(&entry[JWK_EO_KID_HASH..JWK_EO_KID_HASH + 32]);
+    Ok((modulus, exponent, iss, aud, kid))
+}
+
 #[account(discriminator = 2, set_inner)]
 #[seeds(b"rule_recovery", engine: Address, rule_index: u8)]
 pub struct RecoveryRule {
@@ -894,9 +1110,18 @@ pub fn policy_engine_init_challenge(
     ])
 }
 
+/// Maximum extras the admin challenge format accepts (mirrored off-chain).
+pub const ADMIN_CHALLENGE_MAX_EXTRAS: usize = 12;
+
 /// Canonical admin challenge for `policy-engine v3` (clear-signing v2,
 /// ABI §6.2). Used by `add_rule_*`, `update_rule_*`, `remove_rule`, `pause`,
 /// `resume`, `revoke`.
+///
+/// M2 audit fix (2026-05-16): each `extras[i]` is prefixed with a `u16 LE`
+/// length tag so two variable-length extras can never be concatenated into
+/// an ambiguous byte string. Off-chain mirrors (Go gateway, TS ika-backend)
+/// MUST emit the same wire format — cross-language fixtures under
+/// `fixtures/policy_engine_v3/challenges/admin/` exist to catch drift.
 #[inline]
 #[allow(clippy::too_many_arguments)]
 pub fn admin_challenge(
@@ -917,12 +1142,11 @@ pub fn admin_challenge(
     let index_b = [rule_index];
     let gen_le = rule_generation.to_le_bytes();
     let nonce_le = expected_nonce.to_le_bytes();
-    // F4b fix: array bumped from 16 → 24 slots. 12 fixed parts +
-    // up to 12 extras. TimeLock has 5 extras (applies, mode, unlock_le,
-    // delay_le, gen_le); Velocity/Recovery may use more. Previous cap of
-    // 16 silently truncated the last extra(s), producing a challenge that
-    // never matched the off-chain mirrors.
-    let mut parts: [&[u8]; 24] = [&[]; 24];
+    // M2: each extra ships as (u16_le_len, bytes). 12 fixed parts + up to
+    // 12 extras × 2 (length + payload) = 36 slots.
+    let mut parts: [&[u8]; 36] = [&[]; 36];
+    let mut extra_lens: [[u8; 2]; ADMIN_CHALLENGE_MAX_EXTRAS] =
+        [[0u8; 2]; ADMIN_CHALLENGE_MAX_EXTRAS];
     parts[0] = DOMAIN_V3;
     parts[1] = op_tag;
     parts[2] = &h_len;
@@ -936,12 +1160,23 @@ pub fn admin_challenge(
     parts[10] = config_hash;
     parts[11] = owner_slot;
     let mut n = 12usize;
-    for &e in extras {
-        if n >= parts.len() {
+    // First pass: write all the u16 LE lengths into the local backing
+    // array. We must do this BEFORE binding `parts[*]` references so the
+    // borrow checker can see the backing array is stable for the rest of
+    // the function.
+    let extra_count = extras.len().min(ADMIN_CHALLENGE_MAX_EXTRAS);
+    for i in 0..extra_count {
+        // Truncates to u16 — extras above 65 535 bytes are rejected upstream
+        // (every existing caller passes ≤ 1232 bytes).
+        extra_lens[i] = (extras[i].len() as u16).to_le_bytes();
+    }
+    for i in 0..extra_count {
+        if n + 1 >= parts.len() {
             break;
         }
-        parts[n] = e;
-        n += 1;
+        parts[n] = &extra_lens[i];
+        parts[n + 1] = extras[i];
+        n += 2;
     }
     hashv(&parts[..n])
 }
@@ -1386,16 +1621,16 @@ mod policy_engine_program {
                     for i in 0..count {
                         let base = 105 + i * 48;
                         let window_seconds = u64::from_le_bytes(
-                            sub_data[base..base + 8].try_into().unwrap(),
+                            sub_data[base..base + 8].try_into().map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
                         );
                         let cap = u64::from_le_bytes(
-                            sub_data[base + 8..base + 16].try_into().unwrap(),
+                            sub_data[base + 8..base + 16].try_into().map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
                         );
                         let current_count = u64::from_le_bytes(
-                            sub_data[base + 16..base + 24].try_into().unwrap(),
+                            sub_data[base + 16..base + 24].try_into().map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
                         );
                         let window_start = i64::from_le_bytes(
-                            sub_data[base + 32..base + 40].try_into().unwrap(),
+                            sub_data[base + 32..base + 40].try_into().map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
                         );
                         require!(
                             window_seconds > 0 && cap > 0,
@@ -1452,13 +1687,13 @@ mod policy_engine_program {
                     //   sub_data[121..129] created_at_ts i64
                     let mode = sub_data[98];
                     let unlock_ts = i64::from_le_bytes(
-                        sub_data[105..113].try_into().unwrap(),
+                        sub_data[105..113].try_into().map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
                     );
                     let delay_seconds = u64::from_le_bytes(
-                        sub_data[113..121].try_into().unwrap(),
+                        sub_data[113..121].try_into().map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
                     );
                     let created_at_ts = i64::from_le_bytes(
-                        sub_data[121..129].try_into().unwrap(),
+                        sub_data[121..129].try_into().map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
                     );
                     let effective_unlock = match mode {
                         TIME_LOCK_MODE_ABSOLUTE => unlock_ts,
@@ -1511,6 +1746,12 @@ mod policy_engine_program {
                         PolicyEngineError::InvalidRuleHeader
                     );
                     let freshness_secs = (sub_data[99] as i64).saturating_mul(16);
+                    // H3 fix: the rule's `min_confidence_bps_div4` (legacy name)
+                    // is an UPPER bound on accepted price uncertainty. A value
+                    // of 0 disables the check (back-compat for rules created
+                    // before H3 landed). max_confidence_bps fits in u64 even
+                    // for u8::MAX * 4 = 1020 bps.
+                    let max_confidence_bps_div4 = sub_data[100] as u64;
                     // Collect feed metadata into a local buffer because we
                     // need to drop the immutable sub_data borrow before
                     // pulling aux accounts (some sub_data references can
@@ -1524,18 +1765,29 @@ mod policy_engine_program {
                         let mut feed_owner = [0u8; 32];
                         feed_owner.copy_from_slice(&sub_data[base + 32..base + 64]);
                         let min_q64 = i64::from_le_bytes(
-                            sub_data[base + 64..base + 72].try_into().unwrap(),
+                            sub_data[base + 64..base + 72].try_into().map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
                         );
                         let max_q64 = i64::from_le_bytes(
-                            sub_data[base + 72..base + 80].try_into().unwrap(),
+                            sub_data[base + 72..base + 80].try_into().map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
                         );
                         feeds[i] = (feed_acct, feed_owner, min_q64, max_q64);
                     }
                     drop(sub_data);
 
+                    let max_confidence_bps = max_confidence_bps_div4.saturating_mul(4);
                     for i in 0..count {
                         let (expected_acct, expected_owner, min_q64, max_q64) =
                             feeds[i];
+                        // H1 fix: defense-in-depth allowlist. A rule whose
+                        // feed_owner is outside the allowed set is rejected
+                        // even if the rule itself was created by a legit
+                        // owner (which lowers the blast radius of a
+                        // gateway/owner-key compromise that registers a
+                        // malicious feed_owner).
+                        require!(
+                            is_oracle_owner_allowed(&expected_owner),
+                            PolicyEngineError::OracleOwnerMismatch
+                        );
                         let aux_view = rem_iter
                             .next()
                             .ok_or(PolicyEngineError::InvalidRuleHeader)?
@@ -1556,10 +1808,13 @@ mod policy_engine_program {
                             PolicyEngineError::InvalidRuleHeader
                         );
                         let price = i64::from_le_bytes(
-                            aux_data[32..40].try_into().unwrap(),
+                            aux_data[32..40].try_into().map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
+                        );
+                        let confidence = u64::from_le_bytes(
+                            aux_data[40..48].try_into().map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
                         );
                         let publish_time = i64::from_le_bytes(
-                            aux_data[56..64].try_into().unwrap(),
+                            aux_data[56..64].try_into().map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
                         );
                         require!(
                             publish_time.saturating_add(freshness_secs) >= current_ts,
@@ -1569,6 +1824,34 @@ mod policy_engine_program {
                             price >= min_q64 && price <= max_q64,
                             PolicyEngineError::OracleOutOfBand
                         );
+                        // H3: confidence_bps = confidence * 10_000 / |price|.
+                        // Skipped when the rule sets `max_confidence_bps_div4 = 0`.
+                        if max_confidence_bps > 0 {
+                            let abs_price = if price < 0 {
+                                (price as i128).unsigned_abs() as u64
+                            } else {
+                                price as u64
+                            };
+                            // price == 0 with confidence > 0 means infinite
+                            // uncertainty — reject unconditionally. price == 0
+                            // with confidence == 0 is degenerate but not the
+                            // adversarial case we care about (oracle would
+                            // already fail OracleOutOfBand for any non-trivial
+                            // band).
+                            if abs_price == 0 {
+                                require!(
+                                    confidence == 0,
+                                    PolicyEngineError::OracleConfidenceExceeded
+                                );
+                            } else {
+                                let confidence_bps =
+                                    confidence.saturating_mul(10_000) / abs_price;
+                                require!(
+                                    confidence_bps <= max_confidence_bps,
+                                    PolicyEngineError::OracleConfidenceExceeded
+                                );
+                            }
+                        }
                     }
                 }
                 KIND_PASSKEY => {
@@ -1962,9 +2245,17 @@ mod policy_engine_program {
         };
         write_rule_entry(&mut ctx.accounts.engine.rules_flat, slot, &new_entry);
         let cur_count: u8 = ctx.accounts.engine.rules_count;
-        ctx.accounts.engine.rules_count = cur_count + 1;
+        // M1 audit fix: counters bounded by `MAX_RULES` and engine slot limit
+        // (RuleSlotInUse) so overflow is unreachable, but `checked_add` makes
+        // the invariant explicit and prevents drift if bounds change.
+        ctx.accounts.engine.rules_count = cur_count
+            .checked_add(1)
+            .ok_or(PolicyEngineError::TooManyRules)?;
         let cur_gen: u32 = ctx.accounts.engine.rules_generation.into();
-        ctx.accounts.engine.rules_generation = (cur_gen + 1).into();
+        ctx.accounts.engine.rules_generation = cur_gen
+            .checked_add(1)
+            .ok_or(PolicyEngineError::TooManyRules)?
+            .into();
         ctx.accounts.engine.next_admin_nonce = new_nonce.into();
 
         ctx.accounts.program.emit_event(
@@ -2034,10 +2325,10 @@ mod policy_engine_program {
         for i in 0..(windows_count as usize) {
             let base = i * 16;
             let window_seconds = u64::from_le_bytes(
-                windows_config[base..base + 8].try_into().unwrap(),
+                windows_config[base..base + 8].try_into().map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
             );
             let cap = u64::from_le_bytes(
-                windows_config[base + 8..base + 16].try_into().unwrap(),
+                windows_config[base + 8..base + 16].try_into().map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
             );
             require!(
                 window_seconds > 0 && cap > 0,
@@ -2137,9 +2428,17 @@ mod policy_engine_program {
         };
         write_rule_entry(&mut ctx.accounts.engine.rules_flat, slot, &new_entry);
         let cur_count: u8 = ctx.accounts.engine.rules_count;
-        ctx.accounts.engine.rules_count = cur_count + 1;
+        // M1 audit fix: counters bounded by `MAX_RULES` and engine slot limit
+        // (RuleSlotInUse) so overflow is unreachable, but `checked_add` makes
+        // the invariant explicit and prevents drift if bounds change.
+        ctx.accounts.engine.rules_count = cur_count
+            .checked_add(1)
+            .ok_or(PolicyEngineError::TooManyRules)?;
         let cur_gen: u32 = ctx.accounts.engine.rules_generation.into();
-        ctx.accounts.engine.rules_generation = (cur_gen + 1).into();
+        ctx.accounts.engine.rules_generation = cur_gen
+            .checked_add(1)
+            .ok_or(PolicyEngineError::TooManyRules)?
+            .into();
         ctx.accounts.engine.next_admin_nonce = new_nonce.into();
 
         ctx.accounts.program.emit_event(
@@ -2252,9 +2551,17 @@ mod policy_engine_program {
         };
         write_rule_entry(&mut ctx.accounts.engine.rules_flat, slot, &new_entry);
         let cur_count: u8 = ctx.accounts.engine.rules_count;
-        ctx.accounts.engine.rules_count = cur_count + 1;
+        // M1 audit fix: counters bounded by `MAX_RULES` and engine slot limit
+        // (RuleSlotInUse) so overflow is unreachable, but `checked_add` makes
+        // the invariant explicit and prevents drift if bounds change.
+        ctx.accounts.engine.rules_count = cur_count
+            .checked_add(1)
+            .ok_or(PolicyEngineError::TooManyRules)?;
         let cur_gen: u32 = ctx.accounts.engine.rules_generation.into();
-        ctx.accounts.engine.rules_generation = (cur_gen + 1).into();
+        ctx.accounts.engine.rules_generation = cur_gen
+            .checked_add(1)
+            .ok_or(PolicyEngineError::TooManyRules)?
+            .into();
         ctx.accounts.engine.next_admin_nonce = new_nonce.into();
 
         ctx.accounts.program.emit_event(
@@ -2352,9 +2659,17 @@ mod policy_engine_program {
         };
         write_rule_entry(&mut ctx.accounts.engine.rules_flat, slot, &new_entry);
         let cur_count: u8 = ctx.accounts.engine.rules_count;
-        ctx.accounts.engine.rules_count = cur_count + 1;
+        // M1 audit fix: counters bounded by `MAX_RULES` and engine slot limit
+        // (RuleSlotInUse) so overflow is unreachable, but `checked_add` makes
+        // the invariant explicit and prevents drift if bounds change.
+        ctx.accounts.engine.rules_count = cur_count
+            .checked_add(1)
+            .ok_or(PolicyEngineError::TooManyRules)?;
         let cur_gen: u32 = ctx.accounts.engine.rules_generation.into();
-        ctx.accounts.engine.rules_generation = (cur_gen + 1).into();
+        ctx.accounts.engine.rules_generation = cur_gen
+            .checked_add(1)
+            .ok_or(PolicyEngineError::TooManyRules)?
+            .into();
         ctx.accounts.engine.next_admin_nonce = new_nonce.into();
 
         ctx.accounts.program.emit_event(
@@ -2445,9 +2760,17 @@ mod policy_engine_program {
         };
         write_rule_entry(&mut ctx.accounts.engine.rules_flat, slot, &new_entry);
         let cur_count: u8 = ctx.accounts.engine.rules_count;
-        ctx.accounts.engine.rules_count = cur_count + 1;
+        // M1 audit fix: counters bounded by `MAX_RULES` and engine slot limit
+        // (RuleSlotInUse) so overflow is unreachable, but `checked_add` makes
+        // the invariant explicit and prevents drift if bounds change.
+        ctx.accounts.engine.rules_count = cur_count
+            .checked_add(1)
+            .ok_or(PolicyEngineError::TooManyRules)?;
         let cur_gen: u32 = ctx.accounts.engine.rules_generation.into();
-        ctx.accounts.engine.rules_generation = (cur_gen + 1).into();
+        ctx.accounts.engine.rules_generation = cur_gen
+            .checked_add(1)
+            .ok_or(PolicyEngineError::TooManyRules)?
+            .into();
         ctx.accounts.engine.next_admin_nonce = new_nonce.into();
 
         ctx.accounts.program.emit_event(
@@ -2541,9 +2864,17 @@ mod policy_engine_program {
         };
         write_rule_entry(&mut ctx.accounts.engine.rules_flat, slot, &new_entry);
         let cur_count: u8 = ctx.accounts.engine.rules_count;
-        ctx.accounts.engine.rules_count = cur_count + 1;
+        // M1 audit fix: counters bounded by `MAX_RULES` and engine slot limit
+        // (RuleSlotInUse) so overflow is unreachable, but `checked_add` makes
+        // the invariant explicit and prevents drift if bounds change.
+        ctx.accounts.engine.rules_count = cur_count
+            .checked_add(1)
+            .ok_or(PolicyEngineError::TooManyRules)?;
         let cur_gen: u32 = ctx.accounts.engine.rules_generation.into();
-        ctx.accounts.engine.rules_generation = (cur_gen + 1).into();
+        ctx.accounts.engine.rules_generation = cur_gen
+            .checked_add(1)
+            .ok_or(PolicyEngineError::TooManyRules)?
+            .into();
         ctx.accounts.engine.next_admin_nonce = new_nonce.into();
 
         ctx.accounts.program.emit_event(
@@ -2666,9 +2997,17 @@ mod policy_engine_program {
         };
         write_rule_entry(&mut ctx.accounts.engine.rules_flat, slot, &new_entry);
         let cur_count: u8 = ctx.accounts.engine.rules_count;
-        ctx.accounts.engine.rules_count = cur_count + 1;
+        // M1 audit fix: counters bounded by `MAX_RULES` and engine slot limit
+        // (RuleSlotInUse) so overflow is unreachable, but `checked_add` makes
+        // the invariant explicit and prevents drift if bounds change.
+        ctx.accounts.engine.rules_count = cur_count
+            .checked_add(1)
+            .ok_or(PolicyEngineError::TooManyRules)?;
         let cur_gen: u32 = ctx.accounts.engine.rules_generation.into();
-        ctx.accounts.engine.rules_generation = (cur_gen + 1).into();
+        ctx.accounts.engine.rules_generation = cur_gen
+            .checked_add(1)
+            .ok_or(PolicyEngineError::TooManyRules)?
+            .into();
         ctx.accounts.engine.next_admin_nonce = new_nonce.into();
 
         ctx.accounts.program.emit_event(
@@ -2859,9 +3198,17 @@ mod policy_engine_program {
         };
         write_rule_entry(&mut ctx.accounts.engine.rules_flat, slot, &new_entry);
         let cur_count: u8 = ctx.accounts.engine.rules_count;
-        ctx.accounts.engine.rules_count = cur_count + 1;
+        // M1 audit fix: counters bounded by `MAX_RULES` and engine slot limit
+        // (RuleSlotInUse) so overflow is unreachable, but `checked_add` makes
+        // the invariant explicit and prevents drift if bounds change.
+        ctx.accounts.engine.rules_count = cur_count
+            .checked_add(1)
+            .ok_or(PolicyEngineError::TooManyRules)?;
         let cur_gen: u32 = ctx.accounts.engine.rules_generation.into();
-        ctx.accounts.engine.rules_generation = (cur_gen + 1).into();
+        ctx.accounts.engine.rules_generation = cur_gen
+            .checked_add(1)
+            .ok_or(PolicyEngineError::TooManyRules)?
+            .into();
         ctx.accounts.engine.next_admin_nonce = new_nonce.into();
 
         ctx.accounts.program.emit_event(
@@ -3114,7 +3461,11 @@ mod policy_engine_program {
         );
         ctx.accounts.engine.next_admin_nonce = new_nonce.into();
         let cur_egen: u32 = ctx.accounts.engine.rules_generation.into();
-        ctx.accounts.engine.rules_generation = (cur_egen + 1).into();
+        // M1 audit fix: rules_generation is u32; ~4B updates before overflow.
+        ctx.accounts.engine.rules_generation = cur_egen
+            .checked_add(1)
+            .ok_or(PolicyEngineError::TooManyRules)?
+            .into();
 
         ctx.accounts.program.emit_event(
             &RuleUpdated {
@@ -3237,7 +3588,11 @@ mod policy_engine_program {
         );
         ctx.accounts.engine.next_admin_nonce = new_nonce.into();
         let cur_egen: u32 = ctx.accounts.engine.rules_generation.into();
-        ctx.accounts.engine.rules_generation = (cur_egen + 1).into();
+        // M1 audit fix: rules_generation is u32; ~4B updates before overflow.
+        ctx.accounts.engine.rules_generation = cur_egen
+            .checked_add(1)
+            .ok_or(PolicyEngineError::TooManyRules)?
+            .into();
 
         ctx.accounts.program.emit_event(
             &RuleUpdated {
@@ -3253,21 +3608,559 @@ mod policy_engine_program {
         Ok(())
     }
 
-    /// Disc 81 — `recover_as_primary_oidc` (F0.5 stub).
+    /// Disc 126 — `update_rule_fhe_gated_authorities` (C2 audit fix).
     ///
-    /// Exists in F0.5 to force the `andromeda_oidc_verifier` import to stay
-    /// in the SBF binary for size measurement. Full implementation in F9.
-    #[instruction(discriminator = 81)]
-    pub fn recover_as_primary_oidc(
-        _ctx: Ctx<EngineAdmin>,
+    /// Replaces the FHE authority list of a `KIND_FHE_GATED` rule in one
+    /// shot. Owner signs an `OP_UPDATE_FHE_AUTH` challenge binding the new
+    /// (count, flat_bytes) tuple. `new_count == 0` is rejected — an active
+    /// FHE-Gated rule must have at least one authority (the F7b dispatch
+    /// already fail-closes on count==0).
+    ///
+    /// Each pubkey is validated against `ALLOWED_FHE_AUTHORITIES` when that
+    /// list is non-empty (devnet placeholder = permissive).
+    #[instruction(discriminator = 126)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_rule_fhe_gated_authorities(
+        ctx: Ctx<UpdateRuleFheGated>,
         _init_authority_hash: Address,
-        _session_nonce: u64,
+        expected_nonce: u64,
+        _rule_index: u8,
+        new_count: u8,
+        new_authorities: [u8; MAX_FHE_AUTHORITIES * 32],
     ) -> Result<(), ProgramError> {
-        // Touch the verifier so the symbol is retained at link time. The
-        // real call lands in F9 with full JWT + JWK registry + ephemeral key
-        // validation; for now we simply call a cheap version probe.
-        let _ = oidc_verifier::OIDC_VERIFIER_V1;
-        Err(PolicyEngineError::GenericError.into())
+        let current_ts: i64 = ctx.accounts.clock.unix_timestamp.into();
+        let engine_addr = *ctx.accounts.engine.address();
+        let dwallet_addr = *ctx.accounts.dwallet_account.address();
+        let owner_slot = ctx.accounts.engine.owner_slot;
+        let on_chain_nonce: u64 = ctx.accounts.engine.next_admin_nonce.into();
+
+        let header_kind = ctx.accounts.rule_pda.kind;
+        let header_index = ctx.accounts.rule_pda.index;
+        let header_enabled = ctx.accounts.rule_pda.enabled;
+        let header_gen: u32 = ctx.accounts.rule_pda.generation.into();
+        let applies_to = ctx.accounts.rule_pda.config_applies_to;
+        let freshness = ctx.accounts.rule_pda.freshness_seconds_div16;
+        require!(
+            header_kind == KIND_FHE_GATED,
+            PolicyEngineError::InvalidRuleKind
+        );
+        require!(header_enabled == 1, PolicyEngineError::RuleDisabled);
+        let entry = read_rule_entry(
+            &ctx.accounts.engine.rules_flat,
+            header_index as usize,
+        );
+        require!(
+            entry.kind == header_kind && entry.generation == header_gen,
+            PolicyEngineError::InvalidRuleHeader
+        );
+
+        require!(
+            new_count as usize > 0
+                && (new_count as usize) <= MAX_FHE_AUTHORITIES,
+            PolicyEngineError::InvalidRuleHeader
+        );
+        let count = new_count as usize;
+        for i in 0..count {
+            let off = i * 32;
+            let mut auth = [0u8; 32];
+            auth.copy_from_slice(&new_authorities[off..off + 32]);
+            // Zero pubkey is never a valid Ed25519 public key.
+            require!(
+                auth != [0u8; 32],
+                PolicyEngineError::InvalidRuleHeader
+            );
+            require!(
+                is_fhe_authority_allowed(&auth),
+                PolicyEngineError::AuthFailed
+            );
+        }
+        // Canonical flat: payload bytes + zero-padding for unused slots.
+        let mut canon = [0u8; MAX_FHE_AUTHORITIES * 32];
+        canon[..count * 32].copy_from_slice(&new_authorities[..count * 32]);
+
+        let applies_b = [applies_to];
+        let count_b = [new_count];
+        let fresh_b = [freshness];
+        let new_hash = hashv(&[
+            b"fhe-gated-config-v1",
+            &applies_b,
+            &count_b,
+            &fresh_b,
+            &canon,
+        ]);
+        let new_gen = header_gen.saturating_add(1);
+        let gen_le = new_gen.to_le_bytes();
+
+        let mut human_buf = [0u8; MAX_HUMAN_MESSAGE_BYTES];
+        let human_len = human_message::allowlist_pause_message(
+            &mut human_buf, &engine_addr, &dwallet_addr,
+        )
+        .map_err(PolicyEngineError::from)?;
+        let human = &human_buf[..human_len];
+
+        let challenge = admin_challenge(
+            OP_UPDATE_FHE_AUTH,
+            human,
+            &engine_addr,
+            &dwallet_addr,
+            KIND_FHE_GATED,
+            header_index,
+            new_gen,
+            on_chain_nonce,
+            &new_hash,
+            &owner_slot,
+            &[&count_b, &canon, &gen_le],
+        );
+
+        check_sysvar_addr(ctx.accounts.instructions_sysvar.address())?;
+        let sysvar_view = ctx.accounts.instructions_sysvar.to_account_view();
+        let sysvar_data_ref = sysvar_view
+            .try_borrow()
+            .map_err(|_| PolicyEngineError::AuthFailed)?;
+        let new_nonce = verify_owner_admin(
+            expected_nonce, on_chain_nonce, &owner_slot, &challenge, &sysvar_data_ref,
+        )
+        .map_err(PolicyEngineError::from)?;
+        drop(sysvar_data_ref);
+
+        ctx.accounts.rule_pda.authorities_count = new_count;
+        ctx.accounts.rule_pda.authorities_flat.copy_from_slice(&canon);
+        ctx.accounts.rule_pda.generation = new_gen.into();
+        ctx.accounts.rule_pda.config_hash = new_hash;
+
+        let mut entry = entry;
+        entry.generation = new_gen;
+        entry.config_hash = new_hash;
+        write_rule_entry(
+            &mut ctx.accounts.engine.rules_flat,
+            header_index as usize,
+            &entry,
+        );
+        ctx.accounts.engine.next_admin_nonce = new_nonce.into();
+        let cur_egen: u32 = ctx.accounts.engine.rules_generation.into();
+        // M1 audit fix: rules_generation is u32; ~4B updates before overflow.
+        ctx.accounts.engine.rules_generation = cur_egen
+            .checked_add(1)
+            .ok_or(PolicyEngineError::TooManyRules)?
+            .into();
+
+        ctx.accounts.program.emit_event(
+            &RuleUpdated {
+                engine: engine_addr,
+                ts: current_ts,
+                kind: KIND_FHE_GATED as u64,
+                rule_index: header_index as u64,
+                generation: new_gen as u64,
+            },
+            &ctx.accounts.event_authority,
+            EventAuthority::BUMP,
+        )?;
+        Ok(())
+    }
+
+    /// Disc 87 — `oidc_session_open` (C1 — Login Social on-chain).
+    ///
+    /// Verifies an OIDC JWT (Google/Apple) and opens an `OidcSession` PDA
+    /// bound to a user-supplied ephemeral Ed25519 key. Subsequent
+    /// recoveries (`recover_as_primary_oidc`) are signed by `eph_pk` for
+    /// the duration of the session — the JWT is NOT consumed per signature.
+    ///
+    /// Flow (mirrors `passkey_session_open`):
+    ///   1. JWT bytes arrive in the ix data (≤ `MAX_OIDC_JWT_BYTES = 1024`).
+    ///   2. Caller picks a JWK entry index in the supplied `jwk_registry`
+    ///      account; we validate the entry is ACTIVE and extract
+    ///      `(issuer_hash, audience_hash, kid_hash, modulus, exponent)`.
+    ///   3. We call `oidc_verifier::verify` — with `oidc-rsa` feature OFF
+    ///      (devnet pre-alpha), this always fails at the RSA step. Wiring
+    ///      stays correct so the post-syscall redeploy is a feature-flag
+    ///      flip, not a rewrite.
+    ///   4. Cross-check `parsed.{issuer,audience,kid}_hash` against the JWK
+    ///      entry the caller pointed at — defends against feeding a JWT
+    ///      from one (iss, aud, kid) while pointing at another's modulus.
+    ///   5. Compare `parsed.addr_seed` byte-for-byte with
+    ///      `rule_pda.primary_slot[1..33]` (which carries the addr_seed for
+    ///      `scheme = SCHEME_OIDC_JWT`).
+    ///   6. Verify the user-supplied ephemeral key signed the
+    ///      `oidc_session_open_challenge` (Ed25519 precompile).
+    ///   7. Populate the `OidcSession` PDA + bump the engine's
+    ///      `next_oidc_session_nonce`.
+    #[instruction(discriminator = 87)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn oidc_session_open(
+        ctx: Ctx<OidcSessionOpenAccts>,
+        _init_authority_hash: Address,
+        _rule_index: u8,
+        _oidc_session_nonce: u64,
+        eph_pk: [u8; 32],
+        not_after_unix_ts: u64,
+        nonce_randomness: [u8; 32],
+        expected_oidc_session_nonce: u64,
+        jwk_entry_index: u8,
+        jwt_len: u16,
+        jwt_bytes: [u8; MAX_OIDC_JWT_BYTES],
+    ) -> Result<(), ProgramError> {
+        let current_ts: i64 = ctx.accounts.clock.unix_timestamp.into();
+        let engine_addr = *ctx.accounts.engine.address();
+        let rule_addr = *ctx.accounts.rule_pda.address();
+        let dwallet_addr = *ctx.accounts.dwallet_account.address();
+        let payer_addr = *ctx.accounts.payer.address();
+        let jwk_registry_addr = *ctx.accounts.jwk_registry.address();
+
+        // 0. nonce reject-fast.
+        let on_chain_nonce: u64 = ctx.accounts.engine.next_oidc_session_nonce.into();
+        require!(
+            expected_oidc_session_nonce == on_chain_nonce,
+            PolicyEngineError::InvalidNonce
+        );
+
+        // 1. primary must be an OIDC slot.
+        require!(
+            ctx.accounts.rule_pda.primary_present == 1,
+            PolicyEngineError::RuleNotApplicable
+        );
+        let primary_slot = ctx.accounts.rule_pda.primary_slot;
+        require!(
+            primary_slot[0] == SCHEME_OIDC_JWT,
+            PolicyEngineError::UnsupportedScheme
+        );
+        validate_slot(&primary_slot)
+            .map_err(|_| PolicyEngineError::InvalidOwnerSlot)?;
+
+        // 2. JWT length bounds.
+        let jl = jwt_len as usize;
+        require!(
+            jl > 0 && jl <= MAX_OIDC_JWT_BYTES,
+            PolicyEngineError::OidcJwtInvalid
+        );
+
+        // 3. effective expiry — capped at now + OIDC_SESSION_TTL_SECONDS.
+        let not_after_i = if not_after_unix_ts <= i64::MAX as u64 {
+            not_after_unix_ts as i64
+        } else {
+            i64::MAX
+        };
+        let expires_at = current_ts
+            .saturating_add(OIDC_SESSION_TTL_SECONDS)
+            .min(not_after_i);
+        require!(
+            expires_at > current_ts,
+            PolicyEngineError::OidcSessionExpired
+        );
+
+        // 4. JWK registry lookup. The caller supplies `jwk_entry_index` —
+        // we don't scan the whole registry on-chain (CU expensive); we
+        // just validate the selected entry is ACTIVE and that
+        // `(iss_hash, aud_hash, kid_hash)` cross-checks against the JWT.
+        require!(
+            (jwk_entry_index as usize) < JWK_REGISTRY_MAX_ENTRIES,
+            PolicyEngineError::OidcJwkNotFound
+        );
+        let registry_data = ctx
+            .accounts
+            .jwk_registry
+            .to_account_view()
+            .try_borrow()
+            .map_err(|_| PolicyEngineError::OidcJwkNotFound)?;
+        let (modulus_n, exponent_e, reg_iss_hash, reg_aud_hash, reg_kid_hash) =
+            read_jwk_entry(&registry_data, jwk_entry_index as usize)?;
+        // jwt_digest is computed by the verifier; we capture it via ParsedOidc.
+
+        // 5. Build issuer/audience allowlist (devnet placeholder fallback
+        // when consts empty — see ALLOWED_OIDC_ISSUERS docs).
+        #[cfg(not(feature = "mainnet"))]
+        let (issuers, audiences): (&[&[u8]], &[&[u8]]) = (
+            if ALLOWED_OIDC_ISSUERS.is_empty() {
+                DEVNET_FALLBACK_ISSUERS
+            } else {
+                ALLOWED_OIDC_ISSUERS
+            },
+            if ALLOWED_OIDC_AUDIENCES.is_empty() {
+                DEVNET_FALLBACK_AUDIENCES
+            } else {
+                ALLOWED_OIDC_AUDIENCES
+            },
+        );
+        #[cfg(feature = "mainnet")]
+        let (issuers, audiences): (&[&[u8]], &[&[u8]]) =
+            (ALLOWED_OIDC_ISSUERS, ALLOWED_OIDC_AUDIENCES);
+
+        // 6. Verify the JWT. This call:
+        //    - parses header + claims (strict),
+        //    - checks iss/aud allowlists,
+        //    - verifies RSA-2048 (sol_big_mod_exp; stubs to 0xFF on
+        //      `oidc-rsa` OFF builds, blocking devnet pre-alpha),
+        //    - re-derives addr_seed + the three hashes,
+        //    - recomputes oidc_nonce and matches the JWT's `nonce` claim.
+        let parsed = oidc_verifier::verify(oidc_verifier::VerifyOidcInput {
+            jwt: &jwt_bytes[..jl],
+            modulus_n: &modulus_n,
+            exponent_e,
+            allowed_issuers: issuers,
+            allowed_audiences: audiences,
+            eph_pk: &eph_pk,
+            not_after_unix_ts,
+            nonce_randomness: &nonce_randomness,
+            now_unix_ts: current_ts,
+        })
+        .map_err(|_| PolicyEngineError::OidcJwtInvalid)?;
+        drop(registry_data);
+
+        // 7. Cross-check the JWK entry vs the JWT-derived hashes. Without
+        // this, a compromised registry entry could be paired with a JWT
+        // whose (iss, aud, kid) don't actually match.
+        require!(parsed.issuer_hash == reg_iss_hash, PolicyEngineError::OidcIssuerMismatch);
+        require!(parsed.audience_hash == reg_aud_hash, PolicyEngineError::OidcAudienceMismatch);
+        require!(parsed.kid_hash == reg_kid_hash, PolicyEngineError::OidcJwkInactive);
+
+        // 8. Identity match — the JWT's user MUST be the OIDC primary of
+        // this dWallet. primary_slot[1..33] holds the addr_seed for
+        // scheme = SCHEME_OIDC_JWT.
+        require!(
+            primary_slot[1..33] == parsed.addr_seed,
+            PolicyEngineError::OidcAddrSeedMismatch
+        );
+
+        // 9. Verify the ephemeral key signed the open challenge.
+        let challenge = oidc_session_open_challenge(
+            &dwallet_addr,
+            &primary_slot,
+            &eph_pk,
+            not_after_unix_ts,
+            &parsed.jwt_digest,
+            &jwk_registry_addr,
+            oidc_verifier::OIDC_VERIFIER_V1,
+            on_chain_nonce,
+        )
+        .map_err(PolicyEngineError::from)?;
+        check_sysvar_addr(ctx.accounts.instructions_sysvar.address())?;
+        let sysvar_view = ctx.accounts.instructions_sysvar.to_account_view();
+        let sysvar_data_ref = sysvar_view
+            .try_borrow()
+            .map_err(|_| PolicyEngineError::AuthFailed)?;
+        let mut eph_slot = [0u8; MEMBER_SLOT_LEN];
+        eph_slot[0] = SCHEME_ED25519;
+        eph_slot[1..33].copy_from_slice(&eph_pk);
+        verify_signature(VerifyInput {
+            member_slot: &eph_slot,
+            challenge: &challenge,
+            instructions_sysvar_data: &sysvar_data_ref,
+            webauthn_auth_data: &[],
+            webauthn_client_data_json: &[],
+        })
+        .map_err(|_| PolicyEngineError::AuthFailed)?;
+        drop(sysvar_data_ref);
+
+        // 10. Populate the session PDA.
+        ctx.accounts.session.engine = engine_addr;
+        ctx.accounts.session.rule_pda = rule_addr;
+        ctx.accounts.session.payer_for_close = payer_addr;
+        ctx.accounts.session.addr_seed = parsed.addr_seed;
+        ctx.accounts.session.jwt_digest = parsed.jwt_digest;
+        ctx.accounts.session.eph_pk = eph_pk;
+        ctx.accounts.session.session_nonce = on_chain_nonce.into();
+        ctx.accounts.session.next_use_nonce = 0u64.into();
+        ctx.accounts.session.not_after_unix_ts = not_after_unix_ts.into();
+        ctx.accounts.session.expires_at = expires_at.into();
+        ctx.accounts.session.created_at = current_ts.into();
+        ctx.accounts.session.verifier_version = oidc_verifier::OIDC_VERIFIER_V1.into();
+        ctx.accounts.session.is_closed = 0;
+
+        // M1 audit fix.
+        ctx.accounts.engine.next_oidc_session_nonce = on_chain_nonce
+            .checked_add(1)
+            .ok_or(PolicyEngineError::InvalidNonce)?
+            .into();
+        Ok(())
+    }
+
+    /// Disc 81 — `recover_as_primary_oidc` (C1 audit — implemented).
+    ///
+    /// Consumes an open `OidcSession` to authorize one Ika `approve_message`
+    /// CPI. The session's ephemeral Ed25519 key signs a per-use challenge;
+    /// we re-validate session liveness, addr_seed equality against the
+    /// current OIDC primary (so a rotation kills active sessions), verifier
+    /// version pin (downgrade guard), then CPI Ika.
+    #[instruction(discriminator = 81)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn recover_as_primary_oidc(
+        ctx: Ctx<RecoverAsPrimaryOidcAccts>,
+        _init_authority_hash: Address,
+        _rule_index: u8,
+        _oidc_session_nonce: u64,
+        message_digest: [u8; 32],
+        metadata_digest: [u8; 32],
+        user_pubkey: [u8; 32],
+        signature_scheme: u16,
+        message_approval_bump: u8,
+        cpi_authority_bump: u8,
+        expected_use_nonce: u64,
+    ) -> Result<(), ProgramError> {
+        let current_ts: i64 = ctx.accounts.clock.unix_timestamp.into();
+        let engine_addr = *ctx.accounts.engine.address();
+        let request_hash = Address::from(message_digest);
+        let dwallet_addr = *ctx.accounts.dwallet_account.address();
+        let session_addr = *ctx.accounts.session.address();
+        let rule_addr = *ctx.accounts.rule_pda.address();
+        let message_approval_addr = *ctx.accounts.message_approval.address();
+
+        ctx.accounts.program.emit_event(
+            &SignatureRequested {
+                engine: engine_addr,
+                request_hash,
+                ts: current_ts,
+            },
+            &ctx.accounts.event_authority,
+            EventAuthority::BUMP,
+        )?;
+
+        require!(
+            ctx.accounts.engine.paused == 0,
+            PolicyEngineError::EnginePaused
+        );
+
+        // Session must reference this rule_pda (defense in depth in case
+        // the rule_index in seeds drifted).
+        require!(
+            ctx.accounts.session.rule_pda == rule_addr,
+            PolicyEngineError::InvalidRuleHeader
+        );
+
+        // 1. session open + not expired.
+        require!(
+            ctx.accounts.session.is_closed == 0,
+            PolicyEngineError::OidcSessionExpired
+        );
+        let expires_at: i64 = ctx.accounts.session.expires_at.into();
+        require!(
+            current_ts < expires_at,
+            PolicyEngineError::OidcSessionExpired
+        );
+
+        // 2. verifier version pin — downgrade guard.
+        let pinned_ver: u32 = ctx.accounts.session.verifier_version.into();
+        require!(
+            pinned_ver == oidc_verifier::OIDC_VERIFIER_V1,
+            PolicyEngineError::OidcVerifierMismatch
+        );
+
+        // 3. use-nonce.
+        let use_nonce: u64 = ctx.accounts.session.next_use_nonce.into();
+        require!(
+            expected_use_nonce == use_nonce,
+            PolicyEngineError::InvalidNonce
+        );
+
+        // 4. policy primary must still match the bound addr_seed.
+        let bound_addr_seed = ctx.accounts.session.addr_seed;
+        let mut expected_primary = [0u8; MEMBER_SLOT_LEN];
+        expected_primary[0] = SCHEME_OIDC_JWT;
+        expected_primary[1..33].copy_from_slice(&bound_addr_seed);
+        let primary_slot = ctx.accounts.rule_pda.primary_slot;
+        require!(
+            primary_slot == expected_primary,
+            PolicyEngineError::OidcAddrSeedMismatch
+        );
+
+        // 5. Ed25519 precompile over per-use challenge with the session's eph_pk.
+        let eph_pk = ctx.accounts.session.eph_pk;
+        let challenge = oidc_primary_use_challenge(
+            &session_addr,
+            &dwallet_addr,
+            &message_approval_addr,
+            &message_digest,
+            &metadata_digest,
+            &user_pubkey,
+            signature_scheme,
+            message_approval_bump,
+            use_nonce,
+            &expected_primary,
+        )
+        .map_err(PolicyEngineError::from)?;
+        check_sysvar_addr(ctx.accounts.instructions_sysvar.address())?;
+        let sysvar_view = ctx.accounts.instructions_sysvar.to_account_view();
+        let sysvar_data_ref = sysvar_view
+            .try_borrow()
+            .map_err(|_| PolicyEngineError::AuthFailed)?;
+        let mut eph_slot = [0u8; MEMBER_SLOT_LEN];
+        eph_slot[0] = SCHEME_ED25519;
+        eph_slot[1..33].copy_from_slice(&eph_pk);
+        verify_signature(VerifyInput {
+            member_slot: &eph_slot,
+            challenge: &challenge,
+            instructions_sysvar_data: &sysvar_data_ref,
+            webauthn_auth_data: &[],
+            webauthn_client_data_json: &[],
+        })
+        .map_err(|_| PolicyEngineError::AuthFailed)?;
+        drop(sysvar_data_ref);
+
+        // 6. consume use-nonce BEFORE CPI.
+        ctx.accounts.session.next_use_nonce = use_nonce
+            .checked_add(1)
+            .ok_or(PolicyEngineError::InvalidNonce)?
+            .into();
+
+        // 7. CPI Ika defense + approve.
+        require!(
+            validate_ika_cpi_accounts(
+                &ctx.accounts.dwallet_program.to_account_view(),
+                &ctx.accounts.dwallet_account.to_account_view(),
+            ),
+            PolicyEngineError::IkaCpiAccountMismatch
+        );
+        invoke_ika_approve_message(
+            &ctx.accounts.dwallet_program.to_account_view(),
+            &ctx.accounts.cpi_authority.to_account_view(),
+            &ctx.accounts.caller_program.to_account_view(),
+            cpi_authority_bump,
+            &ctx.accounts.coordinator.to_account_view(),
+            &ctx.accounts.message_approval.to_account_view(),
+            &ctx.accounts.dwallet_account.to_account_view(),
+            &ctx.accounts.payer.to_account_view(),
+            &ctx.accounts.system_program.to_account_view(),
+            message_digest,
+            metadata_digest,
+            user_pubkey,
+            signature_scheme,
+            message_approval_bump,
+        )?;
+
+        ctx.accounts.program.emit_event(
+            &SignatureApproved {
+                engine: engine_addr,
+                request_hash,
+                ts: current_ts,
+            },
+            &ctx.accounts.event_authority,
+            EventAuthority::BUMP,
+        )?;
+        Ok(())
+    }
+
+    /// Disc 88 — `oidc_session_close` (C1 — Login Social on-chain).
+    ///
+    /// Permissionless close once `current_ts >= expires_at`. Recipient signs
+    /// the tx and receives the rent; MUST equal `session.payer_for_close`.
+    #[instruction(discriminator = 88)]
+    pub fn oidc_session_close(
+        ctx: Ctx<OidcSessionCloseAccts>,
+        _init_authority_hash: Address,
+        _oidc_session_nonce: u64,
+    ) -> Result<(), ProgramError> {
+        let current_ts: i64 = ctx.accounts.clock.unix_timestamp.into();
+        let expires_at: i64 = ctx.accounts.session.expires_at.into();
+        require!(
+            current_ts >= expires_at,
+            PolicyEngineError::OidcSessionExpired
+        );
+        let recipient_addr = *ctx.accounts.recipient.address();
+        require!(
+            ctx.accounts.session.payer_for_close == recipient_addr,
+            PolicyEngineError::AuthFailed
+        );
+        let recipient_view = ctx.accounts.recipient.to_account_view();
+        ctx.accounts.session.close(recipient_view)?;
+        Ok(())
     }
 
     /// Disc 100 — `session_open` (F8b).
@@ -3519,8 +4412,15 @@ mod policy_engine_program {
         );
 
         // Atomic counter bumps before CPI.
-        ctx.accounts.session.next_signature_nonce = (on_chain_nonce + 1).into();
-        ctx.accounts.session.used_count = (used + 1).into();
+        // M1 audit fix: monotonic counters with explicit overflow guards.
+        ctx.accounts.session.next_signature_nonce = on_chain_nonce
+            .checked_add(1)
+            .ok_or(PolicyEngineError::InvalidNonce)?
+            .into();
+        ctx.accounts.session.used_count = used
+            .checked_add(1)
+            .ok_or(PolicyEngineError::SessionCapExceeded)?
+            .into();
 
         invoke_ika_approve_message(
             &ctx.accounts.dwallet_program.to_account_view(),
@@ -3924,7 +4824,10 @@ mod policy_engine_program {
         new_entry.generation = new_generation;
         write_rule_entry(&mut ctx.accounts.engine.rules_flat, slot, &new_entry);
         let cur_gen: u32 = ctx.accounts.engine.rules_generation.into();
-        ctx.accounts.engine.rules_generation = (cur_gen + 1).into();
+        ctx.accounts.engine.rules_generation = cur_gen
+            .checked_add(1)
+            .ok_or(PolicyEngineError::TooManyRules)?
+            .into();
         ctx.accounts.engine.next_admin_nonce = new_nonce.into();
         Ok(())
     }
@@ -4004,7 +4907,10 @@ mod policy_engine_program {
         new_entry.generation = new_generation;
         write_rule_entry(&mut ctx.accounts.engine.rules_flat, slot, &new_entry);
         let cur_gen: u32 = ctx.accounts.engine.rules_generation.into();
-        ctx.accounts.engine.rules_generation = (cur_gen + 1).into();
+        ctx.accounts.engine.rules_generation = cur_gen
+            .checked_add(1)
+            .ok_or(PolicyEngineError::TooManyRules)?
+            .into();
         ctx.accounts.engine.next_admin_nonce = new_nonce.into();
         Ok(())
     }
@@ -4079,7 +4985,10 @@ mod policy_engine_program {
         new_entry.generation = new_generation;
         write_rule_entry(&mut ctx.accounts.engine.rules_flat, slot, &new_entry);
         let cur_gen: u32 = ctx.accounts.engine.rules_generation.into();
-        ctx.accounts.engine.rules_generation = (cur_gen + 1).into();
+        ctx.accounts.engine.rules_generation = cur_gen
+            .checked_add(1)
+            .ok_or(PolicyEngineError::TooManyRules)?
+            .into();
         ctx.accounts.engine.next_admin_nonce = new_nonce.into();
         Ok(())
     }
@@ -4153,7 +5062,10 @@ mod policy_engine_program {
         new_entry.generation = new_generation;
         write_rule_entry(&mut ctx.accounts.engine.rules_flat, slot, &new_entry);
         let cur_gen: u32 = ctx.accounts.engine.rules_generation.into();
-        ctx.accounts.engine.rules_generation = (cur_gen + 1).into();
+        ctx.accounts.engine.rules_generation = cur_gen
+            .checked_add(1)
+            .ok_or(PolicyEngineError::TooManyRules)?
+            .into();
         ctx.accounts.engine.next_admin_nonce = new_nonce.into();
         Ok(())
     }
@@ -4326,7 +5238,11 @@ mod policy_engine_program {
         drop(sysvar_data_ref);
 
         // Atomic nonce bump BEFORE CPI.
-        ctx.accounts.rule_pda.next_admin_nonce = (policy_nonce + 1).into();
+        // M1 audit fix.
+        ctx.accounts.rule_pda.next_admin_nonce = policy_nonce
+            .checked_add(1)
+            .ok_or(PolicyEngineError::InvalidNonce)?
+            .into();
 
         invoke_ika_approve_message(
             &ctx.accounts.dwallet_program.to_account_view(),
@@ -4480,8 +5396,11 @@ mod policy_engine_program {
             .members_snapshot
             .copy_from_slice(&ctx.accounts.rule_pda.members);
 
-        ctx.accounts.rule_pda.next_session_nonce =
-            (session_nonce_on_chain + 1).into();
+        // M1 audit fix.
+        ctx.accounts.rule_pda.next_session_nonce = session_nonce_on_chain
+            .checked_add(1)
+            .ok_or(PolicyEngineError::InvalidNonce)?
+            .into();
         Ok(())
     }
 
@@ -4983,7 +5902,11 @@ mod policy_engine_program {
         ctx.accounts.session.created_at = current_ts.into();
         ctx.accounts.session.is_closed = 0;
 
-        ctx.accounts.rule_pda.next_passkey_session_nonce = (on_chain_nonce + 1).into();
+        // M1 audit fix.
+        ctx.accounts.rule_pda.next_passkey_session_nonce = on_chain_nonce
+            .checked_add(1)
+            .ok_or(PolicyEngineError::InvalidNonce)?
+            .into();
         Ok(())
     }
 
@@ -4997,6 +5920,7 @@ mod policy_engine_program {
     pub fn recover_as_primary_passkey_session(
         ctx: Ctx<RecoverAsPrimaryPasskeySessionAccts>,
         _init_authority_hash: Address,
+        _rule_index: u8,
         _passkey_session_nonce: u64,
         message_digest: [u8; 32],
         metadata_digest: [u8; 32],
@@ -5012,6 +5936,16 @@ mod policy_engine_program {
         let dwallet_addr = *ctx.accounts.dwallet_account.address();
         let session_addr = *ctx.accounts.session.address();
         let message_approval_addr = *ctx.accounts.message_approval.address();
+        let rule_addr = *ctx.accounts.rule_pda.address();
+
+        // H2 fix: session must reference the same RecoveryRule slot we're
+        // dispatching against. PDA derivation alone is not sufficient — the
+        // session pinned a specific rule_pda at open time and that binding
+        // must hold across the session lifetime.
+        require!(
+            ctx.accounts.session.rule_pda == rule_addr,
+            PolicyEngineError::InvalidRuleHeader
+        );
 
         ctx.accounts.program.emit_event(
             &SignatureRequested {
@@ -5092,7 +6026,11 @@ mod policy_engine_program {
         drop(sysvar_data_ref);
 
         // 4. consume use-nonce BEFORE CPI.
-        ctx.accounts.session.next_use_nonce = (use_nonce + 1).into();
+        // M1 audit fix.
+        ctx.accounts.session.next_use_nonce = use_nonce
+            .checked_add(1)
+            .ok_or(PolicyEngineError::InvalidNonce)?
+            .into();
 
         // 5. CPI Ika defense + approve.
         require!(
@@ -5295,6 +6233,33 @@ pub struct UpdateRuleAllowlist {
     pub system_program: Program<SystemProgram>,
     pub event_authority: EventAuthority,
     pub program: Program<PolicyEngineProgram>, // generated by #[program] mod policy_engine_program
+}
+
+#[derive(Accounts)]
+#[instruction(init_authority_hash: Address, _expected_nonce: u64, rule_index: u8)]
+pub struct UpdateRuleFheGated {
+    pub dwallet_account: UncheckedAccount,
+
+    #[account(mut, address = PolicyEngine::seeds(
+        dwallet_account.address(),
+        &init_authority_hash
+    ))]
+    pub engine: Account<PolicyEngine>,
+
+    #[account(mut, address = FheGatedRule::seeds(
+        engine.address(),
+        rule_index
+    ))]
+    pub rule_pda: Account<FheGatedRule>,
+
+    #[account(mut)]
+    pub payer: Signer,
+
+    pub instructions_sysvar: UncheckedAccount,
+    pub clock: Sysvar<Clock>,
+    pub system_program: Program<SystemProgram>,
+    pub event_authority: EventAuthority,
+    pub program: Program<PolicyEngineProgram>,
 }
 
 #[derive(Accounts)]
@@ -5811,7 +6776,7 @@ pub struct PasskeySessionOpenAccts {
 }
 
 #[derive(Accounts)]
-#[instruction(init_authority_hash: Address, passkey_session_nonce: u64)]
+#[instruction(init_authority_hash: Address, rule_index: u8, passkey_session_nonce: u64)]
 pub struct RecoverAsPrimaryPasskeySessionAccts {
     pub dwallet_account: UncheckedAccount,
 
@@ -5823,7 +6788,7 @@ pub struct RecoverAsPrimaryPasskeySessionAccts {
 
     #[account(address = RecoveryRule::seeds(
         engine.address(),
-        0u8
+        rule_index
     ))]
     pub rule_pda: Account<RecoveryRule>,
 
@@ -5868,6 +6833,123 @@ pub struct PasskeySessionCloseAccts {
         passkey_session_nonce
     ))]
     pub session: Account<PasskeySession>,
+
+    /// Receives rent + signs tx. MUST equal `session.payer_for_close`.
+    #[account(mut)]
+    pub recipient: Signer,
+
+    pub clock: Sysvar<Clock>,
+    pub event_authority: EventAuthority,
+    pub program: Program<PolicyEngineProgram>,
+}
+
+// ── C1 — OIDC session accounts ─────────────────────────────────────────────
+
+#[derive(Accounts)]
+#[instruction(
+    init_authority_hash: Address,
+    rule_index: u8,
+    oidc_session_nonce: u64
+)]
+pub struct OidcSessionOpenAccts {
+    pub dwallet_account: UncheckedAccount,
+
+    #[account(mut, address = PolicyEngine::seeds(
+        dwallet_account.address(),
+        &init_authority_hash
+    ))]
+    pub engine: Account<PolicyEngine>,
+
+    #[account(mut, address = RecoveryRule::seeds(
+        engine.address(),
+        rule_index
+    ))]
+    pub rule_pda: Account<RecoveryRule>,
+
+    #[account(init, payer = payer, address = OidcSession::seeds(
+        engine.address(),
+        oidc_session_nonce
+    ))]
+    pub session: Account<OidcSession>,
+
+    /// `JwkRegistry` account holding the ACTIVE JWK for the (iss, aud, kid)
+    /// triple inside the JWT. Read-only.
+    pub jwk_registry: UncheckedAccount,
+
+    pub instructions_sysvar: UncheckedAccount,
+    pub clock: Sysvar<Clock>,
+    pub rent: Sysvar<Rent>,
+
+    #[account(mut)]
+    pub payer: Signer,
+
+    pub system_program: Program<SystemProgram>,
+    pub event_authority: EventAuthority,
+    pub program: Program<PolicyEngineProgram>,
+}
+
+#[derive(Accounts)]
+#[instruction(
+    init_authority_hash: Address,
+    rule_index: u8,
+    oidc_session_nonce: u64
+)]
+pub struct RecoverAsPrimaryOidcAccts {
+    pub dwallet_account: UncheckedAccount,
+
+    #[account(mut, address = PolicyEngine::seeds(
+        dwallet_account.address(),
+        &init_authority_hash
+    ))]
+    pub engine: Account<PolicyEngine>,
+
+    #[account(address = RecoveryRule::seeds(
+        engine.address(),
+        rule_index
+    ))]
+    pub rule_pda: Account<RecoveryRule>,
+
+    #[account(mut, address = OidcSession::seeds(
+        engine.address(),
+        oidc_session_nonce
+    ))]
+    pub session: Account<OidcSession>,
+
+    pub coordinator: UncheckedAccount,
+
+    #[account(mut)]
+    pub message_approval: UncheckedAccount,
+
+    #[account(mut)]
+    pub payer: Signer,
+
+    pub cpi_authority: UncheckedAccount,
+    pub caller_program: UncheckedAccount,
+    pub dwallet_program: UncheckedAccount,
+
+    pub instructions_sysvar: UncheckedAccount,
+    pub clock: Sysvar<Clock>,
+    pub system_program: Program<SystemProgram>,
+    pub event_authority: EventAuthority,
+    pub program: Program<PolicyEngineProgram>,
+}
+
+#[derive(Accounts)]
+#[instruction(init_authority_hash: Address, oidc_session_nonce: u64)]
+pub struct OidcSessionCloseAccts {
+    pub dwallet_account: UncheckedAccount,
+
+    #[account(address = PolicyEngine::seeds(
+        dwallet_account.address(),
+        &init_authority_hash
+    ))]
+    pub engine: Account<PolicyEngine>,
+
+    #[account(mut, address = OidcSession::seeds(
+        engine.address(),
+        oidc_session_nonce
+    ))]
+    pub session: Account<OidcSession>,
 
     /// Receives rent + signs tx. MUST equal `session.payer_for_close`.
     #[account(mut)]
