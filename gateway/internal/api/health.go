@@ -143,13 +143,13 @@ func pingUpstream(ctx context.Context, s *Server, name string) checkStatus {
 }
 
 func checkGasSponsor(ctx context.Context, s *Server) checkStatus {
-	if s.policyService == nil || s.policyService.GasSponsor == nil {
+	if s.policyV3Service == nil || s.policyV3Service.GasSponsor == nil {
 		return checkStatus{OK: true, Skipped: true}
 	}
 	start := time.Now()
 	probeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	healthy, bal, err := s.policyService.GasSponsor.Healthy(probeCtx)
+	healthy, bal, err := s.policyV3Service.GasSponsor.Healthy(probeCtx)
 	latency := int(time.Since(start).Milliseconds())
 	if err != nil {
 		// Network error talking to Solana RPC — surface as not-ok but do

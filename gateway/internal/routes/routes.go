@@ -87,14 +87,6 @@ type Route struct {
 	AdminScope bool
 }
 
-// legacyRecoverySunset — F11b-Phase3 (2026-05-15). The legacy
-// `/v1/recovery/{primary,quorum,policy,passkey,oidc}/*` mutating flows are
-// sunset in favour of the PolicyEngine v3 surface at `/v1/policy/*`. The
-// gateway emits Deprecation + Sunset headers (RFC 8594) on every legacy
-// route; the ika-backend upstream returns 410 Gone with a successor-version
-// pointer.
-const legacyRecoverySunset = "2026-05-15T00:00:00Z"
-
 // All catalogues every public route. Order does not matter — the
 // gateway registers each one explicitly with chi.
 //
@@ -131,87 +123,15 @@ var All = []Route{
 	{Method: "POST", Path: "/v1/dwallet/re-encrypt-share/submit", Upstream: UpstreamIka, Key: "ika.re-encrypt-share.submit", Idempotent: true, RateClass: RateClassTx},
 	{Method: "POST", Path: "/v1/dwallet/make-share-public/submit", Upstream: UpstreamIka, Key: "ika.make-share-public.submit", Idempotent: true, RateClass: RateClassTx},
 
-	// Recovery — discovery (proves ownership of an external wallet; gated by appId)
-	{Method: "POST", Path: "/v1/recovery/challenge", Upstream: UpstreamIka, Key: "ika.recovery.challenge", Idempotent: true, RateClass: RateClassRead},
-	{Method: "POST", Path: "/v1/recovery/resolve", Upstream: UpstreamIka, Key: "ika.recovery.resolve", Idempotent: true, RateClass: RateClassTx},
-
-	// Recovery — primary (RulesPolicy primary-owner bypass; single tx, challenge-based)
-	// **F11b-Phase3 SUNSET (2026-05-15)** — replaced by PolicyEngine v3
-	// `/v1/policy/recover-as-primary/{challenge,submit}`. Upstream ika-backend
-	// returns 410 Gone with a successor-version pointer. Gateway middleware
-	// emits Deprecation + Sunset headers (RFC 8594) so SDK users see the
-	// signal in their dashboards.
-	{Method: "POST", Path: "/v1/recovery/primary/challenge", Upstream: UpstreamIka, Key: "ika.recovery.primary.challenge", Idempotent: true, RateClass: RateClassRead, DeprecatedAt: legacyRecoverySunset, SunsetAt: legacyRecoverySunset},
-	{Method: "POST", Path: "/v1/recovery/primary/submit", Upstream: UpstreamIka, Key: "ika.recovery.primary.submit", Idempotent: true, RequiresIdempotencyKey: true, RateClass: RateClassTx, DeprecatedAt: legacyRecoverySunset, SunsetAt: legacyRecoverySunset},
-
-	// Recovery — quorum (M-of-N members; staged in a PDA, challenge-based)
-	// **F11b-Phase3 SUNSET (2026-05-15)** — replaced by PolicyEngine v3
-	// `/v1/policy/quorum/session/{open,contribute}/{challenge,submit}` and
-	// `/v1/policy/quorum/session/{finalize,close}`.
-	{Method: "POST", Path: "/v1/recovery/quorum/session/open/challenge", Upstream: UpstreamIka, Key: "ika.recovery.quorum.open.challenge", Idempotent: true, RateClass: RateClassRead, DeprecatedAt: legacyRecoverySunset, SunsetAt: legacyRecoverySunset},
-	{Method: "POST", Path: "/v1/recovery/quorum/session/open", Upstream: UpstreamIka, Key: "ika.recovery.quorum.open", Idempotent: true, RateClass: RateClassTx, DeprecatedAt: legacyRecoverySunset, SunsetAt: legacyRecoverySunset},
-	{Method: "POST", Path: "/v1/recovery/quorum/session/contribute/challenge", Upstream: UpstreamIka, Key: "ika.recovery.quorum.contribute.challenge", Idempotent: true, RateClass: RateClassRead, DeprecatedAt: legacyRecoverySunset, SunsetAt: legacyRecoverySunset},
-	{Method: "POST", Path: "/v1/recovery/quorum/session/contribute", Upstream: UpstreamIka, Key: "ika.recovery.quorum.contribute", Idempotent: true, RateClass: RateClassTx, DeprecatedAt: legacyRecoverySunset, SunsetAt: legacyRecoverySunset},
-	{Method: "POST", Path: "/v1/recovery/quorum/session/finalize", Upstream: UpstreamIka, Key: "ika.recovery.quorum.finalize", Idempotent: true, RateClass: RateClassTx, TimeoutSeconds: 120, DeprecatedAt: legacyRecoverySunset, SunsetAt: legacyRecoverySunset},
-	{Method: "POST", Path: "/v1/recovery/quorum/session/close", Upstream: UpstreamIka, Key: "ika.recovery.quorum.close", Idempotent: true, RateClass: RateClassTx, DeprecatedAt: legacyRecoverySunset, SunsetAt: legacyRecoverySunset},
-	{Method: "GET", Path: "/v1/recovery/quorum/session/{address}", Upstream: UpstreamIka, Key: "ika.recovery.quorum.get", RateClass: RateClassRead, DeprecatedAt: legacyRecoverySunset, SunsetAt: legacyRecoverySunset},
-
-	// Recovery — policy (RulesPolicy on-chain config)
-	// **F11b-Phase3 SUNSET (2026-05-15)** — replaced by PolicyEngine v3
-	// `/v1/policy/init/{challenge,submit}`, `/v1/policy/rules/add/{challenge,submit}`,
-	// `/v1/policy/rules/{ruleIndex}/items/add/{challenge,submit}`.
-	{Method: "POST", Path: "/v1/recovery/policy/preview", Upstream: UpstreamIka, Key: "ika.recovery.policy.preview", RateClass: RateClassRead, DeprecatedAt: legacyRecoverySunset, SunsetAt: legacyRecoverySunset},
-	{Method: "POST", Path: "/v1/recovery/policy/deploy", Upstream: UpstreamIka, Key: "ika.recovery.policy.deploy", Idempotent: true, RateClass: RateClassTx, DeprecatedAt: legacyRecoverySunset, SunsetAt: legacyRecoverySunset},
-	{Method: "GET", Path: "/v1/recovery/policy/{dwalletAddress}", Upstream: UpstreamIka, Key: "ika.recovery.policy.get", RateClass: RateClassRead, DeprecatedAt: legacyRecoverySunset, SunsetAt: legacyRecoverySunset},
-	{Method: "POST", Path: "/v1/recovery/policy/admin/challenge", Upstream: UpstreamIka, Key: "ika.recovery.policy.admin.challenge", Idempotent: true, RateClass: RateClassRead, DeprecatedAt: legacyRecoverySunset, SunsetAt: legacyRecoverySunset},
-	{Method: "POST", Path: "/v1/recovery/policy/admin/submit", Upstream: UpstreamIka, Key: "ika.recovery.policy.admin.submit", Idempotent: true, RateClass: RateClassTx, DeprecatedAt: legacyRecoverySunset, SunsetAt: legacyRecoverySunset},
-	{Method: "POST", Path: "/v1/recovery/policy/apply-pending", Upstream: UpstreamIka, Key: "ika.recovery.policy.apply-pending", Idempotent: true, RateClass: RateClassTx, DeprecatedAt: legacyRecoverySunset, SunsetAt: legacyRecoverySunset},
-
-	// Recovery — Login Social (RulesPolicy OIDC primary; scheme = 4; loginsocial.md §6.1/§10).
-	// **F11b-Phase3 SUNSET (2026-05-15)** — OIDC v3 successor is blocked
-	// behind the `sol_big_mod_exp` syscall (F9c); the legacy flow is
-	// retired with the rest of /v1/recovery/* anyway. The /v1/oidc/{nonce,
-	// validate} read-only helpers stay live (they're a pre-flow used by
-	// both legacy and future v3).
-	{Method: "POST", Path: "/v1/recovery/primary/oidc/stage", Upstream: UpstreamIka, Key: "ika.recovery.primary.oidc.stage", Idempotent: true, RateClass: RateClassTx, TimeoutSeconds: 90, MaxBodyBytes: 8 << 10, DeprecatedAt: legacyRecoverySunset, SunsetAt: legacyRecoverySunset},
-	{Method: "POST", Path: "/v1/recovery/primary/oidc/open/challenge", Upstream: UpstreamIka, Key: "ika.recovery.primary.oidc.open.challenge", Idempotent: true, RateClass: RateClassRead, MaxBodyBytes: 8 << 10, DeprecatedAt: legacyRecoverySunset, SunsetAt: legacyRecoverySunset},
-	{Method: "POST", Path: "/v1/recovery/primary/oidc/open", Upstream: UpstreamIka, Key: "ika.recovery.primary.oidc.open", Idempotent: true, RateClass: RateClassTx, TimeoutSeconds: 90, MaxBodyBytes: 8 << 10, DeprecatedAt: legacyRecoverySunset, SunsetAt: legacyRecoverySunset},
-	{Method: "POST", Path: "/v1/recovery/primary/oidc/use/challenge", Upstream: UpstreamIka, Key: "ika.recovery.primary.oidc.use.challenge", RateClass: RateClassRead, DeprecatedAt: legacyRecoverySunset, SunsetAt: legacyRecoverySunset},
-	{Method: "POST", Path: "/v1/recovery/primary/oidc/use/submit", Upstream: UpstreamIka, Key: "ika.recovery.primary.oidc.use.submit", Idempotent: true, RateClass: RateClassTx, TimeoutSeconds: 90, DeprecatedAt: legacyRecoverySunset, SunsetAt: legacyRecoverySunset},
-	{Method: "POST", Path: "/v1/recovery/primary/oidc/close", Upstream: UpstreamIka, Key: "ika.recovery.primary.oidc.close", Idempotent: true, RateClass: RateClassTx, DeprecatedAt: legacyRecoverySunset, SunsetAt: legacyRecoverySunset},
-	{Method: "POST", Path: "/v1/recovery/primary/oidc/staging/close", Upstream: UpstreamIka, Key: "ika.recovery.primary.oidc.staging.close", Idempotent: true, RateClass: RateClassTx, DeprecatedAt: legacyRecoverySunset, SunsetAt: legacyRecoverySunset},
-
 	// Login Social — pre-step: server picks not_after + nonce_randomness and
 	// returns the canonical `oidc_nonce` (so the client carries no crypto-layout
-	// code). Not idempotent — fresh randomness each call.
+	// code). Not idempotent — fresh randomness each call. The legacy
+	// /v1/recovery/primary/oidc/* flow that consumed this is retired; the
+	// PolicyEngine v3 OIDC successor (F9c) is gated on the `sol_big_mod_exp`
+	// syscall and will reuse these read-only helpers when it lands.
 	{Method: "POST", Path: "/v1/oidc/nonce", Upstream: UpstreamIka, Key: "ika.oidc.nonce", RateClass: RateClassRead, MaxBodyBytes: 1 << 10},
 	// Login Social — obligatory server-side `id_token` pre-validation (JWKS) before staging.
 	{Method: "POST", Path: "/v1/oidc/validate", Upstream: UpstreamIka, Key: "ika.oidc.validate", Idempotent: true, RateClass: RateClassRead, MaxBodyBytes: 8 << 10},
-
-	// Recovery — Passkey-PRF (RulesPolicy WebAuthn primary; scheme = 3 session-scoped;
-	// PLAN_KEYSPRING_INTEGRATION_2026_05.md D1 Opção A). The user signs a
-	// WebAuthn assertion at session open (Secp256r1 precompile validates it on-chain)
-	// and per-use Ed25519 challenges with the session's ephemeral key. The on-chain
-	// cap is 192 B for authData + 192 B for clientDataJSON (D13); 4 KiB body covers
-	// both plus envelope. Credentials list/revoke + register-init/complete are
-	// off-chain bookkeeping owned by ika-backend (D4) — gateway only reverse-proxies.
-	// **F11b-Phase3 SUNSET (2026-05-15)** — replaced by PolicyEngine v3
-	// `/v1/policy/passkey/session/{open}/{challenge,submit}`, `/v1/policy/passkey/use/{challenge,submit}`,
-	// `/v1/policy/passkey/session/close`. Credential register/list/revoke are
-	// off-chain bookkeeping that the gateway doesn't replace yet (Phase4 if
-	// needed) — they 410 alongside the rest for consistency, but the v3 flow
-	// doesn't require pre-registration (the WebAuthn assertion at session open
-	// carries the credential id hash inline).
-	{Method: "POST", Path: "/v1/recovery/primary/passkey/credentials/register-init", Upstream: UpstreamIka, Key: "ika.recovery.primary.passkey.credentials.register-init", Idempotent: true, RateClass: RateClassRead, MaxBodyBytes: 1 << 10, DeprecatedAt: legacyRecoverySunset, SunsetAt: legacyRecoverySunset},
-	{Method: "POST", Path: "/v1/recovery/primary/passkey/credentials/register-complete", Upstream: UpstreamIka, Key: "ika.recovery.primary.passkey.credentials.register-complete", Idempotent: true, RateClass: RateClassTx, MaxBodyBytes: 4 << 10, DeprecatedAt: legacyRecoverySunset, SunsetAt: legacyRecoverySunset},
-	{Method: "GET", Path: "/v1/recovery/primary/passkey/credentials", Upstream: UpstreamIka, Key: "ika.recovery.primary.passkey.credentials.list", RateClass: RateClassRead, DeprecatedAt: legacyRecoverySunset, SunsetAt: legacyRecoverySunset},
-	{Method: "POST", Path: "/v1/recovery/primary/passkey/credentials/{id}/revoke", Upstream: UpstreamIka, Key: "ika.recovery.primary.passkey.credentials.revoke", Idempotent: true, RateClass: RateClassTx, MaxBodyBytes: 1 << 10, DeprecatedAt: legacyRecoverySunset, SunsetAt: legacyRecoverySunset},
-	{Method: "POST", Path: "/v1/recovery/primary/passkey/open/challenge", Upstream: UpstreamIka, Key: "ika.recovery.primary.passkey.open.challenge", Idempotent: true, RateClass: RateClassRead, MaxBodyBytes: 2 << 10, DeprecatedAt: legacyRecoverySunset, SunsetAt: legacyRecoverySunset},
-	{Method: "POST", Path: "/v1/recovery/primary/passkey/open", Upstream: UpstreamIka, Key: "ika.recovery.primary.passkey.open", Idempotent: true, RateClass: RateClassTx, TimeoutSeconds: 90, MaxBodyBytes: 4 << 10, DeprecatedAt: legacyRecoverySunset, SunsetAt: legacyRecoverySunset},
-	{Method: "POST", Path: "/v1/recovery/primary/passkey/use/challenge", Upstream: UpstreamIka, Key: "ika.recovery.primary.passkey.use.challenge", RateClass: RateClassRead, MaxBodyBytes: 2 << 10, DeprecatedAt: legacyRecoverySunset, SunsetAt: legacyRecoverySunset},
-	{Method: "POST", Path: "/v1/recovery/primary/passkey/use/submit", Upstream: UpstreamIka, Key: "ika.recovery.primary.passkey.use.submit", Idempotent: true, RateClass: RateClassTx, TimeoutSeconds: 90, MaxBodyBytes: 2 << 10, DeprecatedAt: legacyRecoverySunset, SunsetAt: legacyRecoverySunset},
-	{Method: "POST", Path: "/v1/recovery/primary/passkey/close", Upstream: UpstreamIka, Key: "ika.recovery.primary.passkey.close", Idempotent: true, RateClass: RateClassTx, MaxBodyBytes: 1 << 10, DeprecatedAt: legacyRecoverySunset, SunsetAt: legacyRecoverySunset},
-	{Method: "GET", Path: "/v1/recovery/primary/passkey/capabilities", Upstream: UpstreamIka, Key: "ika.recovery.primary.passkey.capabilities", RateClass: RateClassRead, DeprecatedAt: legacyRecoverySunset, SunsetAt: legacyRecoverySunset},
 
 	// --- encrypt-backend (FHE engine) ---
 	// Private transactions

@@ -112,7 +112,7 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, _ *http.Request) {
 		Features: featureFlags{
 			Audit:                  s.auditRecorder != nil,
 			Webhooks:               s.webhookStore != nil,
-			Policies:               s.policyService != nil,
+			Policies:               s.policyV3Service != nil,
 			FutureSign:             s.futureSignStore != nil && watcherRunning,
 			RateLimit:              redisConfigured,
 			Idempotency:            redisConfigured,

@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 
@@ -9,6 +10,7 @@ import (
 
 	"github.com/shinkalabs/andromeda-gateway/internal/audit"
 	"github.com/shinkalabs/andromeda-gateway/internal/futuresign"
+	"github.com/shinkalabs/andromeda-gateway/internal/policy"
 	"github.com/shinkalabs/andromeda-gateway/internal/webhooks"
 )
 
@@ -69,4 +71,60 @@ func resolveAPIKeyID(r *http.Request) (uuid.UUID, error) {
 		return uuid.Nil, fmt.Errorf("missing API key in context")
 	}
 	return uuid.Parse(a.APIKey.ID)
+}
+
+// resolveAPIKeyIDString returns the api_key_id as a raw string. Used by the
+// PolicyEngine v3 audit wiring, which keeps the id as the canonical string
+// form (matches the resource_id column).
+func resolveAPIKeyIDString(r *http.Request) (string, error) {
+	a := authFrom(r)
+	if a == nil || a.APIKey == nil {
+		return "", fmt.Errorf("missing API key in context")
+	}
+	return a.APIKey.ID, nil
+}
+
+// policyEngineAuditBridge adapts audit.Recorder to policy.AuditAppender,
+// translating the PolicyEngine-local event struct to the canonical audit
+// envelope. Action strings ("init", "rule.add", "rule.items.add",
+// "request-signature", etc.) are mapped to the closest EventPolicy* constant.
+type policyEngineAuditBridge struct{ rec *audit.Recorder }
+
+func (b policyEngineAuditBridge) AppendPolicyEngineEvent(ctx context.Context, ev policy.PolicyEngineAuditEvent) error {
+	apiKeyUUID, err := uuid.Parse(ev.APIKeyID)
+	if err != nil {
+		return fmt.Errorf("policy engine audit: invalid api_key_id: %w", err)
+	}
+	payload := map[string]any{
+		"action":       ev.Action,
+		"engine":       ev.Engine,
+		"dwallet":      ev.DWallet,
+		"tx_signature": ev.TxSignature,
+	}
+	if ev.ExtraJSON != "" {
+		var extra map[string]any
+		if err := json.Unmarshal([]byte(ev.ExtraJSON), &extra); err == nil {
+			for k, v := range extra {
+				payload[k] = v
+			}
+		} else {
+			payload["extra_raw"] = ev.ExtraJSON
+		}
+	}
+	eventType := audit.EventPolicyUpdated
+	switch ev.Action {
+	case "init":
+		eventType = audit.EventPolicyDeployed
+	case "request-signature":
+		eventType = audit.EventPolicyRequestApproved
+	}
+	_, err = b.rec.Append(ctx, audit.Event{
+		APIKeyID:     apiKeyUUID,
+		EventType:    eventType,
+		ResourceType: audit.ResourcePolicy,
+		ResourceID:   ev.Engine,
+		Actor:        "api_key:" + ev.APIKeyID,
+		Payload:      payload,
+	})
+	return err
 }

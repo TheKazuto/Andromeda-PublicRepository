@@ -39,7 +39,7 @@ func TestRequiresIdempotencyKeyForRequest(t *testing.T) {
 		// Listed routes:
 		{"POST", "/v1/dwallet/dkg/submit", true},
 		{"POST", "/v1/dwallet/sign/submit", true},
-		{"POST", "/v1/recovery/primary/submit", true},
+		{"POST", "/v1/policy/recover-as-primary/submit", true},
 		{"POST", "/v1/policy/init/submit", true},
 		{"POST", "/v1/policy/request-signature/submit", true},
 		// `{ruleIndex}` placeholder must match:

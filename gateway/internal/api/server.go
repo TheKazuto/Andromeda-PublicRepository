@@ -22,8 +22,7 @@ import (
 	"github.com/shinkalabs/andromeda-gateway/internal/mcp"
 	gwmetrics "github.com/shinkalabs/andromeda-gateway/internal/metrics"
 	"github.com/shinkalabs/andromeda-gateway/internal/netsafety"
-	"github.com/shinkalabs/andromeda-gateway/internal/policies"
-	policyv3 "github.com/shinkalabs/andromeda-gateway/internal/policy"
+	"github.com/shinkalabs/andromeda-gateway/internal/policy"
 	"github.com/shinkalabs/andromeda-gateway/internal/pricing"
 	"github.com/shinkalabs/andromeda-gateway/internal/ratelimit"
 	"github.com/shinkalabs/andromeda-gateway/internal/routes"
@@ -46,8 +45,7 @@ type Server struct {
 	auditRecorder    *audit.Recorder
 	auditReader      *audit.Reader
 	webhookStore     *webhooks.Store
-	policyService    *policies.Service
-	policyV3Service  *policyv3.Service
+	policyV3Service  *policy.Service
 	futureSignStore          *futuresign.Store
 	futureSignWatcherRunning bool
 	mcpTools                 *mcp.ToolRegistry
@@ -73,9 +71,8 @@ type Deps struct {
 	Redis               *redis.Client
 	Audit               *audit.Recorder
 	WebhookStore        *webhooks.Store
-	PolicyService       *policies.Service
-	PolicyV3Service     *policyv3.Service
-	PolicySubscriptions *policies.SubscriptionsStore
+	PolicyV3Service     *policy.Service
+	PolicySubscriptions *policy.SubscriptionsStore
 	FutureSignStore     *futuresign.Store
 	// FutureSignWatcherRunning signals that the in-process watcher goroutines
 	// (slot_time + external_webhook loops) have been started. Capabilities
@@ -133,27 +130,10 @@ func NewServer(d Deps) *Server {
 	if d.Audit != nil {
 		reader = audit.NewReader(d.Store.Pool(), d.Audit.PublicKeyBase64())
 	}
-	// Wire policy subscriptions so each successful init/prepare records the
-	// new policy under the calling api_key. Skipped when no PolicyService.
-	if d.PolicyService != nil && d.PolicySubscriptions != nil {
-		d.PolicyService.WithSubscriptions(d.PolicySubscriptions, resolveAPIKeyID)
-	}
-	// Wire SDK artifact URLs so /v1/policies/{address}/sdk advertises real
-	// tarball locations once the build-sdk GitHub Action has published them.
-	if d.PolicyService != nil && d.Config != nil {
-		d.PolicyService.WithSDKArtifacts(d.Config.SDKBaseURL, d.Config.SDKVersionTag)
-	}
-	// Wire the audit recorder so every successful policy admin submit
+	// Wire audit recorder so every successful PolicyEngine v3 submit
 	// appends a clear-signed governance event to the per-tenant chain.
-	if d.PolicyService != nil && d.Audit != nil {
-		d.PolicyService.WithAuditRecorder(d.Audit)
-	}
-	// Wire the encrypt-backend client for Confidential Workflows. Reuses the
-	// same internal-network creds the upstream registry already has.
-	if d.PolicyService != nil && d.Config != nil &&
-		d.Config.EncryptUpstreamURL != "" && d.Config.InternalAPIKey != "" {
-		client := policies.NewHTTPConfidentialClient(d.Config.EncryptUpstreamURL, d.Config.InternalAPIKey)
-		d.PolicyService.WithConfidentialClient(client)
+	if d.PolicyV3Service != nil && d.Audit != nil {
+		d.PolicyV3Service.WithAuditRecorder(policyEngineAuditBridge{rec: d.Audit}, resolveAPIKeyIDString)
 	}
 	tools := mcp.NewToolRegistry(d.Upstreams)
 	if d.Logger != nil {
@@ -177,7 +157,6 @@ func NewServer(d Deps) *Server {
 		auditRecorder:    d.Audit,
 		auditReader:      reader,
 		webhookStore:     d.WebhookStore,
-		policyService:    d.PolicyService,
 		policyV3Service:  d.PolicyV3Service,
 		futureSignStore:          d.FutureSignStore,
 		futureSignWatcherRunning: d.FutureSignWatcherRunning,
@@ -294,19 +273,6 @@ func (s *Server) Router() http.Handler {
 			sub.Use(s.applyRateLimitFor(routes.RateClassRead))
 			sub.Use(s.chargeQuota("gateway.audit.read"))
 			s.auditReader.MountRoutes(sub, resolveAPIKeyID)
-		})
-	}
-
-	// ----- Policy templates (Sprint 3) -----
-	if s.policyService != nil {
-		r.Group(func(sub chi.Router) {
-			sub.Use(s.requireAPIKey)
-			sub.Use(s.requireScope(auth.ScopeAdmin))
-			sub.Use(s.requireSubscription)
-			sub.Use(s.applyRateLimitFor(routes.RateClassTx))
-			sub.Use(s.chargeQuota("gateway.policies.admin"))
-			s.policyService.MountRoutes(sub)
-			s.policyService.MountSDKRoute(sub)
 		})
 	}
 
