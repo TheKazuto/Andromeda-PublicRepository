@@ -169,7 +169,17 @@ export function adminChallengePreimage(input: AdminChallengeInput): Uint8Array {
     input.configHash,
     input.ownerSlot,
   ]
-  for (const e of input.extras) parts.push(e)
+  // M2 audit fix (2026-05-16): each extra is prefixed with u16 LE length so
+  // two variable-length extras can't be silently concatenated into an
+  // ambiguous byte string. Mirror of `admin_challenge` in
+  // contracts/policy-engine/src/lib.rs.
+  for (const e of input.extras) {
+    if (e.length > 0xffff) {
+      throw new Error(`admin extra > u16 max (${e.length} bytes)`)
+    }
+    parts.push(u16LE(e.length))
+    parts.push(e)
+  }
   return concat(parts)
 }
 

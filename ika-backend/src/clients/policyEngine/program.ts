@@ -36,8 +36,10 @@ export const POLICY_ENGINE_INSTRUCTION_DISCRIMINATOR = {
   updateRuleOracleRemoveFeed: 123,
   updateRulePasskeyAddCredential: 124,
   updateRulePasskeyRemoveCredential: 125,
-  updateRuleFheGatedAddAuthority: 126,
-  updateRuleFheGatedRemoveAuthority: 127,
+  // C2 audit fix (2026-05-16): disc 126 sets the entire authorities list at
+  // once (not add/remove). The legacy add/remove granularity was aspirational
+  // and never landed — granular API can be added later as a separate disc.
+  updateRuleFheGatedAuthorities: 126,
   updateRuleSessionKeyAddDestination: 128,
   updateRuleSessionKeyRemoveDestination: 129,
   updateRuleRecoveryAddMember: 130,

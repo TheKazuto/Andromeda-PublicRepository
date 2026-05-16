@@ -16,6 +16,7 @@ import {
 } from './pda.js'
 import {
   KIND_ALLOWLIST,
+  KIND_FHE_GATED,
   KIND_RECOVERY,
   KIND_SESSION_KEY,
   POLICY_ENGINE_INSTRUCTION_DISCRIMINATOR,
@@ -447,6 +448,64 @@ export async function buildAddRuleFheGatedInstruction(
     data,
     await buildSimpleRuleAccounts(input.programId, input.engine, input.dwallet, input.payer, 6, input.ruleIndex),
   )
+}
+
+// ── Disc 126 — update_rule_fhe_gated_authorities (C2 audit fix) ─────────────
+//
+// `add_rule_fhe_gated` (disc 15) initialises the FHE rule with
+// `authorities_count = 0`; the dispatch fail-closes on count == 0. Disc 126
+// replaces the entire authority list in one shot. Owner signs an
+// `update-rule-fhe-authorities` admin challenge binding the new state.
+
+export const MAX_FHE_AUTHORITIES = 4
+
+export interface UpdateRuleFheGatedAuthoritiesInput {
+  programId: Address
+  dwallet: Address
+  engine: Address
+  payer: Address
+  initAuthorityHash: Uint8Array
+  expectedNonce: bigint
+  ruleIndex: number
+  newCount: number
+  // `newAuthorities` is the full 128-byte canonical slot. Trailing slots
+  // beyond `newCount` MUST be zero — the on-chain handler hashes the full
+  // 128 B into `config_hash`.
+  newAuthorities: Uint8Array
+}
+
+export async function buildUpdateRuleFheGatedAuthoritiesInstruction(
+  input: UpdateRuleFheGatedAuthoritiesInput,
+): Promise<Instruction> {
+  assertLen(input.initAuthorityHash, 32, 'init_authority_hash')
+  assertLen(input.newAuthorities, MAX_FHE_AUTHORITIES * 32, 'new_authorities')
+  if (
+    !Number.isInteger(input.newCount) ||
+    input.newCount < 1 ||
+    input.newCount > MAX_FHE_AUTHORITIES
+  ) {
+    throw new Error(`fhe authorities count out of [1..=${MAX_FHE_AUTHORITIES}]: ${input.newCount}`)
+  }
+  const rule = (await rulePda(input.programId, input.engine, KIND_FHE_GATED, input.ruleIndex)).address
+  const eventAuth = (await eventAuthorityPda(input.programId)).address
+  const data = concat([
+    new Uint8Array([POLICY_ENGINE_INSTRUCTION_DISCRIMINATOR.updateRuleFheGatedAuthorities]),
+    input.initAuthorityHash,
+    u64LE(input.expectedNonce),
+    new Uint8Array([input.ruleIndex, input.newCount]),
+    input.newAuthorities,
+  ])
+  return makeIx(input.programId, data, [
+    { address: input.dwallet, role: AccountRole.READONLY },
+    { address: input.engine, role: AccountRole.WRITABLE },
+    { address: rule, role: AccountRole.WRITABLE },
+    { address: input.payer, role: AccountRole.WRITABLE_SIGNER },
+    { address: SYSVAR_INSTRUCTIONS_ADDRESS, role: AccountRole.READONLY },
+    { address: SYSVAR_CLOCK_ADDRESS, role: AccountRole.READONLY },
+    { address: SYSTEM_PROGRAM_ADDRESS, role: AccountRole.READONLY },
+    { address: eventAuth, role: AccountRole.READONLY },
+    { address: input.programId, role: AccountRole.READONLY },
+  ])
 }
 
 // ── Disc 1 — request_signature ──────────────────────────────────────────────
@@ -1377,6 +1436,9 @@ export interface RecoverAsPrimaryPasskeySessionInput {
   callerProgram: Address
   dwalletProgram: Address
   initAuthorityHash: Uint8Array
+  // H2 audit fix (2026-05-16): rule_index is now part of the wire format.
+  // Must match the slot the RecoveryRule was created at.
+  ruleIndex: number
   passkeySessionNonce: bigint
   messageDigest: Uint8Array
   metadataDigest: Uint8Array
@@ -1394,7 +1456,10 @@ export async function buildRecoverAsPrimaryPasskeySessionInstruction(
   assertLen(input.messageDigest, 32, 'message_digest')
   assertLen(input.metadataDigest, 32, 'metadata_digest')
   assertLen(input.userPubkey, 32, 'user_pubkey')
-  const rule = (await rulePda(input.programId, input.engine, KIND_RECOVERY_K, 0)).address
+  if (!Number.isInteger(input.ruleIndex) || input.ruleIndex < 0 || input.ruleIndex > 15) {
+    throw new Error(`rule_index out of [0..15]: ${input.ruleIndex}`)
+  }
+  const rule = (await rulePda(input.programId, input.engine, KIND_RECOVERY_K, input.ruleIndex)).address
   const session = (
     await passkeySessionPda(input.programId, input.engine, input.passkeySessionNonce)
   ).address
@@ -1405,6 +1470,7 @@ export async function buildRecoverAsPrimaryPasskeySessionInstruction(
   const data = concat([
     new Uint8Array([POLICY_ENGINE_INSTRUCTION_DISCRIMINATOR.recoverAsPrimaryPasskeySession]),
     input.initAuthorityHash,
+    new Uint8Array([input.ruleIndex]),
     u64LE(input.passkeySessionNonce),
     input.messageDigest,
     input.metadataDigest,
