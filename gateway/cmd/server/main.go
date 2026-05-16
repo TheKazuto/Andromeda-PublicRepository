@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gagliardetto/solana-go"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
@@ -25,6 +26,7 @@ import (
 	"github.com/shinkalabs/andromeda-gateway/internal/netsafety"
 	"github.com/shinkalabs/andromeda-gateway/internal/observability"
 	"github.com/shinkalabs/andromeda-gateway/internal/policies"
+	policyv3 "github.com/shinkalabs/andromeda-gateway/internal/policy"
 	"github.com/shinkalabs/andromeda-gateway/internal/pricing"
 	"github.com/shinkalabs/andromeda-gateway/internal/ratelimit"
 	"github.com/shinkalabs/andromeda-gateway/internal/redisclient"
@@ -240,6 +242,31 @@ func main() {
 		logger.Info("policies service disabled — set IKA_PROGRAM_ID, IKA_COORDINATOR_ADDRESS and SOLANA_RPC_URL to enable")
 	}
 
+	// --- PolicyEngine v3 service (optional — needs ANDROMEDA_POLICY_ENGINE_PROGRAM_ID).
+	// Piggybacks on the legacy policySvc's RPC + gas sponsor when available so
+	// devnet/prod don't need duplicate credentials. F14 (2026-05-15) deployed the
+	// program to devnet at ARfJadMTH8mvAWprE8oMoRGNamKVDX9GV3URvudYyXgL.
+	var policyV3Svc *policyv3.Service
+	if cfg.PolicyEngineProgramID != "" {
+		pid, err := solana.PublicKeyFromBase58(cfg.PolicyEngineProgramID)
+		if err != nil {
+			logger.Error("policy-engine v3: invalid ANDROMEDA_POLICY_ENGINE_PROGRAM_ID", "err", err)
+			os.Exit(1)
+		}
+		policyV3Svc = policyv3.NewService(pid)
+		if policySvc != nil {
+			if policySvc.RPCClient != nil {
+				policyV3Svc.WithRPC(policySvc.RPCClient)
+			}
+			if policySvc.GasSponsor != nil {
+				policyV3Svc.WithGasSponsor(policySvc.GasSponsor)
+			}
+		}
+		logger.Info("policy-engine v3 service ready", "program_id", pid.String())
+	} else {
+		logger.Info("policy-engine v3 disabled — set ANDROMEDA_POLICY_ENGINE_PROGRAM_ID to enable")
+	}
+
 	// Billing migrated to backend (M1 of architecture split). Gateway
 	// no longer boots a Stripe service or overage worker — those live
 	// in `backend/cmd/server`.
@@ -256,6 +283,7 @@ func main() {
 		Audit:               auditRec,
 		WebhookStore:        whStore,
 		PolicyService:       policySvc,
+		PolicyV3Service:     policyV3Svc,
 		PolicySubscriptions: policySubsStore,
 		FutureSignStore:          fsStore,
 		FutureSignWatcherRunning: fsWatcherRunning,
