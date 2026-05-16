@@ -189,12 +189,17 @@ func RequestSignature(p RequestSignatureParams) (solana.Instruction, error) {
 		{PublicKey: p.CPIAuthority, IsSigner: false, IsWritable: false},
 		{PublicKey: p.CallerProgram, IsSigner: false, IsWritable: false},
 		{PublicKey: p.DWalletProgram, IsSigner: false, IsWritable: false},
+		{PublicKey: SysvarInstructions, IsSigner: false, IsWritable: false},
 		{PublicKey: SysvarClock, IsSigner: false, IsWritable: false},
 		{PublicKey: SystemProgramID, IsSigner: false, IsWritable: false},
 		{PublicKey: eventAuth, IsSigner: false, IsWritable: false},
 		{PublicKey: p.ProgramID, IsSigner: false, IsWritable: false},
 	}
-	// F8a: trailing remaining_accounts — one writable account per active rule.
+	// F8a: trailing remaining_accounts — one writable account per active rule
+	// slot, in ascending order. F5b/F6b/F7b extend this contract with auxiliary
+	// readonly accounts following each slot that needs them (Oracle: 1 aux
+	// per feed; Passkey: 2 aux — auth_data + cdj; FheGated: none). Callers
+	// stitch them into `RulePDAs` in the correct order.
 	for _, pda := range p.RulePDAs {
 		accounts = append(accounts, &solana.AccountMeta{PublicKey: pda, IsSigner: false, IsWritable: true})
 	}
