@@ -28,6 +28,8 @@ var (
 	OpResume                = []byte("resume")
 	OpRevoke                = []byte("revoke")
 	OpPrimaryRecover        = []byte("primary-recover")
+	// C2 audit fix (2026-05-16): binds the disc 126 admin challenge.
+	OpUpdateFheAuth         = []byte("update-rule-fhe-authorities")
 )
 
 // AdminChallengeInput carries every byte the on-chain handler hashes for a
@@ -74,7 +76,17 @@ func (in *AdminChallengeInput) Preimage() ([]byte, error) {
 	buf.Write(nonce[:])
 	buf.Write(in.ConfigHash[:])
 	buf.Write(in.OwnerSlot[:])
+	// M2 audit fix (2026-05-16): each extra is prefixed with u16 LE length so
+	// two variable-length extras can't be silently concatenated into an
+	// ambiguous byte string. Mirror of `admin_challenge` in
+	// contracts/policy-engine/src/lib.rs.
 	for _, e := range in.Extras {
+		if len(e) > 0xFFFF {
+			return nil, fmt.Errorf("policy: admin extra > u16 max (%d bytes)", len(e))
+		}
+		var el [2]byte
+		binary.LittleEndian.PutUint16(el[:], uint16(len(e)))
+		buf.Write(el[:])
 		buf.Write(e)
 	}
 	return buf.Bytes(), nil

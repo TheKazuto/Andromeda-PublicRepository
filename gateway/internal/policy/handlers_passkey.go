@@ -482,6 +482,7 @@ func (s *Service) passkeyUseSubmit(w http.ResponseWriter, r *http.Request) {
 		CallerProgram:       callerProgram,
 		DWalletProgram:      IkaDwalletProgramID,
 		InitAuthorityHash:   derived.initHash,
+		RuleIndex:           req.RuleIndex,
 		PasskeySessionNonce: req.PasskeySessionNonce,
 		MessageDigest:       msgDigest,
 		MetadataDigest:      metaDigest,

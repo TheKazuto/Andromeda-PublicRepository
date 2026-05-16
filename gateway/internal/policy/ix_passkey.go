@@ -132,6 +132,9 @@ type RecoverAsPrimaryPasskeySessionParams struct {
 	CallerProgram        solana.PublicKey
 	DWalletProgram       solana.PublicKey
 	InitAuthorityHash    [32]byte
+	// H2 audit fix (2026-05-16): rule_index is now part of the wire format —
+	// must match the slot the RecoveryRule was created at.
+	RuleIndex            uint8
 	PasskeySessionNonce  uint64
 	MessageDigest        [32]byte
 	MetadataDigest       [32]byte
@@ -143,7 +146,7 @@ type RecoverAsPrimaryPasskeySessionParams struct {
 }
 
 func RecoverAsPrimaryPasskeySession(p RecoverAsPrimaryPasskeySessionParams) (solana.Instruction, error) {
-	rulePDA, _, err := RulePDA(p.ProgramID, p.Engine, KindRecovery, 0)
+	rulePDA, _, err := RulePDA(p.ProgramID, p.Engine, KindRecovery, p.RuleIndex)
 	if err != nil {
 		return nil, err
 	}
@@ -155,9 +158,10 @@ func RecoverAsPrimaryPasskeySession(p RecoverAsPrimaryPasskeySessionParams) (sol
 	if err != nil {
 		return nil, err
 	}
-	data := make([]byte, 0, 1+32+8+32+32+32+2+1+1+8)
+	data := make([]byte, 0, 1+32+1+8+32+32+32+2+1+1+8)
 	data = append(data, DiscRecoverAsPrimaryPasskeySession)
 	data = append(data, p.InitAuthorityHash[:]...)
+	data = append(data, p.RuleIndex)
 	var b8 [8]byte
 	binary.LittleEndian.PutUint64(b8[:], p.PasskeySessionNonce)
 	data = append(data, b8[:]...)
