@@ -108,7 +108,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			refund = r2
 		}
 
-		res, err := handler(r.Context(), p.Arguments)
+		// Stash the inbound request's auth-bearing headers + remote addr
+		// on the context so Local-route tools (PolicyEngine) can build a
+		// faithful sibling *http.Request and serve it on the loopback mux.
+		toolCtx := WithLoopbackInbound(r.Context(), &LoopbackInbound{
+			Headers:    r.Header.Clone(),
+			RemoteAddr: r.RemoteAddr,
+		})
+
+		res, err := handler(toolCtx, p.Arguments)
 		// Refund only on a technical/upstream-5xx failure — never on a
 		// 4xx (caller's fault). Mirrors the REST proxy's refund-on-5xx
 		// policy. handler errors are always treated as technical.

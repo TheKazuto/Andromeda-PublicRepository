@@ -97,6 +97,7 @@ func (g Generator) tags() []Document {
 	return []Document{
 		{"name": "ika", "description": "MPC engine: dWallet creation, signing, recovery, Login Social (OIDC)."},
 		{"name": "encrypt", "description": "FHE engine: ciphertexts, graph execution, decrypt, NEK."},
+		{"name": "policy-engine", "description": "Unified policy program (v3): single Quasar program that hosts allowlist / velocity / time-lock / oracle / passkey / fhe-gated / session-key / recovery rules per dWallet."},
 		{"name": "pricing", "description": "Public pricing — plans, route costs, estimator."},
 		{"name": "me", "description": "Authenticated user — balance and usage."},
 		{"name": "gifts", "description": "Gift card preview, redeem, and Stripe checkout."},
@@ -147,15 +148,23 @@ func (g Generator) schemas() Document {
 }
 
 func operationForRoute(r routes.Route) Document {
+	tag := r.Upstream
+	description := "Proxied to " + r.Upstream + "-backend. Cost in tokens is set per route — see /v1/pricing."
+	if r.Local {
+		tag = "policy-engine"
+		description = "Handled locally by the gateway (PolicyEngine v3): builds Solana transactions in-process. Cost in tokens is set per route — see /v1/pricing."
+	}
 	op := Document{
-		"operationId":            operationID(r),
-		"summary":                r.Method + " " + r.Path,
-		"description":            "Proxied to " + r.Upstream + "-backend. Cost in tokens is set per route — see /v1/pricing.",
-		"tags":                   []string{r.Upstream},
-		"x-andromeda-rate-class": r.EffectiveRateClass(),
-		"x-andromeda-idempotent": r.Idempotent,
-		"parameters":             pathParameters(r.Path),
-		"responses":              standardResponses(),
+		"operationId":                          operationID(r),
+		"summary":                              r.Method + " " + r.Path,
+		"description":                          description,
+		"tags":                                 []string{tag},
+		"x-andromeda-rate-class":               r.EffectiveRateClass(),
+		"x-andromeda-idempotent":               r.Idempotent,
+		"x-andromeda-requires-idempotency-key": r.RequiresIdempotencyKey,
+		"x-andromeda-required-scope":           r.RequiredScope(),
+		"parameters":                           pathParameters(r.Path),
+		"responses":                            standardResponses(),
 	}
 	if r.Idempotent {
 		op["parameters"] = append(op["parameters"].([]Document), idempotencyKeyHeader())

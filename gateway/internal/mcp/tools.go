@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/url"
 	"regexp"
 	"strings"
@@ -22,6 +23,13 @@ type ToolRegistry struct {
 	mu       sync.RWMutex
 	tools    map[string]Tool
 	handlers map[string]ToolHandler
+	// loopback is the in-process http.Handler that Local routes (those
+	// flagged `routes.Route.Local`) are served on. It is set by the API
+	// layer after the chi router has been built (the registry is created
+	// before the router, so this is a forward-injected reference). When
+	// nil, Local tools fall back to a stub message pointing the caller at
+	// the REST endpoint — same behaviour the registry shipped before F13b.
+	loopback http.Handler
 }
 
 // NewToolRegistry builds a tool catalogue. When upstreams is non-nil, every
@@ -71,6 +79,24 @@ func (r *ToolRegistry) Count() int {
 	return len(r.tools)
 }
 
+// SetLoopbackHandler wires the in-process http.Handler that Local routes
+// (PolicyEngine v3) are served on. Safe to call from the API layer after
+// the chi router has been built — Local tool handlers read this back via
+// loopbackHandler() at call time.
+func (r *ToolRegistry) SetLoopbackHandler(h http.Handler) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.loopback = h
+}
+
+// loopbackHandler returns the wired Local-route handler, or nil when the
+// API layer hasn't injected one yet.
+func (r *ToolRegistry) loopbackHandler() http.Handler {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.loopback
+}
+
 // pathParamRE matches chi-style path parameters: {id}, {dwalletAddress}, ...
 var pathParamRE = regexp.MustCompile(`\{([a-zA-Z_][a-zA-Z0-9_]*)\}`)
 
@@ -78,14 +104,23 @@ var pathParamRE = regexp.MustCompile(`\{([a-zA-Z_][a-zA-Z0-9_]*)\}`)
 // the route Key (e.g. "ika.sign.submit"). Argument schema declares
 // pathParams (when the path has placeholders), query (always optional)
 // and body (for write methods).
+//
+// F13b: Local routes (PolicyEngine v3, `Route.Local == true`) are served
+// in-process through the gateway's own chi mux via makeLoopbackHandler.
+// The mux is forward-injected after the registry is built — see
+// SetLoopbackHandler. When the handler isn't wired yet, the loopback
+// closure falls back to a stub that points the caller at the REST URL.
 func (r *ToolRegistry) seedFromRoutes(upstreams *upstream.Registry, all []routes.Route) {
 	for _, route := range all {
 		route := route // capture
 		tool := buildToolFromRoute(route)
 		var handler ToolHandler
-		if upstreams == nil {
+		switch {
+		case route.Local:
+			handler = makeLoopbackHandler(r, route)
+		case upstreams == nil:
 			handler = stubHandler(route.Key, "upstreams not configured")
-		} else {
+		default:
 			handler = makeProxyHandler(upstreams, route)
 		}
 		r.Register(tool, handler)
@@ -190,6 +225,9 @@ func buildToolFromRoute(route routes.Route) Tool {
 	}
 
 	description := fmt.Sprintf("%s %s → %s-backend (custody-free proxy).", route.Method, route.Path, route.Upstream)
+	if route.Local {
+		description = fmt.Sprintf("%s %s → PolicyEngine v3 (handled in-process by the gateway; no upstream proxy). Builds Solana transactions and signs them via the configured gas sponsor.", route.Method, route.Path)
+	}
 	if hasHint && hint.Description != "" {
 		description = hint.Description
 	}
