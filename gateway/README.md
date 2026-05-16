@@ -41,7 +41,7 @@ gateway/
 │   ├── idempotency/        # Idempotency-Key store
 │   ├── usage/              # Async usage log writer
 │   ├── webhooks/           # CRUD + dispatcher worker (HMAC + retries)
-│   ├── policies/           # 8 Quasar policy templates (Go side) + /v1/confidential/sign
+│   ├── policy/             # PolicyEngine v3 service (Go side): challenges, codecs, PDA derivation, request_signature builders, recover_as_primary + quorum_session_* + passkey_session_* handlers
 │   ├── futuresign/         # Trigger watcher (oracle/slot/event/external)
 │   ├── audit/              # Per-tenant ed25519 hash chain (env or Vault Transit signer)
 │   ├── netsafety/          # SSRF guard for outbound URLs
@@ -75,138 +75,97 @@ gateway/
 ## Authenticated endpoints (`X-Api-Key`)
 
 Every successful response carries `X-Andromeda-Tokens-{Cost,Used,Limit}` and `X-Andromeda-Upstream`
-headers; deprecated routes also get RFC 8594 `Deprecation`/`Sunset` headers. The gateway forwards the
-authenticated tenant identity to the engines as `X-Andromeda-User-Id` (required by the high-level,
-tenant-scoped dWallet ops). Read-class routes need scope `read`; everything else needs `write`; the
-gateway-native admin features (webhooks, audit, policies, future-sign) need scope `admin`. Request
-bodies are capped at 25 MiB.
+headers. The gateway forwards the authenticated tenant identity to the engines as `X-Andromeda-User-Id`
+(required by the high-level, tenant-scoped dWallet ops). Read-class routes need scope `read`;
+everything else needs `write`; the gateway-native admin features (webhooks, audit, PolicyEngine v3
+admin, future-sign) need scope `admin`. Request bodies are capped at 25 MiB.
 
-| Group | Routes (under `/v1`) | Scope | Upstream |
-|-------|----------------------|-------|----------|
-| **dWallet — high-level (MCP tools)** | `dwallet/create`, `dwallet/transfer-ownership`, `dwallet/approve`, `dwallet/admin/add-member`, `dwallet/presign`, `dwallet/sign` (→ MCP `create_dwallet` / `transfer_ownership` / `approve` / `admin_add_member` / `presign` / `sign_message`) | write | ika |
-| **dWallet — low-level** | `dwallet/dkg/{prepare,submit}`, `dwallet/{sign,presign,future-sign,future-sign/complete,re-encrypt-share,make-share-public}/submit`, `GET dwallet/presigns/{userPubkey}` | write / read | ika |
-| **Recovery — discovery** | `recovery/{challenge,resolve}` | write | ika |
-| **Recovery — primary** | `recovery/primary/{challenge,submit}` | write | ika |
-| **Recovery — quorum** | `recovery/quorum/session/{open/challenge,open,contribute/challenge,contribute,finalize,close}`, `GET recovery/quorum/session/{address}` | write / read | ika |
-| **Recovery — policy** | `recovery/policy/{preview,deploy,admin/challenge,admin/submit,apply-pending}`, `GET recovery/policy/{dwalletAddress}` | write / read | ika |
-| **Recovery — Login Social (OIDC primary)** | `recovery/primary/oidc/{stage,open/challenge,open,use/challenge,use/submit,close,staging/close}`, `oidc/validate` — staged `id_token` carriers get an 8 KiB body cap | write / read | ika |
-| **Recovery — Passkey-PRF (WebAuthn primary, scheme=3 session-scoped)** | `recovery/primary/passkey/{credentials/register-init,credentials/register-complete,credentials,credentials/{id}/revoke,open/challenge,open,use/challenge,use/submit,close,capabilities}` — WebAuthn assertion at open (Secp256r1 precompile), Ed25519 ephemeral per-use. 4 KiB body cap on the assertion-carrying routes. D2 RP ID + D3 per-credential salt + D6 5/dwallet enforced upstream. | write / read | ika |
+| Group | Routes (under `/v1`) | Scope | Source |
+|-------|----------------------|-------|--------|
+| **dWallet — high-level (MCP tools)** | `dwallet/create` (accepts `attachPolicyEngine: true`), `dwallet/transfer-ownership`, `dwallet/presign`, `dwallet/sign` (→ MCP `create_dwallet` / `transfer_ownership` / `presign` / `sign_message`) | write | proxied to ika-backend |
+| **dWallet — low-level** | `dwallet/dkg/{prepare,submit}`, `dwallet/{sign,presign,future-sign,future-sign/complete,re-encrypt-share,make-share-public}/submit`, `GET dwallet/presigns/{userPubkey}` | write / read | proxied to ika-backend |
+| **PolicyEngine v3 — read** | `GET policy/{dwallet}` — engine state (header, every active rule slot, members, destinations, nonces) | read | local |
+| **PolicyEngine v3 — admin** | `policy/init/{challenge,submit}`, `policy/rules/add/{challenge,submit}`, `policy/rules/{ruleIndex}/items/add/{challenge,submit}` — challenge → owner-signs → submit. Admin scope, Idempotency-Key MANDATORY on every submit. | admin | local |
+| **PolicyEngine v3 — recovery** | `policy/recover-as-primary/{challenge,submit}` (single-tx primary) · `policy/quorum/session/{open,contribute}/{challenge,submit}` · `policy/quorum/session/{finalize,close}` · `policy/passkey/session/open/{challenge,submit}` · `policy/passkey/use/{challenge,submit}` · `policy/passkey/session/close` | write | local |
+| **PolicyEngine v3 — request signature** | `policy/request-signature/{challenge,submit}` — runtime metadata digest + on-chain dispatch loop across every active rule slot + CPI Ika `approve_message`. | write | local |
+| **Login Social — OIDC pre-flow** | `POST oidc/{nonce,validate}` — canonical OAuth `nonce` builder + provider JWKS pre-validation of `id_token`s. 8 KiB body cap on `/validate` (carries a JWT). | write / read | proxied to ika-backend |
 | **OAuth broker (Login Social)** | `GET oauth/{authorize,callback}`, `POST oauth/token-exchange` — gateway-hosted Andromeda OAuth client (Google + Apple, `scope=openid` only). Authorization Code + PKCE. Free (no token cost). | write | gateway |
-| **Private TX** | `private-tx/submit`, `GET private-tx/status/{signature}` | write / read | encrypt |
-| **Ciphertext** | `ciphertext/{create,read}`, `GET ciphertext/account/{address}` | write / read | encrypt |
-| **Graph** | `graph/{execute,register,execute-registered,commit}/prepare`, `graph/submit`, `graph/operations/register-bytes`, `GET graph/{status/{signature},operations}` | write / read | encrypt |
-| **DSL** | `GET dsl/types`, `dsl/op/prepare` | read / write | encrypt |
-| **Decrypt** | `decrypt/request/prepare`, `GET decrypt/poll/{account}` | write / read | encrypt |
-| **NEK** | `GET nek/current` | read | encrypt |
-| **Events** | `events/emit/prepare`, `GET events/by-signature/{signature}` | write / read | encrypt |
-| **Wallet (private)** | `wallet/balance/init` | write | encrypt |
-| **Authority / Fees / Ownership** | `authority/{add,remove,register-nek}/prepare`, `fees/deposit/{create,top-up,withdraw,request-withdraw,reimburse}/prepare`, `fees/config/update/prepare`, `ownership/{transfer,copy,make-public}/prepare` | write | encrypt |
+| **Private TX** | `private-tx/submit`, `GET private-tx/status/{signature}` | write / read | proxied to encrypt-backend |
+| **Ciphertext** | `ciphertext/{create,read}`, `GET ciphertext/account/{address}` | write / read | proxied to encrypt-backend |
+| **Graph** | `graph/{execute,register,execute-registered,commit}/prepare`, `graph/submit`, `graph/operations/register-bytes`, `GET graph/{status/{signature},operations}` | write / read | proxied to encrypt-backend |
+| **DSL** | `GET dsl/types`, `dsl/op/prepare` | read / write | proxied to encrypt-backend |
+| **Decrypt** | `decrypt/request/prepare`, `GET decrypt/poll/{account}` | write / read | proxied to encrypt-backend |
+| **NEK** | `GET nek/current` | read | proxied to encrypt-backend |
+| **Events** | `events/emit/prepare`, `GET events/by-signature/{signature}` | write / read | proxied to encrypt-backend |
+| **Wallet (private)** | `wallet/balance/init` | write | proxied to encrypt-backend |
+| **Authority / Fees / Ownership** | `authority/{add,remove,register-nek}/prepare`, `fees/deposit/{create,top-up,withdraw,request-withdraw,reimburse}/prepare`, `fees/config/update/prepare`, `ownership/{transfer,copy,make-public}/prepare` | write | proxied to encrypt-backend |
 | **Webhooks** | CRUD + retry | admin | gateway |
 | **Audit log** | `GET audit/log`, `GET audit/log/export`, `GET audit/log/verify`, `GET audit/log/{seq}/proof` — per-tenant signed hash-chain (read + export + verify + Merkle proof). The `verify` response also carries the tenant's ed25519 `publicKeyB64` so external replayers can re-check signatures. | admin | gateway |
 | **Future-sign triggers** | oracle / slot / event / external watchers | admin | gateway |
-| **Policies** | 8 Quasar templates: rules-policy, allowlist-destinations, velocity-guard, time-lock, oracle-conditional, passkey-step-up, fhe-gated, session-keys. Endpoints: `templates`, `init`, `admin/challenge`, `admin/submit`, `request-signature`. Wallet-agnostic + gas-sponsored. | admin | gateway |
-| **SDK metadata** | `GET /v1/policies/{address}/sdk` → typed TypeScript SDK tarball location | admin | gateway |
-| **Simulate** | `POST /v1/signatures/simulate` → dry-run via `simulateTransaction` | admin | gateway |
-| **Auto-batching** | `POST /v1/signatures/batch` → up to 64 ops across all 7 request_signature templates packed into K txs (1232-byte limit). Supports a `common` block for same-dWallet batches (hoist dwallet/curve/init_authority_hash). Gateway partial-signs as gas sponsor before returning; `signers_required` lists extra keys the dev must add (only non-empty for session-keys). | admin | gateway |
-| **Confidential** | `POST /v1/confidential/sign` → FHE evaluation (encrypt-backend) + Vault sign + fhe-gated tx | admin | gateway |
 
 Full machine-readable catalogue of the proxied routes in `internal/routes/routes.go`; everything
 (including the gateway-native endpoints above) is in `/openapi.json`.
 
-### Clear Signing v2 (shipped 2026-05-14)
+### Clear Signing v2
 
-Every governance challenge — primary recovery, quorum open/contribute, the
-12 rules-policy admin actions, OIDC open/use, and admin actions across the
-7 other policy templates — returns a deterministic human-readable text
-that the on-chain program recomputes from the same typed parameters and
-embeds (length-prefixed `u16 LE`) into the SHA-256 the credential signs.
-A compromised gateway cannot swap destination, member, amount, nonce or
-session without the approver seeing the swap in the text they are about
-to sign.
+Every PolicyEngine v3 challenge — `init`, `rules.add`, `rules.items.add`, `recover-as-primary`,
+`quorum.session.{open,contribute}`, `passkey.session.{open}` and `passkey.use` — returns a
+deterministic human-readable text that the on-chain program recomputes from the same typed
+parameters and embeds (length-prefixed `u16 LE`) into the SHA-256 the credential signs. A
+compromised gateway cannot swap destination, member, amount, nonce or session without the approver
+seeing the swap in the text they are about to sign.
 
 **Wire format on-chain.**
 
 ```
 challenge = sha256(
-    DOMAIN              // e.g. "andromeda::allowlist-destinations::v2"
-    || op_tag           // e.g. "add-destination"
+    DOMAIN              // e.g. "andromeda::policy-engine::v3"
+    || op_tag           // e.g. "add-allowlist" / "primary-recover" / "passkey-session-open"
     || human_len_u16_le // 2 bytes, little-endian
     || human_message    // plain ASCII, ≤ 768 bytes
-    || dwallet || policy || nonce_le || owner_slot || extras...
+    || engine || dwallet || rule_kind || rule_index || rule_generation_le || expected_nonce_le
+    || config_hash || owner_slot || extras...
 )
 ```
 
 `MAX_HUMAN_MESSAGE_BYTES = 768`. ASCII only (`0x20..=0x7E`).
 
-**Gateway response shape (`POST /v1/policies/{template}/admin/challenge`).**
+**Gateway response shape (`POST /v1/policy/rules/add/challenge`).**
 
 ```json
 {
-  "challenge_base64": "u0guEFzHirl5Nt4+TVq3Okjctoi5Vkk+oSmxJFKmAIk=",
-  "human_message": "Pause allowlist policy 4xyz... for dWallet 9abc...",
-  "clear_signing": {
-    "version": "policy-clear-v1",
-    "operation": "allowlist.pause",
-    "fields": {
-      "dwallet": "9abc...",
-      "policy": "4xyz...",
-      "expected_nonce": "0"
-    }
-  },
-  "expected_nonce": 0
+  "challenge_hex": "u0guEFzHirl5Nt4+TVq3Okjctoi5Vkk+oSmxJFKmAIk=",
+  "human_message": "Add allowlist rule (slot 0, generation 1) to engine 8AnE… for dWallet 9abc…",
+  "preimage_hex": "...",
+  "config_hash_hex": "...",
+  "engine_address": "8AnETQSm…",
+  "rule_pda": "GpL7g4Y6…",
+  "op_tag": "add-allowlist",
+  "program_id": "ARfJadMTH8mvAWprE8oMoRGNamKVDX9GV3URvudYyXgL"
 }
 ```
 
-* `human_message` — the exact ASCII text the approver MUST see before
-  signing. Plain text, no locale, no truncation.
-* `clear_signing.version` — `policy-clear-v1` for the 7 policy admin
-  challenges served here; `rules-policy-clear-v1` for the rules-policy
-  challenges served by `ika-backend`.
-* `clear_signing.operation` — canonical op tag, e.g. `allowlist.pause`,
-  `velocity.update_window`, `oracle.update_bounds`, `fhe.rotate_authority`,
-  `session_keys.close_session`, `passkey.update_policy`,
-  `time_lock.update_window`.
-* `clear_signing.fields` — curated map of typed parameters (Solana
-  addresses base58, hashes hex, integers as decimal strings). No PII, no
-  secrets.
+* `human_message` — the exact ASCII text the approver MUST see before signing. Plain text, no locale, no truncation.
+* `op_tag` — canonical operation tag, e.g. `init` / `init-with-recovery` / `add-allowlist` / `add-velocity` / `add-time-lock` / `add-oracle` / `add-passkey` / `add-fhe-gated` / `add-session-key` / `add-recovery` / `allowlist-add-dest` / `primary-recover` / `quorum-session-open` / `quorum-contribute` / `passkey-session-open` / `passkey-primary-use`.
+* `config_hash_hex` — sha256 of the canonical config payload for the rule (immutable identity of the rule at this generation).
 
-**Templates with clear signing (40 total).** 7 policies × ~3 admin ops
-(plus the 17 from rules-policy in ika-backend):
-`allowlist-destinations` (`add/remove_destination, pause, resume`),
-`velocity-guard` (`update_window, pause, resume`),
-`time-lock` (`update_window, pause, resume`),
-`oracle-conditional` (`update_bounds, pause, resume`),
-`passkey-step-up` (`update_policy, pause, resume`),
-`session-keys` (`revoke, add/remove_allowed_program, close_session`),
-`fhe-gated` (`rotate_authority, pause, resume`).
+**`/submit` never trusts caller text.** The handler recomputes the challenge from the same typed
+parameters in the body and ignores any `human_message` the caller passed. If the on-chain SHA-256
+doesn't match what the precompile validated, the transaction fails.
 
-Flows preserved at v1 (no clear signing): each policy's `init`,
-`request-signature` runtime digest, `passkey-step-up::step-up` (WebAuthn
-already binds the challenge into `clientDataJSON`), `fhe-gated::decision`
-(signed by a Vault Transit KMS key, not a human),
-`session-keys::create-session` (init flow).
+**Audit trail.** Every successful PolicyEngine v3 submit appends one entry to the per-tenant
+ed25519-signed audit chain (mapped from `policy.PolicyEngineAuditEvent` to the canonical
+`audit.Event` envelope by the `policyEngineAuditBridge`). Payload includes the action tag
+(`init` / `rule.add` / `rule.items.add` / `request-signature` / `recover-as-primary` / `quorum.*` /
+`passkey.*`), engine address, dWallet, tx signature, and a JSON `extra` block with route-specific
+context (rule kind, rule index, member or destination added, etc.).
 
-**`/admin/submit` never trusts caller text.** The handler recomputes the
-challenge from the same typed parameters in the body and ignores any
-`human_message` the caller passed. If the on-chain SHA-256 doesn't match
-what the precompile validated, the transaction fails.
-
-**Audit trail.** Every successful admin submit appends one entry to the
-per-tenant ed25519-signed audit chain. The payload includes
-`clear_signing_version`, `operation`, `challenge_hash_base64`,
-`human_message` (≤ 768 bytes, verbatim), and `fields_hash_base64` —
-sha256 of RFC 8785 JSON Canonicalization Scheme over `clear_signing.fields`,
-so two entries with identical typed parameters always produce the same
-hash regardless of map key order.
-
-**No SDK required.** Clients call the gateway directly over HTTP /
-MCP-tool, render `human_message` to the user, take the off-chain
-signature with any wallet (EVM / Sui / Bitcoin / Cosmos / NEAR / Aptos /
-Solana / passkey), and POST it back to `/admin/submit`. The gateway pays
-the Solana fee.
+**No SDK required.** Clients call the gateway directly over HTTP / MCP tool, render `human_message`
+to the user, take the off-chain signature with any wallet (EVM / Bitcoin / Cosmos / NEAR / Aptos /
+Solana / passkey), and POST it back to `/submit`. The gateway pays the Solana fee.
 
 **Error envelope.** Every gateway-native error response is `{"error": "<message>", "code": "<snake_case>"}` —
-flat, two string fields, uniform across `/v1/policies/*`, `/v1/webhooks/*`, `/v1/audit/*`,
+flat, two string fields, uniform across `/v1/policy/*`, `/v1/webhooks/*`, `/v1/audit/*`,
 `/v1/future-sign/*` and the proxy layer. (Errors *forwarded* from an engine keep that engine's body
 verbatim. The `/mcp` endpoint speaks JSON-RPC and uses its own error object.)
 
@@ -332,15 +291,13 @@ on the DTO and call `BindAndValidate` — avoid hand-rolled per-field `if req.X 
 | `ANDROMEDA_AUDIT_PRIVATE_KEY` | Base64 ed25519 (32-byte seed or 64-byte key). Used only when signer = `env`. Falls back to an ephemeral key if empty in dev. |
 | `ANDROMEDA_AUDIT_VAULT_{ADDR,TOKEN,KEY_NAME,PUBKEY_B64}` | Required (all-or-nothing) when signer = `vault`. Every signature is locally re-verified against `PUBKEY_B64`. |
 
-### Solana / policies
+### Solana / PolicyEngine v3
 | Var | Notes |
 |-----|-------|
-| `SOLANA_RPC_URL` | Enables the on-chain event listener; also required (with the two below) for the policies service. |
-| `IKA_PROGRAM_ID` | Ika dWallet program (must match the ika-backend's). |
-| `IKA_COORDINATOR_ADDRESS` | Ika `DWalletCoordinator` PDA. The **policies service** mounts only when `SOLANA_RPC_URL` + `IKA_PROGRAM_ID` + `IKA_COORDINATOR_ADDRESS` are all set. |
-| `ANDROMEDA_TEMPLATE_PROGRAM_IDS_JSON` | `{"template-name":"program-id"}` map for the 8 deployed templates. A template missing here is still listed by `/v1/policies/templates` but `deploy`/`request-signature` return `503`. |
-| `ANDROMEDA_GAS_SPONSOR_KEYPAIR` | JSON byte array (64 B, `solana-keygen` format). Gateway pays gas for every policy/recovery Solana tx so users never need a Solana wallet. Never commit it; keep it funded. |
-| `ANDROMEDA_SDK_BASE_URL` + `ANDROMEDA_SDK_VERSION_TAG` | SDK-tarball location for `GET /v1/policies/{address}/sdk`. Tag defaults to `sdk-v0.1.0`. |
+| `SOLANA_RPC_URL` | Enables the on-chain event listener. Also required by the PolicyEngine v3 `/submit` endpoints — the gateway builds the Solana tx in-process, signs as gas sponsor, and broadcasts via this RPC. Empty → admin/recover submits return `503 no_rpc`. |
+| `IKA_PROGRAM_ID` | Ika dWallet program (must match the ika-backend's). Referenced by the `KIND_RECOVERY` / `KIND_PASSKEY` dispatchers when building the CPI to `approve_message`. |
+| `ANDROMEDA_POLICY_ENGINE_PROGRAM_ID` | Deployed `policy-engine` Quasar program. Devnet: `ARfJadMTH8mvAWprE8oMoRGNamKVDX9GV3URvudYyXgL`. Empty → the local `/v1/policy/*` routes are not mounted. |
+| `ANDROMEDA_GAS_SPONSOR_KEYPAIR` | JSON byte array (64 B, `solana-keygen` format). Gateway pays gas for every PolicyEngine v3 Solana tx so users never need a Solana wallet. Empty → `/submit` endpoints return `503 no_gas_sponsor`. Never commit it; keep it funded. |
 
 ### OAuth broker — Login Social (opt-in)
 
