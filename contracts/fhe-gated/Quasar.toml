@@ -1,8 +1,0 @@
-[program]
-name = "andromeda_fhe_gated"
-
-[toolchain]
-type = "solana"
-
-[deploy]
-cluster = "devnet"
