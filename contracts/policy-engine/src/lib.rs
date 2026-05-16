@@ -3859,7 +3859,8 @@ mod policy_engine_program {
         require!(
             member_slot[0] == SCHEME_ED25519
                 || member_slot[0] == SCHEME_SECP256K1
-                || member_slot[0] == SCHEME_SECP256R1,
+                || member_slot[0] == SCHEME_SECP256R1
+                || member_slot[0] == SCHEME_WEBAUTHN,
             PolicyEngineError::UnsupportedScheme
         );
 
@@ -4573,6 +4574,120 @@ mod policy_engine_program {
             webauthn_client_data_json: &[],
         })
         .map_err(|_| PolicyEngineError::AuthFailed)?;
+        drop(sysvar_data_ref);
+
+        let new_bitmap = bitmap | bit;
+        let new_count = ctx.accounts.session.contributions_count + 1;
+        ctx.accounts.session.contributions_bitmap = new_bitmap.into();
+        ctx.accounts.session.contributions_count = new_count;
+        Ok(())
+    }
+
+    /// Disc 84 — `quorum_session_contribute_webauthn` (F9b-webauthn).
+    ///
+    /// Same semantics as disc 83 (single member contribution per tx,
+    /// bitmap-protected against double-contribution, session must be live)
+    /// but for the `SCHEME_WEBAUTHN` slot variant. The member signs the same
+    /// canonical `quorum_contribute_challenge` via a WebAuthn assertion:
+    /// the on-chain handler reconstructs `auth_data || sha256(cdj)` and
+    /// matches it against a Secp256r1 precompile invocation in the same tx,
+    /// while also enforcing the `clientDataJSON.challenge` anchor check.
+    #[instruction(discriminator = 84)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn quorum_session_contribute_webauthn(
+        ctx: Ctx<QuorumSessionContributeAccts>,
+        _init_authority_hash: Address,
+        _session_nonce: u64,
+        member_index: u8,
+        webauthn_auth_data_len: u16,
+        webauthn_auth_data: [u8; WEBAUTHN_AUTH_DATA_MAX],
+        webauthn_cdj_len: u16,
+        webauthn_cdj: [u8; WEBAUTHN_CLIENT_DATA_JSON_MAX],
+    ) -> Result<(), ProgramError> {
+        let current_ts: i64 = ctx.accounts.clock.unix_timestamp.into();
+        require!(
+            ctx.accounts.session.is_finalized == 0,
+            PolicyEngineError::GenericError
+        );
+        let expires_at: i64 = ctx.accounts.session.expires_at.into();
+        require!(
+            current_ts < expires_at,
+            PolicyEngineError::SessionExpired
+        );
+
+        let mc = ctx.accounts.session.member_count_snapshot;
+        require!(
+            member_index < mc,
+            PolicyEngineError::RecoveryMemberNotInQuorum
+        );
+
+        let bit = 1u16 << (member_index as u16);
+        let bitmap: u16 = ctx.accounts.session.contributions_bitmap.into();
+        require!(
+            (bitmap & bit) == 0,
+            PolicyEngineError::GenericError
+        );
+
+        let off = (member_index as usize) * MEMBER_SLOT_LEN;
+        let mut slot = [0u8; MEMBER_SLOT_LEN];
+        slot.copy_from_slice(
+            &ctx.accounts.session.members_snapshot[off..off + MEMBER_SLOT_LEN],
+        );
+        validate_slot(&slot).map_err(|_| PolicyEngineError::InvalidOwnerSlot)?;
+        require!(
+            slot[0] == SCHEME_WEBAUTHN,
+            PolicyEngineError::UnsupportedScheme
+        );
+
+        // WebAuthn payload bounds.
+        let auth_len = webauthn_auth_data_len as usize;
+        let cdj_len = webauthn_cdj_len as usize;
+        require!(
+            auth_len > 0
+                && auth_len <= WEBAUTHN_AUTH_DATA_MAX
+                && cdj_len > 0
+                && cdj_len <= WEBAUTHN_CLIENT_DATA_JSON_MAX,
+            PolicyEngineError::PasskeyStepUpInvalid
+        );
+
+        let session_addr = *ctx.accounts.session.address();
+        let amount: u64 = ctx.accounts.session.amount.into();
+        let signature_scheme: u16 = ctx.accounts.session.signature_scheme.into();
+        let expires_at_i64: i64 = ctx.accounts.session.expires_at.into();
+        let dwallet_addr_ref = *ctx.accounts.dwallet_account.address();
+        let destination_arr = ctx.accounts.session.destination;
+        let message_digest_arr = ctx.accounts.session.message_digest;
+        let metadata_digest_arr = ctx.accounts.session.metadata_digest;
+        let user_pubkey_arr = ctx.accounts.session.user_pubkey;
+        let bump_u8 = ctx.accounts.session.message_approval_bump;
+        let challenge = quorum_contribute_challenge(
+            &session_addr,
+            &slot,
+            &dwallet_addr_ref,
+            amount,
+            &destination_arr,
+            &message_digest_arr,
+            &metadata_digest_arr,
+            &user_pubkey_arr,
+            signature_scheme,
+            bump_u8,
+            expires_at_i64,
+        )
+        .map_err(PolicyEngineError::from)?;
+
+        check_sysvar_addr(ctx.accounts.instructions_sysvar.address())?;
+        let sysvar_view = ctx.accounts.instructions_sysvar.to_account_view();
+        let sysvar_data_ref = sysvar_view
+            .try_borrow()
+            .map_err(|_| PolicyEngineError::AuthFailed)?;
+        verify_signature(VerifyInput {
+            member_slot: &slot,
+            challenge: &challenge,
+            instructions_sysvar_data: &sysvar_data_ref,
+            webauthn_auth_data: &webauthn_auth_data[..auth_len],
+            webauthn_client_data_json: &webauthn_cdj[..cdj_len],
+        })
+        .map_err(|_| PolicyEngineError::PasskeyAssertionInvalid)?;
         drop(sysvar_data_ref);
 
         let new_bitmap = bitmap | bit;
