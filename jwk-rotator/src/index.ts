@@ -319,13 +319,14 @@ async function readRegistry(conn: Connection, pda: PublicKey): Promise<RegistryS
   // header layout (after the 1-byte Quasar account discriminator):
   //   disc(1) version(1) entry_count(1) reserved0(6)
   //   authority(32) pending_authority(32) emergency_revoker(32) pending_emergency_revoker(32)
-  //   timelock_seconds(8) grace_period_seconds(8)
+  //   timelock_seconds(8) grace_period_seconds(8) grace_period_post_revoke_seconds(8)
   //   authority_rotation_ready_at(8) emergency_revoker_rotation_ready_at(8)
   const TIMELOCK_OFFSET = ACCOUNT_DISC_LEN + 1 + 1 + 6 + 32 * 4;
   const GRACE_OFFSET = TIMELOCK_OFFSET + 8;
   const timelockSeconds = data.readBigInt64LE(TIMELOCK_OFFSET);
   const gracePeriodSeconds = data.readBigInt64LE(GRACE_OFFSET);
-  const headerLen = ACCOUNT_DISC_LEN + 1 + 1 + 6 + 32 * 4 + 8 * 4;
+  // 5 × u64: timelock, grace, grace_post_revoke, 2 × rotation_ready_at.
+  const headerLen = ACCOUNT_DISC_LEN + 1 + 1 + 6 + 32 * 4 + 8 * 5;
   const entries: OnchainEntry[] = [];
   for (let i = 0; i < MAX_JWKS; i++) {
     const base = headerLen + i * ENTRY_LEN;
@@ -652,6 +653,7 @@ interface BootstrapConfig extends Config {
   registryEmergencyRevoker: PublicKey;
   timelockSeconds: bigint;
   gracePeriodSeconds: bigint;
+  gracePeriodPostRevokeSeconds: bigint;
   authoritiesKeypair?: Keypair; // only if --send
 }
 
@@ -666,6 +668,11 @@ function loadBootstrapConfig(): BootstrapConfig {
   const emergencyRevoker = new PublicKey(env("JWK_REGISTRY_EMERGENCY_REVOKER", ""));
   const timelockSec = BigInt(env("JWK_REGISTRY_TIMELOCK_SECONDS", "3600"));
   const graceSec = BigInt(env("JWK_REGISTRY_GRACE_SECONDS", "604800"));
+  // H4 fix: post-revoke grace defaults to the same window as the standard
+  // grace (7d devnet). Mainnet runbook should bump this to 30d.
+  const gracePostRevokeSec = BigInt(
+    env("JWK_REGISTRY_GRACE_POST_REVOKE_SECONDS", graceSec.toString()),
+  );
 
   let authoritiesKeypair: Keypair | undefined;
   const keypairPath = process.env.JWK_REGISTRY_AUTHORITY_KEYPAIR;
@@ -690,6 +697,7 @@ function loadBootstrapConfig(): BootstrapConfig {
     registryEmergencyRevoker: emergencyRevoker,
     timelockSeconds: timelockSec,
     gracePeriodSeconds: graceSec,
+    gracePeriodPostRevokeSeconds: gracePostRevokeSec,
     authoritiesKeypair,
     payerKeypair,
   };
@@ -717,6 +725,7 @@ async function bootstrapPass(cfg: BootstrapConfig, conn: Connection): Promise<vo
   console.log(`  Emergency Revoker: ${cfg.registryEmergencyRevoker.toBase58()}`);
   console.log(`  Timelock: ${cfg.timelockSeconds}s`);
   console.log(`  Grace Period: ${cfg.gracePeriodSeconds}s`);
+  console.log(`  Grace Period (post-revoke): ${cfg.gracePeriodPostRevokeSeconds}s`);
 
   // Gather provider keys
   const providerKeys: BootstrapKey[] = [];
@@ -768,6 +777,13 @@ async function bootstrapPass(cfg: BootstrapConfig, conn: Connection): Promise<vo
     (() => {
       const b = Buffer.alloc(8);
       b.writeBigUInt64LE(cfg.gracePeriodSeconds, 0);
+      return b;
+    })(),
+    // H4 fix: grace_period_post_revoke_seconds — mirror the standard
+    // grace by default. Ops may override via JWK_REGISTRY_GRACE_POST_REVOKE_SECONDS.
+    (() => {
+      const b = Buffer.alloc(8);
+      b.writeBigUInt64LE(cfg.gracePeriodPostRevokeSeconds, 0);
       return b;
     })(),
   ]);
