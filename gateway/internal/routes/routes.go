@@ -11,9 +11,18 @@
 // inserting a row into request_costs to override the default token cost.
 package routes
 
+import (
+	"net/http"
+	"strings"
+)
+
 const (
 	UpstreamIka     = "ika"
 	UpstreamEncrypt = "encrypt"
+	// UpstreamLocal — gateway handles the route in-process. Used by
+	// PolicyEngine v3 (`/v1/policy/*`) which builds Solana transactions
+	// locally rather than proxying to an engine. Pairs with Route.Local.
+	UpstreamLocal = "local"
 )
 
 // Rate-limit classes. The middleware enforces a separate sliding window
@@ -37,6 +46,13 @@ type Route struct {
 	// Idempotent indicates the route accepts the Idempotency-Key header.
 	// True for any POST/PATCH/DELETE that creates side effects upstream.
 	Idempotent bool
+	// RequiresIdempotencyKey, when true, makes the `Idempotency-Key`
+	// header MANDATORY: the middleware rejects requests without it with
+	// 400 `missing_idempotency_key`. Use for highly-destructive mutating
+	// routes (init, add/update/remove rules, pause/resume/revoke,
+	// request-signature submit, recovery primary/submit, DKG submit,
+	// future-sign submit). Implies Idempotent=true.
+	RequiresIdempotencyKey bool
 	// RateClass decides which bucket of the per-API-key rate limiter
 	// gates the call. Defaults to "tx" if left empty.
 	RateClass string
@@ -58,7 +74,26 @@ type Route struct {
 	// `limitPayload`). Used by the OIDC routes (a staged `id_token` is
 	// ≤ 4 KiB; an 8 KiB cap leaves slack without inviting payload DoS).
 	MaxBodyBytes int64
+	// Local, when true, means the gateway handles this route in-process
+	// (no upstream proxy). Used for PolicyEngine v3 routes (`/v1/policy/*`)
+	// that build Solana transactions locally. `registerProxyRoute` skips
+	// Local routes; the locally-mounted service is responsible for the
+	// actual handler. Catalogue entry still feeds pricing, metrics,
+	// OpenAPI, and the MCP tool registry.
+	Local bool
+	// AdminScope, when true, requires the API key to hold ScopeAdmin
+	// instead of the default `read`/`write` derived from RateClass.
+	// Used for policy management, recovery config, future-sign triggers.
+	AdminScope bool
 }
+
+// legacyRecoverySunset — F11b-Phase3 (2026-05-15). The legacy
+// `/v1/recovery/{primary,quorum,policy,passkey,oidc}/*` mutating flows are
+// sunset in favour of the PolicyEngine v3 surface at `/v1/policy/*`. The
+// gateway emits Deprecation + Sunset headers (RFC 8594) on every legacy
+// route; the ika-backend upstream returns 410 Gone with a successor-version
+// pointer.
+const legacyRecoverySunset = "2026-05-15T00:00:00Z"
 
 // All catalogues every public route. Order does not matter — the
 // gateway registers each one explicitly with chi.
@@ -69,30 +104,28 @@ var All = []Route{
 	// --- ika-backend (MPC engine) ---
 	// dWallet creation = DKG (Distributed Key Generation)
 	{Method: "POST", Path: "/v1/dwallet/dkg/prepare", Upstream: UpstreamIka, Key: "ika.dkg.prepare", RateClass: RateClassTx},
-	{Method: "POST", Path: "/v1/dwallet/dkg/submit", Upstream: UpstreamIka, Key: "ika.dkg.submit", Idempotent: true, RateClass: RateClassTx, TimeoutSeconds: 120},
+	{Method: "POST", Path: "/v1/dwallet/dkg/submit", Upstream: UpstreamIka, Key: "ika.dkg.submit", Idempotent: true, RequiresIdempotencyKey: true, RateClass: RateClassTx, TimeoutSeconds: 120},
 	{Method: "GET", Path: "/v1/dwallet/presigns/{userPubkey}", Upstream: UpstreamIka, Key: "ika.presigns.list", RateClass: RateClassRead},
 
 	// High-level, tenant-scoped dWallet ops (option A2): Andromeda does the
 	// client side; the tenant only supplies a passphrase. These auto-register
-	// as the MCP tools `create_dwallet` / `transfer_ownership` / `approve` /
-	// `presign` / `sign_message`.
+	// as the MCP tools `create_dwallet` / `transfer_ownership` / `presign` /
+	// `sign_message`.
+	//
+	// F11b-Phase4b SUNSET (2026-05-15): `/v1/dwallet/approve` and
+	// `/v1/dwallet/admin/add-member` are retired. Message authorisation moved
+	// to the PolicyEngine v3 surface at `/v1/policy/recover-as-primary/*`;
+	// quorum-member management moved to `/v1/policy/rules/{ruleIndex}/items/add/*`.
 	{Method: "POST", Path: "/v1/dwallet/create", Upstream: UpstreamIka, Key: "ika.dwallet.create", Idempotent: true, RateClass: RateClassTx, TimeoutSeconds: 120},
 	{Method: "POST", Path: "/v1/dwallet/transfer-ownership", Upstream: UpstreamIka, Key: "ika.dwallet.transferOwnership", Idempotent: true, RateClass: RateClassTx, TimeoutSeconds: 90},
-	{Method: "POST", Path: "/v1/dwallet/approve", Upstream: UpstreamIka, Key: "ika.dwallet.approve", Idempotent: true, RateClass: RateClassTx, TimeoutSeconds: 90},
-	// Passphrase-driven "add a quorum recovery member" — only for dWallets whose
-	// policy primary owner is the server keystore key (the default). The engine
-	// signs the on-chain admin challenge with the unwrapped keystore key and
-	// submits, gas-sponsored — so an agent can add a member without an external
-	// wallet on screen. External-primary policies use /v1/recovery/policy/admin/*.
-	{Method: "POST", Path: "/v1/dwallet/admin/add-member", Upstream: UpstreamIka, Key: "ika.dwallet.adminAddMember", Idempotent: true, RateClass: RateClassTx, TimeoutSeconds: 90},
 	{Method: "POST", Path: "/v1/dwallet/presign", Upstream: UpstreamIka, Key: "ika.dwallet.presign", Idempotent: true, RateClass: RateClassTx, TimeoutSeconds: 90},
 	{Method: "POST", Path: "/v1/dwallet/sign", Upstream: UpstreamIka, Key: "ika.dwallet.sign", Idempotent: true, RateClass: RateClassTx, TimeoutSeconds: 90},
 
 	// Signing
-	{Method: "POST", Path: "/v1/dwallet/sign/submit", Upstream: UpstreamIka, Key: "ika.sign.submit", Idempotent: true, RateClass: RateClassTx, TimeoutSeconds: 90},
-	{Method: "POST", Path: "/v1/dwallet/presign/submit", Upstream: UpstreamIka, Key: "ika.presign.submit", Idempotent: true, RateClass: RateClassTx, TimeoutSeconds: 90},
-	{Method: "POST", Path: "/v1/dwallet/future-sign/submit", Upstream: UpstreamIka, Key: "ika.future-sign.submit", Idempotent: true, RateClass: RateClassTx, TimeoutSeconds: 120},
-	{Method: "POST", Path: "/v1/dwallet/future-sign/complete/submit", Upstream: UpstreamIka, Key: "ika.future-sign.complete.submit", Idempotent: true, RateClass: RateClassTx, TimeoutSeconds: 120},
+	{Method: "POST", Path: "/v1/dwallet/sign/submit", Upstream: UpstreamIka, Key: "ika.sign.submit", Idempotent: true, RequiresIdempotencyKey: true, RateClass: RateClassTx, TimeoutSeconds: 90},
+	{Method: "POST", Path: "/v1/dwallet/presign/submit", Upstream: UpstreamIka, Key: "ika.presign.submit", Idempotent: true, RequiresIdempotencyKey: true, RateClass: RateClassTx, TimeoutSeconds: 90},
+	{Method: "POST", Path: "/v1/dwallet/future-sign/submit", Upstream: UpstreamIka, Key: "ika.future-sign.submit", Idempotent: true, RequiresIdempotencyKey: true, RateClass: RateClassTx, TimeoutSeconds: 120},
+	{Method: "POST", Path: "/v1/dwallet/future-sign/complete/submit", Upstream: UpstreamIka, Key: "ika.future-sign.complete.submit", Idempotent: true, RequiresIdempotencyKey: true, RateClass: RateClassTx, TimeoutSeconds: 120},
 
 	// Share management
 	{Method: "POST", Path: "/v1/dwallet/re-encrypt-share/submit", Upstream: UpstreamIka, Key: "ika.re-encrypt-share.submit", Idempotent: true, RateClass: RateClassTx},
@@ -103,37 +136,50 @@ var All = []Route{
 	{Method: "POST", Path: "/v1/recovery/resolve", Upstream: UpstreamIka, Key: "ika.recovery.resolve", Idempotent: true, RateClass: RateClassTx},
 
 	// Recovery — primary (RulesPolicy primary-owner bypass; single tx, challenge-based)
-	{Method: "POST", Path: "/v1/recovery/primary/challenge", Upstream: UpstreamIka, Key: "ika.recovery.primary.challenge", Idempotent: true, RateClass: RateClassRead},
-	{Method: "POST", Path: "/v1/recovery/primary/submit", Upstream: UpstreamIka, Key: "ika.recovery.primary.submit", Idempotent: true, RateClass: RateClassTx},
+	// **F11b-Phase3 SUNSET (2026-05-15)** — replaced by PolicyEngine v3
+	// `/v1/policy/recover-as-primary/{challenge,submit}`. Upstream ika-backend
+	// returns 410 Gone with a successor-version pointer. Gateway middleware
+	// emits Deprecation + Sunset headers (RFC 8594) so SDK users see the
+	// signal in their dashboards.
+	{Method: "POST", Path: "/v1/recovery/primary/challenge", Upstream: UpstreamIka, Key: "ika.recovery.primary.challenge", Idempotent: true, RateClass: RateClassRead, DeprecatedAt: legacyRecoverySunset, SunsetAt: legacyRecoverySunset},
+	{Method: "POST", Path: "/v1/recovery/primary/submit", Upstream: UpstreamIka, Key: "ika.recovery.primary.submit", Idempotent: true, RequiresIdempotencyKey: true, RateClass: RateClassTx, DeprecatedAt: legacyRecoverySunset, SunsetAt: legacyRecoverySunset},
 
 	// Recovery — quorum (M-of-N members; staged in a PDA, challenge-based)
-	{Method: "POST", Path: "/v1/recovery/quorum/session/open/challenge", Upstream: UpstreamIka, Key: "ika.recovery.quorum.open.challenge", Idempotent: true, RateClass: RateClassRead},
-	{Method: "POST", Path: "/v1/recovery/quorum/session/open", Upstream: UpstreamIka, Key: "ika.recovery.quorum.open", Idempotent: true, RateClass: RateClassTx},
-	{Method: "POST", Path: "/v1/recovery/quorum/session/contribute/challenge", Upstream: UpstreamIka, Key: "ika.recovery.quorum.contribute.challenge", Idempotent: true, RateClass: RateClassRead},
-	{Method: "POST", Path: "/v1/recovery/quorum/session/contribute", Upstream: UpstreamIka, Key: "ika.recovery.quorum.contribute", Idempotent: true, RateClass: RateClassTx},
-	{Method: "POST", Path: "/v1/recovery/quorum/session/finalize", Upstream: UpstreamIka, Key: "ika.recovery.quorum.finalize", Idempotent: true, RateClass: RateClassTx, TimeoutSeconds: 120},
-	{Method: "POST", Path: "/v1/recovery/quorum/session/close", Upstream: UpstreamIka, Key: "ika.recovery.quorum.close", Idempotent: true, RateClass: RateClassTx},
-	{Method: "GET", Path: "/v1/recovery/quorum/session/{address}", Upstream: UpstreamIka, Key: "ika.recovery.quorum.get", RateClass: RateClassRead},
+	// **F11b-Phase3 SUNSET (2026-05-15)** — replaced by PolicyEngine v3
+	// `/v1/policy/quorum/session/{open,contribute}/{challenge,submit}` and
+	// `/v1/policy/quorum/session/{finalize,close}`.
+	{Method: "POST", Path: "/v1/recovery/quorum/session/open/challenge", Upstream: UpstreamIka, Key: "ika.recovery.quorum.open.challenge", Idempotent: true, RateClass: RateClassRead, DeprecatedAt: legacyRecoverySunset, SunsetAt: legacyRecoverySunset},
+	{Method: "POST", Path: "/v1/recovery/quorum/session/open", Upstream: UpstreamIka, Key: "ika.recovery.quorum.open", Idempotent: true, RateClass: RateClassTx, DeprecatedAt: legacyRecoverySunset, SunsetAt: legacyRecoverySunset},
+	{Method: "POST", Path: "/v1/recovery/quorum/session/contribute/challenge", Upstream: UpstreamIka, Key: "ika.recovery.quorum.contribute.challenge", Idempotent: true, RateClass: RateClassRead, DeprecatedAt: legacyRecoverySunset, SunsetAt: legacyRecoverySunset},
+	{Method: "POST", Path: "/v1/recovery/quorum/session/contribute", Upstream: UpstreamIka, Key: "ika.recovery.quorum.contribute", Idempotent: true, RateClass: RateClassTx, DeprecatedAt: legacyRecoverySunset, SunsetAt: legacyRecoverySunset},
+	{Method: "POST", Path: "/v1/recovery/quorum/session/finalize", Upstream: UpstreamIka, Key: "ika.recovery.quorum.finalize", Idempotent: true, RateClass: RateClassTx, TimeoutSeconds: 120, DeprecatedAt: legacyRecoverySunset, SunsetAt: legacyRecoverySunset},
+	{Method: "POST", Path: "/v1/recovery/quorum/session/close", Upstream: UpstreamIka, Key: "ika.recovery.quorum.close", Idempotent: true, RateClass: RateClassTx, DeprecatedAt: legacyRecoverySunset, SunsetAt: legacyRecoverySunset},
+	{Method: "GET", Path: "/v1/recovery/quorum/session/{address}", Upstream: UpstreamIka, Key: "ika.recovery.quorum.get", RateClass: RateClassRead, DeprecatedAt: legacyRecoverySunset, SunsetAt: legacyRecoverySunset},
 
 	// Recovery — policy (RulesPolicy on-chain config)
-	{Method: "POST", Path: "/v1/recovery/policy/preview", Upstream: UpstreamIka, Key: "ika.recovery.policy.preview", RateClass: RateClassRead},
-	{Method: "POST", Path: "/v1/recovery/policy/deploy", Upstream: UpstreamIka, Key: "ika.recovery.policy.deploy", Idempotent: true, RateClass: RateClassTx},
-	{Method: "GET", Path: "/v1/recovery/policy/{dwalletAddress}", Upstream: UpstreamIka, Key: "ika.recovery.policy.get", RateClass: RateClassRead},
-	{Method: "POST", Path: "/v1/recovery/policy/admin/challenge", Upstream: UpstreamIka, Key: "ika.recovery.policy.admin.challenge", Idempotent: true, RateClass: RateClassRead},
-	{Method: "POST", Path: "/v1/recovery/policy/admin/submit", Upstream: UpstreamIka, Key: "ika.recovery.policy.admin.submit", Idempotent: true, RateClass: RateClassTx},
-	{Method: "POST", Path: "/v1/recovery/policy/apply-pending", Upstream: UpstreamIka, Key: "ika.recovery.policy.apply-pending", Idempotent: true, RateClass: RateClassTx},
+	// **F11b-Phase3 SUNSET (2026-05-15)** — replaced by PolicyEngine v3
+	// `/v1/policy/init/{challenge,submit}`, `/v1/policy/rules/add/{challenge,submit}`,
+	// `/v1/policy/rules/{ruleIndex}/items/add/{challenge,submit}`.
+	{Method: "POST", Path: "/v1/recovery/policy/preview", Upstream: UpstreamIka, Key: "ika.recovery.policy.preview", RateClass: RateClassRead, DeprecatedAt: legacyRecoverySunset, SunsetAt: legacyRecoverySunset},
+	{Method: "POST", Path: "/v1/recovery/policy/deploy", Upstream: UpstreamIka, Key: "ika.recovery.policy.deploy", Idempotent: true, RateClass: RateClassTx, DeprecatedAt: legacyRecoverySunset, SunsetAt: legacyRecoverySunset},
+	{Method: "GET", Path: "/v1/recovery/policy/{dwalletAddress}", Upstream: UpstreamIka, Key: "ika.recovery.policy.get", RateClass: RateClassRead, DeprecatedAt: legacyRecoverySunset, SunsetAt: legacyRecoverySunset},
+	{Method: "POST", Path: "/v1/recovery/policy/admin/challenge", Upstream: UpstreamIka, Key: "ika.recovery.policy.admin.challenge", Idempotent: true, RateClass: RateClassRead, DeprecatedAt: legacyRecoverySunset, SunsetAt: legacyRecoverySunset},
+	{Method: "POST", Path: "/v1/recovery/policy/admin/submit", Upstream: UpstreamIka, Key: "ika.recovery.policy.admin.submit", Idempotent: true, RateClass: RateClassTx, DeprecatedAt: legacyRecoverySunset, SunsetAt: legacyRecoverySunset},
+	{Method: "POST", Path: "/v1/recovery/policy/apply-pending", Upstream: UpstreamIka, Key: "ika.recovery.policy.apply-pending", Idempotent: true, RateClass: RateClassTx, DeprecatedAt: legacyRecoverySunset, SunsetAt: legacyRecoverySunset},
 
 	// Recovery — Login Social (RulesPolicy OIDC primary; scheme = 4; loginsocial.md §6.1/§10).
-	// A staged `id_token` (≤ 4 KiB) goes on-chain in a temp PDA, then the user
-	// authorizes signatures with an ephemeral Ed25519 key. The JWT-bearing
-	// routes get a dedicated 8 KiB body cap (MaxBodyBytes).
-	{Method: "POST", Path: "/v1/recovery/primary/oidc/stage", Upstream: UpstreamIka, Key: "ika.recovery.primary.oidc.stage", Idempotent: true, RateClass: RateClassTx, TimeoutSeconds: 90, MaxBodyBytes: 8 << 10},
-	{Method: "POST", Path: "/v1/recovery/primary/oidc/open/challenge", Upstream: UpstreamIka, Key: "ika.recovery.primary.oidc.open.challenge", Idempotent: true, RateClass: RateClassRead, MaxBodyBytes: 8 << 10},
-	{Method: "POST", Path: "/v1/recovery/primary/oidc/open", Upstream: UpstreamIka, Key: "ika.recovery.primary.oidc.open", Idempotent: true, RateClass: RateClassTx, TimeoutSeconds: 90, MaxBodyBytes: 8 << 10},
-	{Method: "POST", Path: "/v1/recovery/primary/oidc/use/challenge", Upstream: UpstreamIka, Key: "ika.recovery.primary.oidc.use.challenge", RateClass: RateClassRead},
-	{Method: "POST", Path: "/v1/recovery/primary/oidc/use/submit", Upstream: UpstreamIka, Key: "ika.recovery.primary.oidc.use.submit", Idempotent: true, RateClass: RateClassTx, TimeoutSeconds: 90},
-	{Method: "POST", Path: "/v1/recovery/primary/oidc/close", Upstream: UpstreamIka, Key: "ika.recovery.primary.oidc.close", Idempotent: true, RateClass: RateClassTx},
-	{Method: "POST", Path: "/v1/recovery/primary/oidc/staging/close", Upstream: UpstreamIka, Key: "ika.recovery.primary.oidc.staging.close", Idempotent: true, RateClass: RateClassTx},
+	// **F11b-Phase3 SUNSET (2026-05-15)** — OIDC v3 successor is blocked
+	// behind the `sol_big_mod_exp` syscall (F9c); the legacy flow is
+	// retired with the rest of /v1/recovery/* anyway. The /v1/oidc/{nonce,
+	// validate} read-only helpers stay live (they're a pre-flow used by
+	// both legacy and future v3).
+	{Method: "POST", Path: "/v1/recovery/primary/oidc/stage", Upstream: UpstreamIka, Key: "ika.recovery.primary.oidc.stage", Idempotent: true, RateClass: RateClassTx, TimeoutSeconds: 90, MaxBodyBytes: 8 << 10, DeprecatedAt: legacyRecoverySunset, SunsetAt: legacyRecoverySunset},
+	{Method: "POST", Path: "/v1/recovery/primary/oidc/open/challenge", Upstream: UpstreamIka, Key: "ika.recovery.primary.oidc.open.challenge", Idempotent: true, RateClass: RateClassRead, MaxBodyBytes: 8 << 10, DeprecatedAt: legacyRecoverySunset, SunsetAt: legacyRecoverySunset},
+	{Method: "POST", Path: "/v1/recovery/primary/oidc/open", Upstream: UpstreamIka, Key: "ika.recovery.primary.oidc.open", Idempotent: true, RateClass: RateClassTx, TimeoutSeconds: 90, MaxBodyBytes: 8 << 10, DeprecatedAt: legacyRecoverySunset, SunsetAt: legacyRecoverySunset},
+	{Method: "POST", Path: "/v1/recovery/primary/oidc/use/challenge", Upstream: UpstreamIka, Key: "ika.recovery.primary.oidc.use.challenge", RateClass: RateClassRead, DeprecatedAt: legacyRecoverySunset, SunsetAt: legacyRecoverySunset},
+	{Method: "POST", Path: "/v1/recovery/primary/oidc/use/submit", Upstream: UpstreamIka, Key: "ika.recovery.primary.oidc.use.submit", Idempotent: true, RateClass: RateClassTx, TimeoutSeconds: 90, DeprecatedAt: legacyRecoverySunset, SunsetAt: legacyRecoverySunset},
+	{Method: "POST", Path: "/v1/recovery/primary/oidc/close", Upstream: UpstreamIka, Key: "ika.recovery.primary.oidc.close", Idempotent: true, RateClass: RateClassTx, DeprecatedAt: legacyRecoverySunset, SunsetAt: legacyRecoverySunset},
+	{Method: "POST", Path: "/v1/recovery/primary/oidc/staging/close", Upstream: UpstreamIka, Key: "ika.recovery.primary.oidc.staging.close", Idempotent: true, RateClass: RateClassTx, DeprecatedAt: legacyRecoverySunset, SunsetAt: legacyRecoverySunset},
 
 	// Login Social — pre-step: server picks not_after + nonce_randomness and
 	// returns the canonical `oidc_nonce` (so the client carries no crypto-layout
@@ -149,16 +195,23 @@ var All = []Route{
 	// cap is 192 B for authData + 192 B for clientDataJSON (D13); 4 KiB body covers
 	// both plus envelope. Credentials list/revoke + register-init/complete are
 	// off-chain bookkeeping owned by ika-backend (D4) — gateway only reverse-proxies.
-	{Method: "POST", Path: "/v1/recovery/primary/passkey/credentials/register-init", Upstream: UpstreamIka, Key: "ika.recovery.primary.passkey.credentials.register-init", Idempotent: true, RateClass: RateClassRead, MaxBodyBytes: 1 << 10},
-	{Method: "POST", Path: "/v1/recovery/primary/passkey/credentials/register-complete", Upstream: UpstreamIka, Key: "ika.recovery.primary.passkey.credentials.register-complete", Idempotent: true, RateClass: RateClassTx, MaxBodyBytes: 4 << 10},
-	{Method: "GET", Path: "/v1/recovery/primary/passkey/credentials", Upstream: UpstreamIka, Key: "ika.recovery.primary.passkey.credentials.list", RateClass: RateClassRead},
-	{Method: "POST", Path: "/v1/recovery/primary/passkey/credentials/{id}/revoke", Upstream: UpstreamIka, Key: "ika.recovery.primary.passkey.credentials.revoke", Idempotent: true, RateClass: RateClassTx, MaxBodyBytes: 1 << 10},
-	{Method: "POST", Path: "/v1/recovery/primary/passkey/open/challenge", Upstream: UpstreamIka, Key: "ika.recovery.primary.passkey.open.challenge", Idempotent: true, RateClass: RateClassRead, MaxBodyBytes: 2 << 10},
-	{Method: "POST", Path: "/v1/recovery/primary/passkey/open", Upstream: UpstreamIka, Key: "ika.recovery.primary.passkey.open", Idempotent: true, RateClass: RateClassTx, TimeoutSeconds: 90, MaxBodyBytes: 4 << 10},
-	{Method: "POST", Path: "/v1/recovery/primary/passkey/use/challenge", Upstream: UpstreamIka, Key: "ika.recovery.primary.passkey.use.challenge", RateClass: RateClassRead, MaxBodyBytes: 2 << 10},
-	{Method: "POST", Path: "/v1/recovery/primary/passkey/use/submit", Upstream: UpstreamIka, Key: "ika.recovery.primary.passkey.use.submit", Idempotent: true, RateClass: RateClassTx, TimeoutSeconds: 90, MaxBodyBytes: 2 << 10},
-	{Method: "POST", Path: "/v1/recovery/primary/passkey/close", Upstream: UpstreamIka, Key: "ika.recovery.primary.passkey.close", Idempotent: true, RateClass: RateClassTx, MaxBodyBytes: 1 << 10},
-	{Method: "GET", Path: "/v1/recovery/primary/passkey/capabilities", Upstream: UpstreamIka, Key: "ika.recovery.primary.passkey.capabilities", RateClass: RateClassRead},
+	// **F11b-Phase3 SUNSET (2026-05-15)** — replaced by PolicyEngine v3
+	// `/v1/policy/passkey/session/{open}/{challenge,submit}`, `/v1/policy/passkey/use/{challenge,submit}`,
+	// `/v1/policy/passkey/session/close`. Credential register/list/revoke are
+	// off-chain bookkeeping that the gateway doesn't replace yet (Phase4 if
+	// needed) — they 410 alongside the rest for consistency, but the v3 flow
+	// doesn't require pre-registration (the WebAuthn assertion at session open
+	// carries the credential id hash inline).
+	{Method: "POST", Path: "/v1/recovery/primary/passkey/credentials/register-init", Upstream: UpstreamIka, Key: "ika.recovery.primary.passkey.credentials.register-init", Idempotent: true, RateClass: RateClassRead, MaxBodyBytes: 1 << 10, DeprecatedAt: legacyRecoverySunset, SunsetAt: legacyRecoverySunset},
+	{Method: "POST", Path: "/v1/recovery/primary/passkey/credentials/register-complete", Upstream: UpstreamIka, Key: "ika.recovery.primary.passkey.credentials.register-complete", Idempotent: true, RateClass: RateClassTx, MaxBodyBytes: 4 << 10, DeprecatedAt: legacyRecoverySunset, SunsetAt: legacyRecoverySunset},
+	{Method: "GET", Path: "/v1/recovery/primary/passkey/credentials", Upstream: UpstreamIka, Key: "ika.recovery.primary.passkey.credentials.list", RateClass: RateClassRead, DeprecatedAt: legacyRecoverySunset, SunsetAt: legacyRecoverySunset},
+	{Method: "POST", Path: "/v1/recovery/primary/passkey/credentials/{id}/revoke", Upstream: UpstreamIka, Key: "ika.recovery.primary.passkey.credentials.revoke", Idempotent: true, RateClass: RateClassTx, MaxBodyBytes: 1 << 10, DeprecatedAt: legacyRecoverySunset, SunsetAt: legacyRecoverySunset},
+	{Method: "POST", Path: "/v1/recovery/primary/passkey/open/challenge", Upstream: UpstreamIka, Key: "ika.recovery.primary.passkey.open.challenge", Idempotent: true, RateClass: RateClassRead, MaxBodyBytes: 2 << 10, DeprecatedAt: legacyRecoverySunset, SunsetAt: legacyRecoverySunset},
+	{Method: "POST", Path: "/v1/recovery/primary/passkey/open", Upstream: UpstreamIka, Key: "ika.recovery.primary.passkey.open", Idempotent: true, RateClass: RateClassTx, TimeoutSeconds: 90, MaxBodyBytes: 4 << 10, DeprecatedAt: legacyRecoverySunset, SunsetAt: legacyRecoverySunset},
+	{Method: "POST", Path: "/v1/recovery/primary/passkey/use/challenge", Upstream: UpstreamIka, Key: "ika.recovery.primary.passkey.use.challenge", RateClass: RateClassRead, MaxBodyBytes: 2 << 10, DeprecatedAt: legacyRecoverySunset, SunsetAt: legacyRecoverySunset},
+	{Method: "POST", Path: "/v1/recovery/primary/passkey/use/submit", Upstream: UpstreamIka, Key: "ika.recovery.primary.passkey.use.submit", Idempotent: true, RateClass: RateClassTx, TimeoutSeconds: 90, MaxBodyBytes: 2 << 10, DeprecatedAt: legacyRecoverySunset, SunsetAt: legacyRecoverySunset},
+	{Method: "POST", Path: "/v1/recovery/primary/passkey/close", Upstream: UpstreamIka, Key: "ika.recovery.primary.passkey.close", Idempotent: true, RateClass: RateClassTx, MaxBodyBytes: 1 << 10, DeprecatedAt: legacyRecoverySunset, SunsetAt: legacyRecoverySunset},
+	{Method: "GET", Path: "/v1/recovery/primary/passkey/capabilities", Upstream: UpstreamIka, Key: "ika.recovery.primary.passkey.capabilities", RateClass: RateClassRead, DeprecatedAt: legacyRecoverySunset, SunsetAt: legacyRecoverySunset},
 
 	// --- encrypt-backend (FHE engine) ---
 	// Private transactions
@@ -215,6 +268,42 @@ var All = []Route{
 	{Method: "POST", Path: "/v1/ownership/transfer/prepare", Upstream: UpstreamEncrypt, Key: "encrypt.ownership.transfer.prepare", RateClass: RateClassTx},
 	{Method: "POST", Path: "/v1/ownership/copy/prepare", Upstream: UpstreamEncrypt, Key: "encrypt.ownership.copy.prepare", RateClass: RateClassTx},
 	{Method: "POST", Path: "/v1/ownership/make-public/prepare", Upstream: UpstreamEncrypt, Key: "encrypt.ownership.make-public.prepare", RateClass: RateClassTx},
+
+	// --- PolicyEngine v3 (local; Solana txs built in-process) -----------------
+	// Each entry is `Local: true`, so registerProxyRoute() skips it; the
+	// PolicyEngine service mounts its own chi router under the same paths
+	// (see internal/policy/routes.go MountRoutes). Catalogue entries exist
+	// so pricing, metrics, OpenAPI 3.1 generator and the MCP tool registry
+	// see PolicyEngine just like proxied routes. Idempotency is MANDATORY
+	// on every admin submit (init, add/update/remove rule, pause, resume,
+	// revoke, request-signature submit) so dashboard retries can't
+	// double-mutate the engine.
+	{Method: "GET", Path: "/v1/policy/{dwallet}", Upstream: UpstreamLocal, Local: true, Key: "policy.engine.read", RateClass: RateClassRead},
+	{Method: "POST", Path: "/v1/policy/init/challenge", Upstream: UpstreamLocal, Local: true, Key: "policy.engine.init.challenge", AdminScope: true, RateClass: RateClassRead},
+	{Method: "POST", Path: "/v1/policy/init/submit", Upstream: UpstreamLocal, Local: true, Key: "policy.engine.init.submit", Idempotent: true, RequiresIdempotencyKey: true, AdminScope: true, RateClass: RateClassTx, TimeoutSeconds: 60},
+	{Method: "POST", Path: "/v1/policy/rules/add/challenge", Upstream: UpstreamLocal, Local: true, Key: "policy.engine.rules.add.challenge", AdminScope: true, RateClass: RateClassRead},
+	{Method: "POST", Path: "/v1/policy/rules/add/submit", Upstream: UpstreamLocal, Local: true, Key: "policy.engine.rules.add.submit", Idempotent: true, RequiresIdempotencyKey: true, AdminScope: true, RateClass: RateClassTx},
+	{Method: "POST", Path: "/v1/policy/rules/{ruleIndex}/items/add/challenge", Upstream: UpstreamLocal, Local: true, Key: "policy.engine.rules.items.add.challenge", AdminScope: true, RateClass: RateClassRead},
+	{Method: "POST", Path: "/v1/policy/rules/{ruleIndex}/items/add/submit", Upstream: UpstreamLocal, Local: true, Key: "policy.engine.rules.items.add.submit", Idempotent: true, RequiresIdempotencyKey: true, AdminScope: true, RateClass: RateClassTx},
+	{Method: "POST", Path: "/v1/policy/request-signature/challenge", Upstream: UpstreamLocal, Local: true, Key: "policy.engine.request-signature.challenge", RateClass: RateClassRead},
+	{Method: "POST", Path: "/v1/policy/request-signature/submit", Upstream: UpstreamLocal, Local: true, Key: "policy.engine.request-signature.submit", Idempotent: true, RequiresIdempotencyKey: true, RateClass: RateClassTx, TimeoutSeconds: 60},
+	// F11b-Phase1 — recover_as_primary. NOT AdminScope: the primary owner is
+	// the user; gateway is just gas sponsor + tx relayer.
+	{Method: "POST", Path: "/v1/policy/recover-as-primary/challenge", Upstream: UpstreamLocal, Local: true, Key: "policy.engine.recover-as-primary.challenge", RateClass: RateClassRead},
+	{Method: "POST", Path: "/v1/policy/recover-as-primary/submit", Upstream: UpstreamLocal, Local: true, Key: "policy.engine.recover-as-primary.submit", Idempotent: true, RequiresIdempotencyKey: true, RateClass: RateClassTx, TimeoutSeconds: 60},
+	// F11b-Phase2 — quorum_session_*. Same scope semantics as Phase1.
+	{Method: "POST", Path: "/v1/policy/quorum/session/open/challenge", Upstream: UpstreamLocal, Local: true, Key: "policy.engine.quorum.open.challenge", RateClass: RateClassRead},
+	{Method: "POST", Path: "/v1/policy/quorum/session/open/submit", Upstream: UpstreamLocal, Local: true, Key: "policy.engine.quorum.open.submit", Idempotent: true, RequiresIdempotencyKey: true, RateClass: RateClassTx, TimeoutSeconds: 60},
+	{Method: "POST", Path: "/v1/policy/quorum/session/contribute/challenge", Upstream: UpstreamLocal, Local: true, Key: "policy.engine.quorum.contribute.challenge", RateClass: RateClassRead},
+	{Method: "POST", Path: "/v1/policy/quorum/session/contribute/submit", Upstream: UpstreamLocal, Local: true, Key: "policy.engine.quorum.contribute.submit", Idempotent: true, RequiresIdempotencyKey: true, RateClass: RateClassTx, TimeoutSeconds: 60},
+	{Method: "POST", Path: "/v1/policy/quorum/session/finalize", Upstream: UpstreamLocal, Local: true, Key: "policy.engine.quorum.finalize", Idempotent: true, RequiresIdempotencyKey: true, RateClass: RateClassTx, TimeoutSeconds: 120},
+	{Method: "POST", Path: "/v1/policy/quorum/session/close", Upstream: UpstreamLocal, Local: true, Key: "policy.engine.quorum.close", Idempotent: true, RequiresIdempotencyKey: true, RateClass: RateClassTx},
+	// F11b-Phase2 — passkey_session_*.
+	{Method: "POST", Path: "/v1/policy/passkey/session/open/challenge", Upstream: UpstreamLocal, Local: true, Key: "policy.engine.passkey.open.challenge", RateClass: RateClassRead, MaxBodyBytes: 4 << 10},
+	{Method: "POST", Path: "/v1/policy/passkey/session/open/submit", Upstream: UpstreamLocal, Local: true, Key: "policy.engine.passkey.open.submit", Idempotent: true, RequiresIdempotencyKey: true, RateClass: RateClassTx, TimeoutSeconds: 60, MaxBodyBytes: 8 << 10},
+	{Method: "POST", Path: "/v1/policy/passkey/use/challenge", Upstream: UpstreamLocal, Local: true, Key: "policy.engine.passkey.use.challenge", RateClass: RateClassRead},
+	{Method: "POST", Path: "/v1/policy/passkey/use/submit", Upstream: UpstreamLocal, Local: true, Key: "policy.engine.passkey.use.submit", Idempotent: true, RequiresIdempotencyKey: true, RateClass: RateClassTx, TimeoutSeconds: 60},
+	{Method: "POST", Path: "/v1/policy/passkey/session/close", Upstream: UpstreamLocal, Local: true, Key: "policy.engine.passkey.close", Idempotent: true, RequiresIdempotencyKey: true, RateClass: RateClassTx},
 }
 
 // EffectiveRateClass returns r.RateClass with a default of "tx" when
@@ -229,9 +318,13 @@ func (r Route) EffectiveRateClass() string {
 
 // RequiredScope maps a route's RateClass to the API-key scope the
 // caller must hold. Read-class routes need "read", everything else
-// needs "write". Admin features (webhooks, audit, policies, future-sign)
-// require the explicit "admin" scope, applied at their own group.
+// needs "write". Routes marked `AdminScope` require the explicit
+// "admin" scope regardless of class — used for policy management,
+// recovery config, future-sign triggers, audit reads.
 func (r Route) RequiredScope() string {
+	if r.AdminScope {
+		return "admin"
+	}
 	if r.EffectiveRateClass() == RateClassRead {
 		return "read"
 	}
@@ -243,4 +336,54 @@ func (r Route) TargetPath() string {
 		return r.UpstreamPath
 	}
 	return r.Path
+}
+
+// RequiresIdempotencyKeyForRequest reports whether the request's path
+// matches a catalogue entry with `RequiresIdempotencyKey: true`. Matches
+// chi's `{param}` placeholders by splitting on `/` and treating any
+// catalogue segment starting with `{` as a wildcard. Wired into the
+// idempotency middleware so destructive submits hard-fail with 400 when
+// the client forgets to send the header.
+func RequiresIdempotencyKeyForRequest(req *http.Request) bool {
+	if req == nil {
+		return false
+	}
+	method := req.Method
+	reqSegs := splitPath(req.URL.Path)
+	for _, rt := range All {
+		if !rt.RequiresIdempotencyKey {
+			continue
+		}
+		if rt.Method != method {
+			continue
+		}
+		if pathMatchesPattern(rt.Path, reqSegs) {
+			return true
+		}
+	}
+	return false
+}
+
+func splitPath(p string) []string {
+	p = strings.Trim(p, "/")
+	if p == "" {
+		return nil
+	}
+	return strings.Split(p, "/")
+}
+
+func pathMatchesPattern(pattern string, reqSegs []string) bool {
+	patSegs := splitPath(pattern)
+	if len(patSegs) != len(reqSegs) {
+		return false
+	}
+	for i, p := range patSegs {
+		if strings.HasPrefix(p, "{") && strings.HasSuffix(p, "}") {
+			continue
+		}
+		if p != reqSegs[i] {
+			return false
+		}
+	}
+	return true
 }
