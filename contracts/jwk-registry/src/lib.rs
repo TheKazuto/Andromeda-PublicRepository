@@ -117,6 +117,7 @@ mod andromeda_jwk_registry {
     /// pubkey (lower privilege; a squatter could not pair it with a real
     /// `authority` signature anyway).
     #[instruction(discriminator = 0)]
+    #[allow(clippy::too_many_arguments)]
     pub fn init_registry(
         ctx: Ctx<InitRegistry>,
         registry_seed: Address,
@@ -124,6 +125,7 @@ mod andromeda_jwk_registry {
         emergency_revoker: Address,
         timelock_seconds: u64,
         grace_period_seconds: u64,
+        grace_period_post_revoke_seconds: u64,
     ) -> Result<(), ProgramError> {
         // `registry_seed` is consumed by the PDA derivation in the Accounts macro.
         let current_ts: i64 = ctx.accounts.clock.unix_timestamp.into();
@@ -132,6 +134,7 @@ mod andromeda_jwk_registry {
             emergency_revoker,
             timelock_seconds,
             grace_period_seconds,
+            grace_period_post_revoke_seconds,
         )?;
         let registry = *ctx.accounts.registry.address();
         ctx.accounts.program.emit_event(
@@ -141,6 +144,7 @@ mod andromeda_jwk_registry {
                 emergency_revoker,
                 timelock_seconds,
                 grace_period_seconds,
+                grace_period_post_revoke_seconds,
                 ts: current_ts,
             },
             &ctx.accounts.event_authority,
@@ -456,6 +460,9 @@ pub enum JwkRegistryError {
     InvalidKey,
     /// `activate_role_rotation` / `cancel_role_rotation`: nothing pending.
     NoPendingRotation,
+    /// H4 fix: `propose_jwk` tried to recycle a `REVOKED` slot before
+    /// `revoked_at + grace_period_post_revoke_seconds` had elapsed.
+    RevokeGraceNotElapsed,
 }
 
 // ── Events (zero-copy, padding-free) ───────────────────────────
@@ -467,6 +474,7 @@ pub struct RegistryInitialized {
     pub emergency_revoker: Address,
     pub timelock_seconds: u64,
     pub grace_period_seconds: u64,
+    pub grace_period_post_revoke_seconds: u64,
     pub ts: i64,
 }
 
@@ -556,6 +564,11 @@ pub struct JwkRegistry {
     /// the key (covers JWTs issued just before a rotation). `revoke_jwk`
     /// ignores this.
     pub grace_period_seconds: u64,
+    /// H4 fix: minimum delay between `revoke_jwk` and any `propose_jwk` that
+    /// would recycle the same slot. Defends against a compromised
+    /// `authority` quickly resurrecting a slot the `emergency_revoker` just
+    /// killed. Devnet runbook: 7 days; mainnet: 30 days.
+    pub grace_period_post_revoke_seconds: u64,
     /// When the pending `authority` becomes activatable (0 = none).
     pub authority_rotation_ready_at: i64,
     /// When the pending `emergency_revoker` becomes activatable (0 = none).
@@ -625,20 +638,63 @@ fn find_slot(
     None
 }
 
-/// Picks where a new entry goes: first `EMPTY` slot, else first
-/// `REVOKED`/`EXPIRED` slot (recycled). Returns `(idx, was_empty)`.
-fn find_writable_slot(entries: &[u8; ENTRIES_BYTES]) -> Option<(usize, bool)> {
-    let mut recyclable: Option<usize> = None;
+/// Result of picking a slot for a new JWK entry.
+enum WritableSlot {
+    /// Fresh, never-used slot. Caller bumps `entry_count`.
+    Empty(usize),
+    /// Recycling an `EXPIRED` slot. Caller leaves `entry_count` unchanged.
+    Expired(usize),
+    /// Recycling a `REVOKED` slot whose post-revoke grace already elapsed.
+    /// Caller leaves `entry_count` unchanged.
+    Revoked(usize),
+    /// No usable slot found. Either every slot is PENDING/ACTIVE
+    /// (`RegistryFull`) or every recyclable slot is REVOKED-but-too-recent
+    /// (`RevokeGraceNotElapsed`).
+    None { revoked_blocked: bool },
+}
+
+/// Picks where a new entry goes:
+///   1. first `EMPTY` slot, else
+///   2. first `EXPIRED` slot, else
+///   3. first `REVOKED` slot whose `revoked_at + grace_post_revoke <= now`.
+///
+/// EXPIRED slots are preferred over REVOKED ones so an emergency revoke
+/// always blocks recycling for the full post-revoke grace, even if other
+/// recyclable slots exist.
+fn find_writable_slot(
+    entries: &[u8; ENTRIES_BYTES],
+    current_ts: i64,
+    grace_post_revoke: i64,
+) -> WritableSlot {
+    let mut expired: Option<usize> = None;
+    let mut revoked_ready: Option<usize> = None;
+    let mut revoked_seen = false;
     for i in 0..MAX_JWKS {
         let st = entry_status(entries, i);
-        if st == STATUS_EMPTY {
-            return Some((i, true));
-        }
-        if (st == STATUS_REVOKED || st == STATUS_EXPIRED) && recyclable.is_none() {
-            recyclable = Some(i);
+        match st {
+            STATUS_EMPTY => return WritableSlot::Empty(i),
+            STATUS_EXPIRED if expired.is_none() => expired = Some(i),
+            STATUS_REVOKED => {
+                revoked_seen = true;
+                if revoked_ready.is_none() {
+                    let revoked_at = read_i64(entry_field(entries, i, EO_REVOKED_AT, 8));
+                    if current_ts >= revoked_at.saturating_add(grace_post_revoke) {
+                        revoked_ready = Some(i);
+                    }
+                }
+            }
+            _ => {}
         }
     }
-    recyclable.map(|i| (i, false))
+    if let Some(i) = expired {
+        return WritableSlot::Expired(i);
+    }
+    if let Some(i) = revoked_ready {
+        return WritableSlot::Revoked(i);
+    }
+    WritableSlot::None {
+        revoked_blocked: revoked_seen,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -735,6 +791,7 @@ impl InitRegistry {
         emergency_revoker: Address,
         timelock_seconds: u64,
         grace_period_seconds: u64,
+        grace_period_post_revoke_seconds: u64,
     ) -> Result<(), ProgramError> {
         require!(
             *self.authority.address() == authority
@@ -746,7 +803,8 @@ impl InitRegistry {
         require!(
             timelock_seconds >= MIN_TIMELOCK_SECONDS
                 && timelock_seconds <= MAX_TIMELOCK_SECONDS
-                && grace_period_seconds <= MAX_GRACE_SECONDS,
+                && grace_period_seconds <= MAX_GRACE_SECONDS
+                && grace_period_post_revoke_seconds <= MAX_GRACE_SECONDS,
             JwkRegistryError::InvalidConfig
         );
         self.registry.set_inner(JwkRegistryInner {
@@ -759,6 +817,7 @@ impl InitRegistry {
             pending_emergency_revoker: ZERO_ADDRESS,
             timelock_seconds,
             grace_period_seconds,
+            grace_period_post_revoke_seconds,
             authority_rotation_ready_at: 0,
             emergency_revoker_rotation_ready_at: 0,
             entries_flat: [0u8; ENTRIES_BYTES],
@@ -821,8 +880,22 @@ impl AuthorityAction {
             .is_none(),
             JwkRegistryError::JwkAlreadyExists
         );
-        let (idx, was_empty) = find_writable_slot(&self.registry.entries_flat)
-            .ok_or(JwkRegistryError::RegistryFull)?;
+        let grace_post_revoke = u64_to_i64(self.registry.grace_period_post_revoke_seconds.into());
+        let (idx, was_empty) = match find_writable_slot(
+            &self.registry.entries_flat,
+            current_ts,
+            grace_post_revoke,
+        ) {
+            WritableSlot::Empty(i) => (i, true),
+            WritableSlot::Expired(i) | WritableSlot::Revoked(i) => (i, false),
+            WritableSlot::None { revoked_blocked } => {
+                return Err(if revoked_blocked {
+                    JwkRegistryError::RevokeGraceNotElapsed.into()
+                } else {
+                    JwkRegistryError::RegistryFull.into()
+                });
+            }
+        };
         write_entry(
             &mut self.registry.entries_flat,
             idx,
