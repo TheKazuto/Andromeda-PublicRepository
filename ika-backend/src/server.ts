@@ -9,9 +9,10 @@ import { runMigrations } from './store/migrate.js'
 import { configureAuth } from './http/auth.js'
 import { buildHealthRouter } from './http/healthz.js'
 import { idempotencyMiddleware } from './http/idempotency.js'
+import { buildMetricsRouter, metricsMiddleware } from './metrics.js'
 import { buildEngineRouter } from './engine/routes.js'
 import { closeIkaGrpcClient } from './engine/grpc-client.js'
-import { initGasSponsor } from './engine/gas-sponsor.js'
+import { initGasSponsor, initGasSponsorPool } from './engine/gas-sponsor.js'
 import { buildOidcMountRouter } from './oidc/index.js'
 import { startCleanupJob, stopCleanupJob } from './store/cleanup.js'
 import { fail } from './types.js'
@@ -87,6 +88,8 @@ async function main(): Promise<void> {
     credentials: true,
   })
 
+  app.use(metricsMiddleware())
+  app.use(buildMetricsRouter())
   app.use(buildHealthRouter(config))
 
   // Defensive idempotency mirror — primary enforcement is at the gateway.
@@ -94,15 +97,29 @@ async function main(): Promise<void> {
 
   // Gas sponsor is required by `/v1/dwallet/transfer-ownership` (and any
   // future on-chain submit the engine layer triggers). Initialised once at
-  // boot so subsequent calls get the cached signer.
-  if (config.gasSponsor.keypair) {
+  // boot so subsequent calls get the cached signer(s).
+  //
+  // ANDROMEDA_GAS_SPONSOR_KEYPAIRS (pool, N keypairs) wins when set;
+  // otherwise ANDROMEDA_GAS_SPONSOR_KEYPAIR (single) is used. With a
+  // pool, signAndSendInstructions picks the least-loaded fee payer per
+  // call — see engine/gas-sponsor.ts pickSigner.
+  if (config.gasSponsor.keypairs && config.gasSponsor.keypairs.length > 0) {
+    const signers = await initGasSponsorPool(config.gasSponsor.keypairs, {
+      minBalanceSol: config.gasSponsor.minBalanceSol,
+      maxGasPerOpLamports: config.gasSponsor.maxGasPerOpLamports,
+    })
+    logger.info(
+      { poolSize: signers.length, addresses: signers.map((s) => String(s.address)) },
+      'gas sponsor pool initialised',
+    )
+  } else if (config.gasSponsor.keypair) {
     await initGasSponsor(config.gasSponsor.keypair, {
       minBalanceSol: config.gasSponsor.minBalanceSol,
       maxGasPerOpLamports: config.gasSponsor.maxGasPerOpLamports,
     })
-    logger.info('gas sponsor initialised')
+    logger.info('gas sponsor initialised (single keypair)')
   } else {
-    logger.warn('gas sponsor not set — POST /v1/dwallet/transfer-ownership will throw at first call (set ANDROMEDA_GAS_SPONSOR_KEYPAIR)')
+    logger.warn('gas sponsor not set — POST /v1/dwallet/transfer-ownership will throw at first call (set ANDROMEDA_GAS_SPONSOR_KEYPAIR or ANDROMEDA_GAS_SPONSOR_KEYPAIRS)')
   }
 
   app.use('/v1/dwallet', buildEngineRouter(config))

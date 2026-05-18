@@ -52,6 +52,28 @@ async function runOnce(): Promise<void> {
           logger.warn({ err, table: t.table }, 'cleanup: query failed (swallowed)')
         }
       }
+      // P0.1: orphaned idempotency reservations. A replica that crashed
+      // mid-mutation leaves a row at status='in_progress' whose
+      // reservation_until has elapsed. The takeover path in the middleware
+      // already handles new requests racing for the same key, but the row
+      // can otherwise sit around until the 24h `expires_at`. Clear it
+      // sooner so the table stays small and the next legitimate retry
+      // sees a fresh INSERT instead of a takeover.
+      try {
+        const stale = await client.query(
+          `DELETE FROM ika_idempotency_keys
+             WHERE status = 'in_progress'
+               AND reservation_until IS NOT NULL
+               AND reservation_until < NOW() - INTERVAL '5 minutes'`,
+        )
+        const stuck = stale.rowCount ?? 0
+        if (stuck > 0) {
+          logger.warn({ stuck }, 'cleanup: removed abandoned idempotency reservations')
+          totalDeleted += stuck
+        }
+      } catch (err) {
+        logger.warn({ err }, 'cleanup: stale-reservation sweep failed (swallowed)')
+      }
     } finally {
       await client.query('SELECT pg_advisory_unlock($1)', [CLEANUP_ADVISORY_LOCK]).catch(() => {})
     }

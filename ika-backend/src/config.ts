@@ -54,7 +54,13 @@ const oidcSchema = z.object({
 })
 
 const gasSponsorSchema = z.object({
+  // Single keypair (back-compat path). Either this or `keypairs` is set;
+  // both may be empty, in which case gas sponsor is disabled.
   keypair: z.string().optional(),
+  // Pool of N keypairs (production scaling). When set, the engine picks
+  // the least-loaded fee payer for each tx. Values are JSON-encoded byte
+  // arrays separated by `;` to avoid escaping issues inside Railway env.
+  keypairs: z.array(z.string()).optional(),
   minBalanceSol: z.number().nonnegative().default(0.5),
   maxGasPerOpLamports: z.number().int().positive().default(20_000_000),
 })
@@ -214,10 +220,41 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     }
   }
 
-  // Prefer the canonical ANDROMEDA_GAS_SPONSOR_KEYPAIR; fall back to the
-  // legacy IKA_GAS_SPONSOR_KEYPAIR for one release for back-compat.
+  // Resolution order: ANDROMEDA_GAS_SPONSOR_KEYPAIRS (pool, JSON array
+  // of byte-array strings joined by ';'), ANDROMEDA_GAS_SPONSOR_KEYPAIR
+  // (single — canonical for one-key deployments), then the legacy
+  // IKA_GAS_SPONSOR_KEYPAIR for one release of back-compat.
+  let keypairs: string[] | undefined
+  const poolRaw = env.ANDROMEDA_GAS_SPONSOR_KEYPAIRS?.trim()
+  if (poolRaw && poolRaw.length > 0) {
+    // Two accepted formats:
+    //  1) JSON: `[[1,2,...],[3,4,...]]` — one outer array of N keypairs.
+    //  2) Semicolon-separated: `[1,2,...];[3,4,...]` — each segment is a
+    //     standalone JSON byte array. Easier to paste into Railway envs.
+    if (poolRaw.startsWith('[[')) {
+      try {
+        const parsed = JSON.parse(poolRaw) as unknown
+        if (Array.isArray(parsed) && parsed.every(Array.isArray)) {
+          keypairs = parsed.map((kp) => JSON.stringify(kp))
+        }
+      } catch {
+        // Fall through to error below.
+      }
+    } else {
+      keypairs = poolRaw
+        .split(';')
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0)
+    }
+    if (!keypairs || keypairs.length === 0) {
+      errors.push(
+        'gasSponsor.keypairs (ANDROMEDA_GAS_SPONSOR_KEYPAIRS): must be a JSON array of byte arrays OR semicolon-separated JSON byte arrays',
+      )
+    }
+  }
   const gasRaw = {
     keypair: env.ANDROMEDA_GAS_SPONSOR_KEYPAIR ?? env.IKA_GAS_SPONSOR_KEYPAIR,
+    keypairs,
     minBalanceSol: env.IKA_GAS_SPONSOR_MIN_BALANCE_SOL
       ? Number.parseFloat(env.IKA_GAS_SPONSOR_MIN_BALANCE_SOL)
       : 0.5,

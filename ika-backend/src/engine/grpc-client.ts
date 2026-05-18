@@ -3,6 +3,42 @@ import { loadSync } from '@grpc/proto-loader'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { logger } from '../logger.js'
+import {
+  grpcBreakerState,
+  grpcBreakerTripsTotal,
+  grpcCallDuration,
+  grpcCallTotal,
+  grpcRetries,
+} from '../metrics.js'
+import {
+  GrpcCircuitOpenError,
+  getBreakerState,
+  preCall,
+  recordFailure,
+  recordSuccess,
+} from './breaker.js'
+
+export { GrpcCircuitOpenError, isGrpcCircuitOpen } from './breaker.js'
+
+// Per-method deadlines. Reads use a tight 10s cap; submits keep the
+// existing 30s to accommodate MPC ceremonies. Operators can override
+// individual methods via env (IKA_GRPC_DEADLINE_<METHOD>_SEC).
+const DEFAULT_READ_DEADLINE_SECONDS = 10
+const DEFAULT_SUBMIT_DEADLINE_SECONDS = 30
+
+function methodDeadlineSeconds(method: string, fallback: number): number {
+  const envKey = `IKA_GRPC_DEADLINE_${method.toUpperCase()}_SEC`
+  const v = process.env[envKey]
+  if (v) {
+    const n = Number(v)
+    if (Number.isFinite(n) && n > 0) return n
+  }
+  return fallback
+}
+
+function stateToFloat(s: 'closed' | 'open' | 'half-open'): number {
+  return s === 'open' ? 1 : s === 'half-open' ? 2 : 0
+}
 
 /**
  * Thin wrapper around the Ika dWallet gRPC service.
@@ -139,8 +175,8 @@ export class IkaGrpcClient {
     return this.client
   }
 
-  private buildDeadline(): grpc.Metadata extends never ? never : Date {
-    const seconds = this.opts.deadlineSeconds ?? DEFAULT_DEADLINE_SECONDS
+  private buildDeadline(deadlineSeconds?: number): grpc.Metadata extends never ? never : Date {
+    const seconds = deadlineSeconds ?? this.opts.deadlineSeconds ?? DEFAULT_DEADLINE_SECONDS
     return new Date(Date.now() + seconds * 1000)
   }
 
@@ -167,22 +203,46 @@ export class IkaGrpcClient {
   }
 
   private async unaryWithRetry<TResp>(
+    method: string,
     call: (client: DWalletServiceClient, options: grpc.CallOptions, cb: UnaryCallback<TResp>) => void,
     retryableCodes: ReadonlySet<number> = READ_RETRYABLE_CODES,
+    deadlineSeconds?: number,
   ): Promise<TResp> {
     const max = this.opts.maxRetries ?? DEFAULT_MAX_RETRIES
     let lastErr: unknown = null
+    const startedAt = process.hrtime.bigint()
+
+    // Fail fast when the breaker is open. The throw skips retries because
+    // a 30s cooldown is much longer than backoff would wait.
+    try {
+      preCall(method)
+    } catch (err) {
+      if (err instanceof GrpcCircuitOpenError) {
+        grpcBreakerState.labels(method).set(stateToFloat(getBreakerState(method)))
+        grpcCallTotal.labels(method, 'circuit_open').inc()
+      }
+      throw err
+    }
+    const stateBefore = getBreakerState(method)
+
     for (let attempt = 0; attempt <= max; attempt += 1) {
+      if (attempt > 0) grpcRetries.labels(method).inc()
       try {
-        return await new Promise<TResp>((resolve, reject) => {
+        const resp = await new Promise<TResp>((resolve, reject) => {
           const client = this.ensureClient()
           // Each call carries its own deadline so a slow call cannot hang the request.
-          const deadline = this.buildDeadline()
-          call(client, { deadline }, (err, resp) => {
+          const deadline = this.buildDeadline(deadlineSeconds)
+          call(client, { deadline }, (err, response) => {
             if (err) reject(err)
-            else resolve(resp)
+            else resolve(response)
           })
         })
+        const elapsed = Number(process.hrtime.bigint() - startedAt) / 1e9
+        grpcCallDuration.labels(method, 'ok').observe(elapsed)
+        grpcCallTotal.labels(method, 'ok').inc()
+        recordSuccess(method)
+        grpcBreakerState.labels(method).set(stateToFloat(getBreakerState(method)))
+        return resp
       } catch (err) {
         lastErr = err
         if (attempt >= max || !this.isRetryable(err, retryableCodes)) break
@@ -192,26 +252,45 @@ export class IkaGrpcClient {
         await new Promise((r) => setTimeout(r, base + jitter))
       }
     }
+    const elapsed = Number(process.hrtime.bigint() - startedAt) / 1e9
+    const outcome = grpcOutcome(lastErr)
+    grpcCallDuration.labels(method, outcome).observe(elapsed)
+    grpcCallTotal.labels(method, outcome).inc()
+    recordFailure(method)
+    const stateAfter = getBreakerState(method)
+    grpcBreakerState.labels(method).set(stateToFloat(stateAfter))
+    if (stateBefore !== 'open' && stateAfter === 'open') {
+      grpcBreakerTripsTotal.labels(method).inc()
+      logger.warn({ method }, 'gRPC circuit breaker tripped open')
+    }
     throw lastErr instanceof Error ? lastErr : new Error('gRPC call failed')
   }
 
   async submitTransaction(req: UserSignedRequestWire): Promise<TransactionResponseWire> {
     return this.unaryWithRetry<TransactionResponseWire>(
+      'SubmitTransaction',
       (c, opts, cb) => c.SubmitTransaction(req, opts, cb),
       SUBMIT_RETRYABLE_CODES,
+      methodDeadlineSeconds('SubmitTransaction', DEFAULT_SUBMIT_DEADLINE_SECONDS),
     )
   }
 
   async getPresigns(userPubkey: Uint8Array): Promise<PresignInfoWire[]> {
-    const resp = await this.unaryWithRetry<PresignsResponseWire>((c, opts, cb) =>
-      c.GetPresigns({ user_pubkey: userPubkey }, opts, cb),
+    const resp = await this.unaryWithRetry<PresignsResponseWire>(
+      'GetPresigns',
+      (c, opts, cb) => c.GetPresigns({ user_pubkey: userPubkey }, opts, cb),
+      READ_RETRYABLE_CODES,
+      methodDeadlineSeconds('GetPresigns', DEFAULT_READ_DEADLINE_SECONDS),
     )
     return resp.presigns ?? []
   }
 
   async getPresignsForDWallet(userPubkey: Uint8Array, dwalletId: Uint8Array): Promise<PresignInfoWire[]> {
-    const resp = await this.unaryWithRetry<PresignsResponseWire>((c, opts, cb) =>
-      c.GetPresignsForDWallet({ user_pubkey: userPubkey, dwallet_id: dwalletId }, opts, cb),
+    const resp = await this.unaryWithRetry<PresignsResponseWire>(
+      'GetPresignsForDWallet',
+      (c, opts, cb) => c.GetPresignsForDWallet({ user_pubkey: userPubkey, dwallet_id: dwalletId }, opts, cb),
+      READ_RETRYABLE_CODES,
+      methodDeadlineSeconds('GetPresignsForDWallet', DEFAULT_READ_DEADLINE_SECONDS),
     )
     return resp.presigns ?? []
   }
@@ -263,5 +342,22 @@ export function closeIkaGrpcClient(): void {
   if (singleton) {
     singleton.close()
     singleton = null
+  }
+}
+
+// grpcOutcome maps a gRPC error to a coarse Prometheus label. Keeps
+// cardinality bounded to {ok, unavailable, deadline, exhausted, other}.
+function grpcOutcome(err: unknown): string {
+  if (!err) return 'ok'
+  const code = (err as { code?: number }).code
+  switch (code) {
+    case grpc.status.UNAVAILABLE:
+      return 'unavailable'
+    case grpc.status.DEADLINE_EXCEEDED:
+      return 'deadline'
+    case grpc.status.RESOURCE_EXHAUSTED:
+      return 'exhausted'
+    default:
+      return 'other'
   }
 }

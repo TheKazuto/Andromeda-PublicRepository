@@ -5,6 +5,25 @@ const { Pool } = pg
 
 let pool: pg.Pool | null = null
 
+/**
+ * Initialise the node-postgres pool.
+ *
+ * Pool sizing knobs (env, all optional — see config.ts for the defaults
+ * passed in by `initPool` callers):
+ *
+ *   PG_POOL_MAX                — pool ceiling
+ *   PG_POOL_IDLE_TIMEOUT_MS    — kill idle conns after N ms (default 30000)
+ *   PG_CONNECTION_TIMEOUT_MS   — Acquire() timeout (default 3000)
+ *   PG_STATEMENT_TIMEOUT_MS    — Postgres `statement_timeout` (default 30000)
+ *   PG_IDLE_IN_TX_TIMEOUT_MS   — `idle_in_transaction_session_timeout` (default 60000)
+ *
+ * PgBouncer note: in transaction-pool mode the pg driver must not use
+ * named prepared statements across statements. This pool already uses
+ * unnamed queries (`pool.query(text, params)`); the idempotency
+ * middleware was updated to drop `name:` from its queries for the same
+ * reason. If you wire new code that uses `client.query({ name, text })`,
+ * keep the `name` empty under PgBouncer.
+ */
 export function initPool(
   databaseUrl: string,
   max = 20,
@@ -18,13 +37,34 @@ export function initPool(
       : sslMode === 'disable'
         ? false
         : undefined
+  const idleTimeoutMs = Number(process.env.PG_POOL_IDLE_TIMEOUT_MS ?? '30000')
+  const stmtTimeoutMs = Number(process.env.PG_STATEMENT_TIMEOUT_MS ?? '30000')
+  const idleTxTimeoutMs = Number(process.env.PG_IDLE_IN_TX_TIMEOUT_MS ?? '60000')
+
   pool = new Pool({
     connectionString: databaseUrl,
     max,
-    idleTimeoutMillis: 30_000,
+    idleTimeoutMillis: Number.isFinite(idleTimeoutMs) ? idleTimeoutMs : 30_000,
     connectionTimeoutMillis,
     ...(ssl !== undefined ? { ssl } : {}),
   })
+
+  // Apply session timeouts on every new connection. node-postgres emits
+  // `connect` once per client lifetime (not per Acquire), so this is
+  // amortised across the pool.
+  pool.on('connect', (client) => {
+    const setters: Array<Promise<unknown>> = []
+    if (Number.isFinite(stmtTimeoutMs) && stmtTimeoutMs > 0) {
+      setters.push(client.query(`SET statement_timeout = ${Math.floor(stmtTimeoutMs)}`))
+    }
+    if (Number.isFinite(idleTxTimeoutMs) && idleTxTimeoutMs > 0) {
+      setters.push(client.query(`SET idle_in_transaction_session_timeout = ${Math.floor(idleTxTimeoutMs)}`))
+    }
+    Promise.all(setters).catch((err) => {
+      logger.warn({ err }, 'pg: failed to apply session timeouts')
+    })
+  })
+
   pool.on('error', (err) => {
     logger.error({ err }, 'pg pool error')
   })
