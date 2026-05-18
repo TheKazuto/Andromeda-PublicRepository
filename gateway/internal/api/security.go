@@ -11,19 +11,18 @@ import (
 // admin, MCP) never leak across users via Cloudflare or an
 // intermediate proxy.
 //
-// Public surfaces (no API key required, identical bytes for everyone):
-//   - /v1/capabilities
-//   - /v1/info
-//   - /openapi.json + /openapi.yaml
-//   - /v1/pricing/plans (anonymous catalogue snapshot)
-//   - /health (status only — no PII)
+// Public surfaces (no API key required, identical bytes for everyone).
+// Paths mirror gateway/internal/api/server.go exactly — handlers that
+// set their own Cache-Control (e.g. /openapi.json sets max-age=300) win
+// over this fallback, so the allowlist only kicks in when the handler
+// stayed silent.
 var publicCacheablePaths = map[string]bool{
-	"/v1/capabilities":   true,
-	"/v1/info":           true,
-	"/openapi.json":      true,
-	"/openapi.yaml":      true,
-	"/v1/pricing/plans":  true,
-	"/health":            true,
+	"/capabilities":     true,
+	"/openapi.json":     true,
+	"/openapi.yaml":     true,
+	"/v1/pricing":       true,
+	"/health":           true,
+	"/health/ready":     true,
 }
 
 // cacheControlMiddleware applies a safe default of `no-store` to every

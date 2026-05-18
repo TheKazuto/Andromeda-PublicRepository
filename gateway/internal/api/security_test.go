@@ -25,7 +25,7 @@ func TestCacheControl_NoStoreByDefault(t *testing.T) {
 }
 
 func TestCacheControl_PublicAllowlist(t *testing.T) {
-	for _, path := range []string{"/v1/capabilities", "/v1/info", "/openapi.json", "/health", "/v1/pricing/plans"} {
+	for _, path := range []string{"/capabilities", "/openapi.json", "/health", "/health/ready", "/v1/pricing"} {
 		t.Run(path, func(t *testing.T) {
 			h := cacheControlMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				w.WriteHeader(200)
@@ -56,7 +56,7 @@ func TestCacheControl_HandlesTrailingSlash(t *testing.T) {
 		w.WriteHeader(200)
 	}))
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/capabilities/", nil))
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/capabilities/", nil))
 	if got := rec.Header().Get("Cache-Control"); got != "public, max-age=60" {
 		t.Errorf("trailing slash should still hit allowlist, got %q", got)
 	}
@@ -126,13 +126,17 @@ func TestSecurityHeaders_HSTSOnlyInProdHTTPS(t *testing.T) {
 
 func TestIsPublicCacheable(t *testing.T) {
 	cases := map[string]bool{
-		"/v1/capabilities":   true,
-		"/v1/capabilities/":  true,
-		"/v1/me":             false,
-		"/admin/users":       false,
-		"/v1/auth/login":     false,
-		"/openapi.json":      true,
-		"/v1/pricing/plans":  true,
+		"/capabilities":  true,
+		"/capabilities/": true,
+		"/v1/pricing":    true,
+		"/v1/pricing/":   true,
+		"/health":        true,
+		"/health/ready":  true,
+		"/openapi.json":  true,
+		"/v1/me":         false,
+		"/admin/users":   false,
+		"/v1/auth/login": false,
+		"/v1/dwallet/sign/submit": false,
 	}
 	for path, want := range cases {
 		if got := isPublicCacheable(path); got != want {
