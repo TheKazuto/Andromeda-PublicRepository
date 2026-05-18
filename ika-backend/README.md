@@ -105,9 +105,10 @@ Alpha 1; the response carries the disclaimer.
 
 **Privacy.** Never log JWTs, raw `sub`, email, or name. Audit log entries store only addresses + hashes.
 
-### Health
+### Health & metrics
 - `GET /health` — liveness (no auth)
 - `GET /health/deep` — Postgres + Ika gRPC + Solana RPC checks; requires `X-Api-Key: <IKA_ADMIN_API_KEY>`
+- `GET /metrics` — Prometheus (Railway private network). HTTP latency, pg pool stats, gRPC per-method latency + breaker state, Solana RPC latency + breaker, blockhash cache hits/misses, gas sponsor queue depth/wait/balance/duplicate-signature, idempotency hits/misses/conflicts.
 
 ## Environment variables
 
@@ -136,14 +137,35 @@ missing required value is aggregated and printed, and the process exits.
 | `PGSSLMODE` | _(unset)_ | Postgres SSL mode (e.g. `prefer`, `require`). |
 | `IKA_PG_POOL_MAX` | `20` | Max Postgres pool size. |
 | `IKA_PG_CONNECTION_TIMEOUT_MS` | `3000` | Postgres connection timeout (ms). |
+| `PG_POOL_IDLE_TIMEOUT_MS` | `30000` | Drop idle pg clients after N ms. |
+| `PG_STATEMENT_TIMEOUT_MS` | `30000` | Postgres `statement_timeout` applied on every new connection. |
+| `PG_IDLE_IN_TX_TIMEOUT_MS` | `60000` | Postgres `idle_in_transaction_session_timeout`. |
 | `SENTRY_DSN` | _(unset)_ | Optional error reporting. |
 
 ### Gas sponsor
 | Var | Default | Notes |
 |-----|---------|-------|
-| `ANDROMEDA_GAS_SPONSOR_KEYPAIR` | _(none)_ | JSON byte array (64 B), `solana-keygen` format. Pays SOL for every admin / transfer-ownership / PolicyEngine v3 tx so users never need a Solana wallet. Legacy alias: `IKA_GAS_SPONSOR_KEYPAIR`. Never commit it; keep it funded. |
+| `ANDROMEDA_GAS_SPONSOR_KEYPAIR` | _(none)_ | JSON byte array (64 B), `solana-keygen` format. Single fee payer. Pays SOL for every admin / transfer-ownership / PolicyEngine v3 tx so users never need a Solana wallet. Legacy alias: `IKA_GAS_SPONSOR_KEYPAIR`. Never commit it; keep it funded. |
+| `ANDROMEDA_GAS_SPONSOR_KEYPAIRS` | _(none)_ | Pool of N fee payers. Two accepted formats: nested JSON `[[1,2,...],[3,4,...]]` OR semicolon-separated `[1,2,...];[3,4,...]`. When set, `signAndSendInstructions` picks the least-loaded fee payer (smallest queue depth) for each tx. Wins over `_KEYPAIR` when both are set. |
 | `IKA_GAS_SPONSOR_MIN_BALANCE_SOL` | `0.5` | Warn threshold for the sponsor balance. |
 | `IKA_GAS_SPONSOR_MAX_GAS_PER_OP_LAMPORTS` | `20000000` | Per-op gas ceiling. |
+| `ANDROMEDA_GAS_SPONSOR_QUEUE_MAX` | `50` | Max concurrent + queued requests per fee payer. Excess returns 503 with `Retry-After`. Per-fee-payer serialisation prevents duplicate-signature submits when instructions collide.
+
+Concurrent sends for the same fee payer are serialised via a per-address promise chain
+(`withFeePayerLock`). Cross-fee-payer concurrency is fully parallel — each fee payer keeps its own
+mutex. Metrics `ika_gas_sponsor_{queue_depth,queue_wait_seconds,rejected_total}` are labelled by
+fee payer address.
+
+### Per-replica + multi-replica safety
+
+| Concern | Defence |
+|---|---|
+| Multiple replicas applying migrations in parallel | `pg_advisory_xact_lock` inside a dedicated transaction on `pool.connect()`. INSERT `ON CONFLICT DO NOTHING`. Latest file: `016_idempotency_atomic.sql`. |
+| Same `Idempotency-Key` racing across replicas | `INSERT … ON CONFLICT DO UPDATE … WHERE` modifying CTE — one round-trip claim with `status=in_progress` + `reservation_id`. The replica that didn't win sees 409 `idempotency_in_progress` until the owner finalises (or the lease expires). Required on `/dwallet/{submit,create,transfer-ownership,presign,sign}`. |
+| Same fee payer being used in parallel for two unrelated txs | `withFeePayerLock(address)` promise-chain mutex per fee payer. |
+| Solana RPC outage | Per-op circuit breaker (`getLatestBlockhash`, `sendTransaction`). `blockhash_expired` does NOT trip the breaker (normal under load); 429/503/timeout do. |
+| Ika gRPC validator outage | Per-method circuit breaker. `SubmitTransaction` only retries on `UNAVAILABLE`; reads retry on `UNAVAILABLE`/`DEADLINE_EXCEEDED`/`RESOURCE_EXHAUSTED`. Deadlines: 10s for reads, 30s for submits (override per-method via `IKA_GRPC_DEADLINE_<METHOD>_SEC`). |
+| Stale blockhash mid-submit | `invalidateBlockhashCache()` called automatically on `BlockhashNotFound` / `TransactionExpiredBlockheightExceeded`. Never re-signs an already-signed tx with a fresh blockhash. |
 
 ### PolicyEngine v3 (opt-in — `IKA_POLICY_ENGINE_ENABLED=true`)
 
