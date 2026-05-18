@@ -7,3 +7,11 @@ healthcheckPath = "/health"
 healthcheckTimeout = 30
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 3
+# P1.1: scaled to 2 replicas. Safe because P0.1 (atomic idempotency),
+# P0.2 (advisory-locked migrations), P0.4 (leader-elected Solana listener
+# + future-sign watcher), P1.4 (audit signer outbox via FOR UPDATE SKIP
+# LOCKED) and P1.5 (webhook dispatcher with lease) cover the duplication
+# risks for multi-replica gateways. Ramp to 3 after the first baseline
+# load test validates p99 + DB pool headroom — see
+# docs/ops/scale-rollout.md.
+numReplicas = 2

@@ -23,6 +23,7 @@ import (
 	"github.com/shinkalabs/andromeda-gateway/internal/config"
 	"github.com/shinkalabs/andromeda-gateway/internal/futuresign"
 	"github.com/shinkalabs/andromeda-gateway/internal/gasponsor"
+	"github.com/shinkalabs/andromeda-gateway/internal/leader"
 	gwmetrics "github.com/shinkalabs/andromeda-gateway/internal/metrics"
 	"github.com/shinkalabs/andromeda-gateway/internal/netsafety"
 	"github.com/shinkalabs/andromeda-gateway/internal/observability"
@@ -116,6 +117,8 @@ func main() {
 		logger.Error("rate limiter init failed", "err", err)
 		os.Exit(1)
 	}
+	// Observer is attached after metrics are constructed below — see the
+	// `limiter.WithObserver(metrics)` call after `gwmetrics.New()`.
 
 	// --- Pricing cache ---
 	pricer := pricing.New(db, cfg.DefaultRequestCost, cfg.PricingRefreshSeconds, logger)
@@ -135,6 +138,10 @@ func main() {
 	metrics, metricsHandler := gwmetrics.New()
 	logger.Info("metrics registry ready")
 
+	// Attach observers now that metrics exist — the rate limiter exports
+	// Redis eval latency + error/fail-open counters via this hook.
+	limiter = limiter.WithObserver(metrics)
+
 	// --- Upstreams (with circuit-breaker trip observer feeding metrics) ---
 	tripObserver := func(name string) {
 		metrics.CircuitBreakerTripsTotal.WithLabelValues(name).Inc()
@@ -152,9 +159,48 @@ func main() {
 		logger.Error("audit recorder init failed", "err", err)
 		os.Exit(1)
 	}
+	auditRec.WithObserver(metrics)
 	logger.Info("audit recorder ready",
 		"signer", cfg.AuditSignerKind,
 		"audit_pubkey_b64", auditRec.PublicKeyBase64())
+
+	// P1.4: signer outbox worker. Append() no longer signs inline —
+	// rows land with signature NULL and the worker below drains the
+	// queue. Runs on every replica because FOR UPDATE SKIP LOCKED
+	// partitions safely; chain integrity is preserved by entry_hash.
+	auditSigner := auditRec.SignerForWorker()
+	auditWorker := audit.NewSignerWorker(db.Pool(), auditSigner, logger, audit.SignerWorkerOptions{
+		Observer: metrics,
+	})
+	spawn("audit-signer-worker", auditWorker.Run)
+
+	// P2.3 follow-up: daily audit_log snapshot to R2/S3. Off unless
+	// AUDIT_SNAPSHOT_ENABLED + endpoint/bucket/creds are set. Wrapped in
+	// a leader runner so a multi-replica gateway doesn't upload N times.
+	if cfg.AuditSnapshotEnabled {
+		if cfg.AuditSnapshotEndpoint == "" || cfg.AuditSnapshotBucket == "" ||
+			cfg.AuditSnapshotAccessKey == "" || cfg.AuditSnapshotSecretKey == "" {
+			logger.Warn("audit snapshot enabled but S3 credentials/endpoint missing — worker disabled")
+		} else {
+			s3 := audit.NewS3Client(
+				cfg.AuditSnapshotEndpoint, cfg.AuditSnapshotBucket, cfg.AuditSnapshotRegion,
+				cfg.AuditSnapshotAccessKey, cfg.AuditSnapshotSecretKey,
+			)
+			snap := audit.NewSnapshotter(db.Pool(), s3, logger, audit.SnapshotterOptions{
+				Prefix:   cfg.AuditSnapshotPrefix,
+				Observer: metrics,
+			})
+			spawn("audit-snapshot-leader", (&leader.Runner{
+				Pool:   db.Pool(),
+				Name:   "audit-snapshot",
+				LockID: leader.AuditSnapshotLockID,
+				Func:   snap.Run,
+				Logger: logger,
+			}).Start)
+			logger.Info("audit snapshot worker enabled",
+				"endpoint", cfg.AuditSnapshotEndpoint, "bucket", cfg.AuditSnapshotBucket)
+		}
+	}
 
 	// --- Webhook system ---
 	whStore := webhooks.NewStore(db.Pool())
@@ -175,6 +221,11 @@ func main() {
 	// --- Solana log listener (Phase 2 — IDL-aware parser) ---
 	// Tenant resolver = policy_subscriptions lookup. Each on-chain event the
 	// listener decodes is now routed to the api_key that owns the policy PDA.
+	//
+	// P0.4: the listener fans Solana events into webhook publish — running
+	// it on every replica would duplicate every external webhook. Run only
+	// on the elected leader so a multi-replica gateway still fires each
+	// event exactly once.
 	listenerProgramIDs := collectListenerProgramIDs(cfg)
 	if cfg.SolanaRPCURL != "" && len(listenerProgramIDs) > 0 {
 		resolver := webhooks.PolicyTenantResolver(func(ctx context.Context, addr string) (uuid.UUID, bool) {
@@ -186,12 +237,23 @@ func main() {
 			WithDropObserver(func(reason string) {
 				metrics.ListenerEventsDropped.WithLabelValues(reason).Inc()
 			})
-		spawn("solana-listener", listener.Start)
+		spawn("solana-listener-leader", (&leader.Runner{
+			Pool:   db.Pool(),
+			Name:   "solana-listener",
+			LockID: leader.SolanaListenerLockID,
+			Func:   listener.Start,
+			Logger: logger,
+		}).Start)
 	} else {
 		logger.Info("solana listener disabled — set SOLANA_RPC_URL and at least one program ID")
 	}
 
 	// --- Future-Sign trigger watcher (Sprint 4 — off-chain) ---
+	//
+	// P0.4: the watcher spawns three internal loops that each complete a
+	// future-sign on schedule. Two replicas would each try to complete the
+	// same trigger — duplicate sign + duplicate gas. Wrap in leader so
+	// exactly one replica drives the watcher loops.
 	fsStore := futuresign.NewStore(db.Pool())
 	fsWatcherRunning := false
 	if cfg.IkaUpstreamURL != "" && cfg.InternalAPIKey != "" {
@@ -202,9 +264,22 @@ func main() {
 			Logger:    logger,
 			URLGuard:  urlGuard,
 		})
-		fsWatcher.Start(rootCtx)
+		// fsWatcher.Start spawns goroutines and returns immediately. The
+		// leader Func must block until ctx is cancelled, so we Start and
+		// then wait on ctx — when leadership ends the inner goroutines
+		// observe ctx.Done() and exit.
+		spawn("future-sign-leader", (&leader.Runner{
+			Pool:   db.Pool(),
+			Name:   "future-sign",
+			LockID: leader.FutureSignWatcherLockID,
+			Func: func(ctx context.Context) {
+				fsWatcher.Start(ctx)
+				<-ctx.Done()
+			},
+			Logger: logger,
+		}).Start)
 		fsWatcherRunning = true
-		logger.Info("future-sign watcher running",
+		logger.Info("future-sign watcher running (leader-elected)",
 			"slot_time_tick", "5s", "external_webhook_tick", "30s")
 	} else {
 		logger.Info("future-sign watcher disabled — IKA_UPSTREAM_URL and INTERNAL_API_KEY not set")
@@ -271,19 +346,19 @@ func main() {
 	})
 
 	// Background scraper that pushes runtime gauges (usage buffer +
-	// breaker state + webhook DLQ depth) into Prometheus collectors
-	// every 15s. Counters update inline from request handlers; gauges
-	// only need a periodic refresh.
+	// breaker state + webhook DLQ depth + pgxpool + webhook backlog)
+	// into Prometheus collectors every 15s. Counters update inline from
+	// request handlers; gauges only need a periodic refresh.
 	spawn("metrics-scraper", func(ctx context.Context) {
 		t := time.NewTicker(15 * time.Second)
 		defer t.Stop()
-		updateGauges(ctx, metrics, recorder, ups, whStore)
+		updateGauges(ctx, metrics, recorder, ups, whStore, db)
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				updateGauges(ctx, metrics, recorder, ups, whStore)
+				updateGauges(ctx, metrics, recorder, ups, whStore, db)
 			}
 		}
 	})
@@ -411,8 +486,9 @@ func collectListenerProgramIDs(cfg *config.Config) []string {
 
 // updateGauges refreshes Prometheus gauges that need periodic sampling.
 // Inline counters (HTTP, quota, rate-limit) tick on every request, but
-// gauges (buffer depth, breaker state, DLQ depth) need a polling source.
-func updateGauges(ctx context.Context, m *gwmetrics.Metrics, recorder *usage.Recorder, ups *upstream.Registry, whStore *webhooks.Store) {
+// gauges (buffer depth, breaker state, DLQ depth, pool stats, webhook
+// backlog) need a polling source.
+func updateGauges(ctx context.Context, m *gwmetrics.Metrics, recorder *usage.Recorder, ups *upstream.Registry, whStore *webhooks.Store, db store.Store) {
 	if recorder != nil {
 		m.UsageBufferDepth.Set(float64(recorder.BufferDepth()))
 	}
@@ -422,10 +498,31 @@ func updateGauges(ctx context.Context, m *gwmetrics.Metrics, recorder *usage.Rec
 		m.CircuitBreakerState.WithLabelValues(name).Set(state)
 	}
 	if whStore != nil {
-		dlqCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		whCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()
-		if depth, err := whStore.CountDLQ(dlqCtx); err == nil {
+		if depth, err := whStore.CountDLQ(whCtx); err == nil {
 			m.WebhookDLQDepth.Set(float64(depth))
+		}
+		if snap, err := whStore.BacklogSnapshot(whCtx); err == nil {
+			m.WebhookPendingCount.Set(float64(snap.Pending))
+			m.WebhookInFlightCount.Set(float64(snap.InFlight))
+			m.WebhookOldestPendingSeconds.Set(snap.OldestPendingAgeSec)
+			m.WebhookOldestInFlightSeconds.Set(snap.OldestInFlightAgeSec)
+		}
+	}
+	// pgxpool stats — pool.Stat() is cheap (atomic counters); no DB round-trip.
+	if db != nil {
+		if pool := db.Pool(); pool != nil {
+			s := pool.Stat()
+			m.DBPoolAcquired.Set(float64(s.AcquiredConns()))
+			m.DBPoolIdle.Set(float64(s.IdleConns()))
+			m.DBPoolTotal.Set(float64(s.TotalConns()))
+			m.DBPoolMax.Set(float64(s.MaxConns()))
+			m.DBPoolNewConnsTotal.Set(float64(s.NewConnsCount()))
+			m.DBPoolAcquireCount.Set(float64(s.AcquireCount()))
+			m.DBPoolEmptyAcquireTotal.Set(float64(s.EmptyAcquireCount()))
+			m.DBPoolCanceledAcquireTotal.Set(float64(s.CanceledAcquireCount()))
+			m.DBPoolAcquireWaitSeconds.Set(s.AcquireDuration().Seconds())
 		}
 	}
 }

@@ -78,7 +78,15 @@ Every successful response carries `X-Andromeda-Tokens-{Cost,Used,Limit}` and `X-
 headers. The gateway forwards the authenticated tenant identity to the engines as `X-Andromeda-User-Id`
 (required by the high-level, tenant-scoped dWallet ops). Read-class routes need scope `read`;
 everything else needs `write`; the gateway-native admin features (webhooks, audit, PolicyEngine v3
-admin, future-sign) need scope `admin`. Request bodies are capped at 25 MiB.
+admin, future-sign) need scope `admin`. Request bodies are capped at 10 MiB by default (override via
+`GATEWAY_MAX_BODY_BYTES`); signing/mutating routes carry tighter per-route caps (1 MiB) at the
+handler level.
+
+Every response is served with `Cache-Control: no-store` and `Vary: Authorization, X-Api-Key` by
+default — only the public allowlist (`/v1/capabilities`, `/v1/info`, `/openapi.json`,
+`/v1/pricing/plans`, `/health`) is cacheable at the CDN. Defence-in-depth headers (HSTS in
+production, `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, `Permissions-Policy`,
+`Cross-Origin-Resource-Policy`) are on every response.
 
 | Group | Routes (under `/v1`) | Scope | Source |
 |-------|----------------------|-------|--------|
@@ -220,14 +228,21 @@ Consumption order (atomic): `credits → monthly → overage`. Refund on upstrea
 
 ## Background workers
 
-| Worker | Cadence | Purpose | Enabled when |
-|--------|--------:|---------|--------------|
-| `pricer` | `PRICING_REFRESH_SECONDS` (60s) | Cache `request_costs` | always |
-| `usage-recorder` | inline / buffered | Async usage events | always |
-| `webhook-dispatcher` | 5s | Deliver webhook events with HMAC + retries | always |
-| `solana-listener` | continuous | `logsSubscribe` → CanonicalEvent fanout to tenants | `SOLANA_RPC_URL` set + ≥1 program id |
-| `future-sign-watcher` | 5s (slot/time) · 30s (external) | Fire future-sign triggers (oracle/slot/event/external) → ika engine | `IKA_UPSTREAM_URL` + `INTERNAL_API_KEY` set |
-| `metrics-scraper` | 15s | Sample runtime gauges (usage buffer, etc.) | metrics enabled |
+| Worker | Cadence | Purpose | Enabled when | Multi-replica |
+|--------|--------:|---------|--------------|---------------|
+| `pricer` | `PRICING_REFRESH_SECONDS` (60s) | Cache `request_costs` | always | safe |
+| `usage-recorder` | inline / buffered | Async usage events | always | safe (per-replica buffer) |
+| `webhook-dispatcher` | 1s tick, 20 workers, batch 100, 60s lease | Deliver webhooks with HMAC + retries; recovers stuck `in_flight` rows every 30s; per-destination token bucket (50 rps / 100 burst) | always | safe (FOR UPDATE SKIP LOCKED + lease) |
+| `audit-signer-worker` | 500 ms | Drains `audit_log` rows with `signature IS NULL` and writes ed25519 signatures (Vault / env). Append no longer signs inline. | always | safe (FOR UPDATE SKIP LOCKED) |
+| `audit-snapshot-worker` | 24h | Daily NDJSON.gz dump of `audit_log` to R2/S3 for DR. | `AUDIT_SNAPSHOT_ENABLED=true` + S3 creds | leader-elected |
+| `solana-listener` | continuous | `logsSubscribe` → CanonicalEvent fanout to tenants | `SOLANA_RPC_URL` set + ≥1 program id | leader-elected |
+| `future-sign-watcher` | 5s (slot/time) · 30s (external) | Fire future-sign triggers (oracle/slot/event/external) → ika engine | `IKA_UPSTREAM_URL` + `INTERNAL_API_KEY` set | leader-elected |
+| `metrics-scraper` | 15s | Sample runtime gauges (pool, breaker, audit outbox, webhook backlog) | metrics enabled | safe (per-replica) |
+
+Leader election uses Postgres advisory locks (`pg_try_advisory_lock`) on a dedicated pool connection
+with a 30s heartbeat. When a leader dies, another replica picks up within ~30s. Workers marked
+"safe" run on every replica because their per-row claim (`SKIP LOCKED` + lease) is the authoritative
+dedup primitive.
 
 The pricing-history applier, admin bootstrap, mailer/quota/pricing notification workers, the Stripe
 service and the gift observer moved to the `backend/` service (architecture split M1–M4).
@@ -273,12 +288,12 @@ on the DTO and call `BindAndValidate` — avoid hand-rolled per-field `if req.X 
 | `ENCRYPT_UPSTREAM_URL` | Private-network URL of encrypt-backend. |
 | `REDIS_URL` | Backs rate limiting **and** idempotency — both are no-ops without it, so production refuses to boot if it is empty. |
 | `RATE_LIMIT_FAIL_OPEN` | Must be `false` in production: when Redis is unreachable the gateway returns `503` rather than serving unthrottled. Production refuses to boot if it is `true`. |
+| `ALLOWED_ORIGINS` | CSV of dashboard origins (e.g. `https://app.andromedainfra.pro`). Production refuses to boot if empty or `*` — without it a malicious site could exfil JSON via fetch. |
 | `TRUSTED_PROXY_CIDRS` | Behind the Railway edge proxy this **must** contain the proxy's range, otherwise API keys with an `ip_allowlist` are rejected with `ip_allowlist_unsupported`. A malformed CIDR is fatal in production. |
 
 ### Recommended
 | Var | Notes |
 |-----|-------|
-| `ALLOWED_ORIGINS` | CSV CORS allowlist for the dashboard. Empty = no cross-origin (server-to-server only). |
 | `ANDROMEDA_DASHBOARD_BASE_URL` | Public dashboard URL. Used to build shareable links (e.g. gift-card redeem). Empty → relative paths. |
 
 ### Server
@@ -294,6 +309,33 @@ on the DTO and call `BindAndValidate` — avoid hand-rolled per-field `if req.X 
 | `ANDROMEDA_AUDIT_SIGNER` | `env` (default, dev) or `vault` (HashiCorp Vault Transit, ed25519). In `production` with `env`, a loud warning is logged — migrate to `vault`. With `vault`: the gateway never holds the private key; each audit entry is signed via Vault Transit `sign/<key-name>/sha2-256` calls (`andromeda-audit` key, ed25519). Required envs: `ANDROMEDA_AUDIT_VAULT_{ADDR,TOKEN,KEY_NAME,PUBKEY_B64}` (all-or-nothing — see below). The tenant's audit public key is returned by `GET /v1/audit/log/verify` so external verifiers can replay the chain. |
 | `ANDROMEDA_AUDIT_PRIVATE_KEY` | Base64 ed25519 (32-byte seed or 64-byte key). Used only when signer = `env`. Falls back to an ephemeral key if empty in dev. |
 | `ANDROMEDA_AUDIT_VAULT_{ADDR,TOKEN,KEY_NAME,PUBKEY_B64}` | Required (all-or-nothing) when signer = `vault`. Every signature is locally re-verified against `PUBKEY_B64`. |
+
+**Hot path note (outbox model).** `Recorder.Append` no longer signs inline — it computes
+`prev_hash + entry_hash` and inserts the row with `signature = NULL`. The `audit-signer-worker`
+drains the queue out-of-band (`FOR UPDATE SKIP LOCKED`), signs each row, and updates the
+signature. The chain integrity is preserved because the chain is defined by `prev_hash +
+entry_hash`; the signature is an external proof attached afterwards. Hot path therefore never
+blocks on Vault, and a Vault outage shows up as a growing `gateway_audit_outbox_depth` /
+`outbox_oldest_age_seconds` instead of failing requests.
+
+Worker tunables (env, optional): `AUDIT_SIGNER_BATCH=100`, `AUDIT_SIGNER_TICK_MS=500`,
+`AUDIT_SIGNER_DEGRADED_AGE_SEC=30` (flip `gateway_audit_degraded=1` above this).
+
+### Audit snapshot to R2/S3 (opt-in, DR defence-in-depth)
+| Var | Default | Notes |
+|-----|---------|-------|
+| `AUDIT_SNAPSHOT_ENABLED` | `false` | Master flag for the snapshot worker. |
+| `AUDIT_SNAPSHOT_S3_ENDPOINT` | empty | S3-compatible endpoint, e.g. `https://<account>.r2.cloudflarestorage.com`. |
+| `AUDIT_SNAPSHOT_S3_BUCKET` | empty | Bucket name. |
+| `AUDIT_SNAPSHOT_S3_REGION` | `auto` | `auto` for R2; `us-east-1`/etc for AWS. |
+| `AUDIT_SNAPSHOT_S3_ACCESS_KEY_ID` / `_SECRET_ACCESS_KEY` | empty | API token credentials (SigV4). |
+| `AUDIT_SNAPSHOT_S3_PREFIX` | `audit/` | Object key prefix. |
+| `AUDIT_SNAPSHOT_INTERVAL_HOURS` | `24` | Tick cadence. |
+| `AUDIT_SNAPSHOT_MAX_ROWS` | `100000` | Cap per upload batch. |
+| `AUDIT_SNAPSHOT_MAX_BYTES_MB` | `512` | Cap per upload batch. |
+
+Worker is leader-elected and writes one NDJSON.gz per tick to `<prefix>/<date>-<first>-<last>.ndjson.gz`.
+Each upload is recorded in the `audit_snapshot_log` table — point-in-time lookups are cheap.
 
 ### Solana / PolicyEngine v3
 | Var | Notes |
@@ -333,7 +375,41 @@ Mounts `GET /v1/oauth/authorize`, `GET /v1/oauth/callback` and `POST /v1/oauth/t
 | `DEFAULT_REQUEST_COST` | `1` | Fallback token cost for route keys not in `request_costs` (must be ≥ 1). |
 | `PRICING_REFRESH_SECONDS` | `60` | Pricer cache refresh interval. |
 | `UPSTREAM_TIMEOUT_SECONDS` | `30` | Default upstream timeout (per-route overrides exist for heavy MPC ops — DKG, sign, quorum finalize: 90–120s). |
+| `GATEWAY_MAX_BODY_BYTES` | `10485760` | Global body cap (10 MiB). Per-route caps (1 MiB for signing/mutating) still apply at the handler. |
 | `TRUSTED_PROXY_CIDRS` | empty | CIDRs of reverse proxies whose `X-Forwarded-For` / `X-Real-IP` may be trusted for API-key IP allowlists. Empty = trust only the socket peer. **Required behind an edge proxy** (see *Required in production*); a malformed CIDR is fatal in production, a warning in dev. |
+
+#### Postgres pool
+| Var | Default | Notes |
+|-----|---------|-------|
+| `PG_MAX_CONNS` | `20` | Pool ceiling. Calculate cluster budget = replicas × pool. Default Railway Postgres allows 100-150 conns. |
+| `PG_MIN_CONNS` | `2` | Warm idle pool. |
+| `PG_MAX_CONN_LIFETIME_SEC` | `1800` | Rotate connections after this age. |
+| `PG_MAX_CONN_IDLE_SEC` | `300` | Drop idle conns after N seconds. |
+| `PG_HEALTH_CHECK_SEC` | `30` | pgxpool health-check period. |
+| `PG_STATEMENT_TIMEOUT_MS` | `30000` | Postgres `statement_timeout` applied on every new connection. |
+| `PG_IDLE_IN_TX_TIMEOUT_MS` | `60000` | Postgres `idle_in_transaction_session_timeout`. Frees stuck conns. |
+| `PG_STATEMENT_CACHE_MODE` | (pgx default) | Set to `describe` under PgBouncer transaction-pool mode (named prepared statements break otherwise). |
+| `MIGRATION_DATABASE_URL` | `DATABASE_URL` | Direct Postgres DSN used for migrations only — bypass PgBouncer so the transactional advisory lock survives across statements. |
+
+#### Upstream HTTP transport
+| Var | Default | Notes |
+|-----|---------|-------|
+| `UPSTREAM_MAX_IDLE_CONNS` | `2000` | Per-process idle conn pool ceiling. |
+| `UPSTREAM_MAX_IDLE_CONNS_PER_HOST` | `300` | Idle conns per engine host. |
+| `UPSTREAM_MAX_CONNS_PER_HOST` | `500` | Hard ceiling per engine host. |
+| `UPSTREAM_IDLE_CONN_TIMEOUT_SEC` | `90` | Drop idle conns after N seconds. |
+
+#### Webhook dispatcher
+| Var | Default | Notes |
+|-----|---------|-------|
+| `WEBHOOK_DISPATCHER_BATCH` | `100` | Rows claimed per tick. |
+| `WEBHOOK_DISPATCHER_TICK_MS` | `1000` | Claim cadence. |
+| `WEBHOOK_DISPATCHER_WORKERS` | `20` | Concurrent deliveries in flight. |
+| `WEBHOOK_DISPATCHER_LEASE_SEC` | `60` | Lease duration on each claim. |
+| `WEBHOOK_RECOVER_TICK_SEC` | `30` | Stuck-claim sweep cadence. |
+| `WEBHOOK_PER_ENDPOINT_RPS` | `50` | Per-destination token bucket refill rate. |
+| `WEBHOOK_PER_ENDPOINT_BURST` | `100` | Per-destination burst. |
+| `WEBHOOK_ENDPOINT_LIMITER_IDLE_SEC` | `600` | Drop limiter from map when endpoint goes quiet. |
 
 ## Run locally
 
