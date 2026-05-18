@@ -8,3 +8,8 @@ healthcheckPath = "/health"
 healthcheckTimeout = 30
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 5
+# P1.1: scaled to 2 replicas. Safe because P0.1 (Redis SET NX lock for
+# idempotency) requires REQUIRE_IDEMPOTENCY_LOCK=true + Upstash Redis
+# in production. Ramp to 3 after baseline validates — see
+# docs/ops/scale-rollout.md.
+numReplicas = 2

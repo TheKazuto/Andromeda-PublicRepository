@@ -48,6 +48,18 @@ const envSchema = z.object({
   UPSTASH_REDIS_REST_URL: z.url().optional().or(z.literal('')),
   UPSTASH_REDIS_REST_TOKEN: z.string().optional().or(z.literal('')),
 
+  // P0.1: when true, mutating routes that require an Idempotency-Key
+  // refuse to run unless Redis is reachable (so cross-replica retry
+  // de-dup is guaranteed). Default true in production, false in dev so
+  // local Upstash-less stacks still boot. Set explicitly to override.
+  REQUIRE_IDEMPOTENCY_LOCK: z
+    .union([z.boolean(), z.string()])
+    .optional()
+    .transform((v) => {
+      if (v === undefined) return undefined
+      return typeof v === 'string' ? v.toLowerCase() === 'true' : v
+    }),
+
   CACHE_TTL_NEK: z.coerce.number().int().positive().default(300),
   CACHE_TTL_CIPHERTEXT: z.coerce.number().int().positive().default(60),
 
@@ -84,3 +96,9 @@ export const config = loadConfig();
 export const isCacheEnabled = Boolean(
   config.UPSTASH_REDIS_REST_URL && config.UPSTASH_REDIS_REST_TOKEN
 );
+
+// Production defaults to require Redis-backed idempotency locks so two
+// replicas cannot duplicate a gas-sponsored submit. Override via env
+// REQUIRE_IDEMPOTENCY_LOCK=false only with explicit justification.
+export const requireIdempotencyLock =
+  config.REQUIRE_IDEMPOTENCY_LOCK ?? config.NODE_ENV === 'production'

@@ -50,6 +50,72 @@ import { prefetchBlockhash } from '../solana/instructions.js';
 
 let cachedSigner: KeyPairSigner | null = null;
 
+// P0.5 (encrypt-backend mirror of ika-backend gas-sponsor.ts):
+// per-fee-payer serialisation. Two concurrent gas-sponsored sends for
+// the same fee payer race on the balance check and risk duplicate-
+// signature submits if instructions collide. Promise-chain map keyed
+// by fee-payer address; queue cap protects from runaway clients.
+const GAS_SPONSOR_QUEUE_MAX = Number(process.env.ANDROMEDA_GAS_SPONSOR_QUEUE_MAX ?? '50');
+const queueChain = new Map<string, Promise<unknown>>();
+const queueDepth = new Map<string, number>();
+
+export class GasSponsorBackpressureError extends Error {
+  readonly retryAfterSeconds: number;
+  constructor(retryAfterSeconds: number) {
+    super('Gas sponsor queue is full');
+    this.retryAfterSeconds = retryAfterSeconds;
+    this.name = 'GasSponsorBackpressureError';
+  }
+}
+
+export function isGasSponsorBackpressure(err: unknown): err is GasSponsorBackpressureError {
+  return err instanceof GasSponsorBackpressureError;
+}
+
+async function withFeePayerLock<T>(addr: string, fn: () => Promise<T>): Promise<T> {
+  // Avoid importing metrics at the top of the file (circular risk with
+  // breaker → metrics). Lazy require keeps the module graph DAG clean.
+  const m = await import('./metrics.js');
+  const depth = (queueDepth.get(addr) ?? 0) + 1;
+  if (depth > GAS_SPONSOR_QUEUE_MAX) {
+    m.gasSponsorRejectedTotal.labels(addr).inc();
+    throw new GasSponsorBackpressureError(Math.min(30, Math.ceil(depth / 10)));
+  }
+  queueDepth.set(addr, depth);
+  m.gasSponsorQueueDepth.labels(addr).set(depth);
+
+  const enqueuedAt = process.hrtime.bigint();
+  const prev = (queueChain.get(addr) ?? Promise.resolve()) as Promise<unknown>;
+  const release = prev.then(
+    () => undefined,
+    () => undefined,
+  );
+  let resolveSlot!: () => void;
+  const slot = new Promise<void>((r) => {
+    resolveSlot = r;
+  });
+  queueChain.set(addr, slot);
+
+  try {
+    await release;
+    const waited = Number(process.hrtime.bigint() - enqueuedAt) / 1e9;
+    m.gasSponsorQueueWait.labels(addr).observe(waited);
+    return await fn();
+  } finally {
+    const after = (queueDepth.get(addr) ?? 1) - 1;
+    if (after <= 0) {
+      queueDepth.delete(addr);
+    } else {
+      queueDepth.set(addr, after);
+    }
+    m.gasSponsorQueueDepth.labels(addr).set(Math.max(after, 0));
+    resolveSlot();
+    if (queueChain.get(addr) === slot) {
+      queueChain.delete(addr);
+    }
+  }
+}
+
 /**
  * Loads a Solana keypair from a `solana-keygen` JSON byte array (64 bytes:
  * 32 secret + 32 public). Call once at boot.
@@ -100,6 +166,19 @@ export type SignAndSendOptions = {
 export async function signAndSendInstructions(
   instructions: Instruction[],
   opts: SignAndSendOptions = {},
+): Promise<{
+  txSignature: string;
+  recentBlockhash: string;
+  lastValidBlockHeight: bigint;
+}> {
+  const signer = getGasSponsor();
+  const feePayer = String(signer.address);
+  return withFeePayerLock(feePayer, () => runSignAndSendLocked(instructions, opts));
+}
+
+async function runSignAndSendLocked(
+  instructions: Instruction[],
+  opts: SignAndSendOptions,
 ): Promise<{
   txSignature: string;
   recentBlockhash: string;

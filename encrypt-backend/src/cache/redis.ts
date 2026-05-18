@@ -39,6 +39,34 @@ export async function cacheSet(key: string, value: unknown, ttlSeconds: number):
   }
 }
 
+/**
+ * SET key value NX EX ttl — returns true if the key was newly acquired,
+ * false if another process already held it. Used by the idempotency
+ * middleware to claim the key atomically across replicas before running
+ * the mutation. Returns null when Redis is disabled or unreachable so
+ * the caller can decide whether to fail-closed (production) or fail-open
+ * (dev).
+ */
+export async function cacheSetNX(
+  key: string,
+  value: unknown,
+  ttlSeconds: number,
+): Promise<boolean | null> {
+  if (!client) return null;
+  try {
+    const res = await withTimeout(
+      client.set(key, value, { ex: ttlSeconds, nx: true }),
+      config.REDIS_TIMEOUT_MS,
+      'cache setNX timed out',
+    );
+    // Upstash returns 'OK' on success, null when NX precluded the write.
+    return res === 'OK';
+  } catch (err) {
+    logger.warn({ err, key }, 'cache setNX failed');
+    return null;
+  }
+}
+
 export async function cacheDel(key: string): Promise<void> {
   if (!client) return;
   try {

@@ -67,10 +67,11 @@ Every route under `/v1/*` requires `X-Internal-Key`. `/health` and `/health/info
 An `Idempotency-Key` header is honoured on `/v1/*` (defensive mirror; primary enforcement is at the
 gateway). Errors use `{ error: { code, message } }`.
 
-### Health
+### Health & metrics
 - `GET /health` — liveness
 - `GET /health/info` — public info
 - `GET /health/deep/{grpc,solana,cache}` — deep checks (authenticated)
+- `GET /metrics` — Prometheus (Railway private network). HTTP latency, Solana RPC latency + breaker, blockhash cache hits/misses/invalidations, idempotency hits/misses/conflicts, gas sponsor queue depth (infra ready).
 
 ### Ciphertext (gRPC primitives)
 - `POST /v1/ciphertext/create` — `EncryptService.CreateInput`
@@ -149,13 +150,14 @@ gateway). Errors use `{ error: { code, message } }`.
 | `ENCRYPT_NEK_PUBLIC_KEY_BASE64` | empty | Optional NEK loaded at boot (32 B base64). |
 | `ENCRYPT_NEK_IMMUTABLE` | `false` | When `true`, locks the first NEK set (env or first `/v1/nek/override`); later overrides return `409`. **Recommended in production** — flipping an active NEK orphans existing ciphertexts. |
 
-### Cache (optional)
+### Cache (optional in dev, required in prod for cross-replica idempotency)
 | Var | Default | Notes |
 |-----|---------|-------|
-| `UPSTASH_REDIS_REST_URL` + `UPSTASH_REDIS_REST_TOKEN` | empty | Without both, persistent cache is disabled (in-process caches still work). |
+| `UPSTASH_REDIS_REST_URL` + `UPSTASH_REDIS_REST_TOKEN` | empty | Backs cross-replica idempotency (atomic `SET NX EX` lock + completion cache) and persistent NEK/ciphertext caches. **Production should set both** — multi-replica deploys cannot prevent duplicate Solana submits without it. |
+| `REQUIRE_IDEMPOTENCY_LOCK` | `true` in prod | When `true`, mutating routes that require `Idempotency-Key` (e.g. `/v1/private-tx/submit`, `/v1/nek/{override,authorize}`) refuse to run with 503 if Redis is unreachable. Default `false` in development so local stacks without Upstash still boot. Override explicitly. |
 | `CACHE_TTL_NEK` / `CACHE_TTL_CIPHERTEXT` | `300` / `60` | Redis TTLs (seconds). |
 | `NEK_INMEM_CACHE_TTL_MS` | `30000` | In-process NEK cache TTL. |
-| `BLOCKHASH_CACHE_TTL_MS` | `12000` | In-process blockhash cache TTL. |
+| `BLOCKHASH_CACHE_TTL_MS` | `12000` | In-process blockhash cache TTL. Auto-invalidated on `BlockhashNotFound` / `TransactionExpiredBlockheightExceeded`. |
 
 ### Timeouts
 | Var | Default | Notes |
@@ -183,6 +185,7 @@ partially-filled bundle errors at first request.
 | Var | Notes |
 |-----|-------|
 | `ANDROMEDA_GAS_SPONSOR_KEYPAIR` | JSON byte array of a 64-byte `solana-keygen` keypair. Optional and currently unused by endpoints — see the prepare → submit section. Never commit it. |
+| `ANDROMEDA_GAS_SPONSOR_QUEUE_MAX` | `50` — max concurrent + queued requests per fee payer when gas sponsor is wired. Per-fee-payer serialisation via promise-chain mutex; excess returns 503 with `Retry-After`. Mirror of the ika-backend implementation. |
 
 ### Other
 | Var | Default | Notes |

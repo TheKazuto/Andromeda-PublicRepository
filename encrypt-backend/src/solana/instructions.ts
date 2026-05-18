@@ -16,10 +16,17 @@ import {
   getSetComputeUnitPriceInstruction,
 } from '@solana-program/compute-budget';
 import { rpc } from './connection.js';
+import { withSolanaRpc } from './rpcwrap.js';
 import { config } from '../config.js';
 import { Errors } from '../lib/errors.js';
 import { logger } from '../lib/logger.js';
 import { withTimeout } from '../lib/timeout.js';
+import {
+  blockhashCacheHits,
+  blockhashCacheInvalidations,
+  blockhashCacheMisses,
+  classifySolanaRpcError,
+} from '../lib/metrics.js';
 
 export type AccountInput = {
   address: Address;
@@ -76,21 +83,29 @@ let blockhashInflight: Promise<CachedBlockhash> | null = null;
 async function getCachedBlockhash(): Promise<CachedBlockhash> {
   const now = Date.now();
   if (cachedBlockhash && cachedBlockhash.expiresAt > now) {
+    blockhashCacheHits.inc();
     return cachedBlockhash.value;
   }
-  if (blockhashInflight) return blockhashInflight;
+  if (blockhashInflight) {
+    blockhashCacheHits.inc();
+    return blockhashInflight;
+  }
 
+  blockhashCacheMisses.inc();
+  // withSolanaRpc handles latency + outcome metrics + breaker.
   blockhashInflight = (async () => {
     try {
-      const res = await withTimeout(
-        rpc.getLatestBlockhash().send(),
-        config.SOLANA_RPC_TIMEOUT_MS,
-        'getLatestBlockhash timed out'
-      );
-      const value: CachedBlockhash = {
-        blockhash: res.value.blockhash,
-        lastValidBlockHeight: res.value.lastValidBlockHeight,
-      };
+      const value: CachedBlockhash = await withSolanaRpc('getLatestBlockhash', async () => {
+        const res = await withTimeout(
+          rpc.getLatestBlockhash().send(),
+          config.SOLANA_RPC_TIMEOUT_MS,
+          'getLatestBlockhash timed out',
+        );
+        return {
+          blockhash: res.value.blockhash,
+          lastValidBlockHeight: res.value.lastValidBlockHeight,
+        };
+      });
       cachedBlockhash = { value, expiresAt: Date.now() + config.BLOCKHASH_CACHE_TTL_MS };
       return value;
     } catch (err) {
@@ -106,6 +121,21 @@ async function getCachedBlockhash(): Promise<CachedBlockhash> {
 
 export function prefetchBlockhash(): Promise<CachedBlockhash> {
   return getCachedBlockhash();
+}
+
+/**
+ * Drops the cached blockhash. Callers MUST invoke this whenever Solana
+ * returns BlockhashNotFound / TransactionExpiredBlockheightExceeded so
+ * a fresh blockhash is fetched on the next call instead of looping on
+ * a stale one.
+ *
+ * NOTE: never call this for an already-signed transaction — the client
+ * signed over the original blockhash; swapping it would invalidate the
+ * signature.
+ */
+export function invalidateBlockhashCache(): void {
+  cachedBlockhash = null;
+  blockhashCacheInvalidations.inc();
 }
 
 const DEFAULT_PRIORITY_FEE = BigInt(config.SOLANA_DEFAULT_PRIORITY_FEE_MICROLAMPORTS);
@@ -158,18 +188,22 @@ export async function buildUnsignedTransaction(opts: BuildTxOptions): Promise<{
  */
 export async function submitWireTransaction(base64Wire: string, skipPreflight = false) {
   try {
-    const signature = await withTimeout(
-      rpc
-        .sendTransaction(base64Wire as unknown as Parameters<typeof rpc.sendTransaction>[0], {
-          encoding: 'base64',
-          skipPreflight,
-        })
-        .send(),
-      config.SOLANA_RPC_TIMEOUT_MS,
-      'sendTransaction timed out'
+    return await withSolanaRpc('sendTransaction', () =>
+      withTimeout(
+        rpc
+          .sendTransaction(base64Wire as unknown as Parameters<typeof rpc.sendTransaction>[0], {
+            encoding: 'base64',
+            skipPreflight,
+          })
+          .send(),
+        config.SOLANA_RPC_TIMEOUT_MS,
+        'sendTransaction timed out',
+      ),
     );
-    return signature;
   } catch (err) {
+    if (classifySolanaRpcError(err) === 'blockhash_expired') {
+      invalidateBlockhashCache();
+    }
     throw Errors.solanaRpc('failed to submit transaction', err);
   }
 }

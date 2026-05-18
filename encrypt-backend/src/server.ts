@@ -7,6 +7,7 @@ import { serve } from '@hono/node-server';
 import { config } from './config.js';
 import { logger } from './lib/logger.js';
 import { toApiError } from './lib/errors.js';
+import { metricsMiddleware, registry as metricsRegistry } from './lib/metrics.js';
 import { internalKeyMiddleware } from './auth/internalKey.js';
 import { idempotencyMiddleware } from './http/idempotency.js';
 import { initOperationRegistry } from './dsl/operations.js';
@@ -49,6 +50,15 @@ app.use('*', async (c, next) => {
   }
 });
 app.use('*', secureHeaders());
+app.use('*', metricsMiddleware());
+
+// /metrics is unauthenticated by design — encrypt-backend lives on a
+// private Railway network behind the gateway. If it ever becomes
+// directly reachable, gate behind a bearer token.
+app.get('/metrics', async (c) => {
+  c.header('Content-Type', metricsRegistry.contentType);
+  return c.body(await metricsRegistry.metrics());
+});
 
 // Restrict CORS. Empty allowlist in production = no cross-origin allowed
 // (service is meant to be private). `*` only kept for local dev convenience.
