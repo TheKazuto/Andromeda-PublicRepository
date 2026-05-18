@@ -13,10 +13,13 @@ import (
 
 	"github.com/shinkalabs/andromeda-backend/internal/api"
 	backendauth "github.com/shinkalabs/andromeda-backend/internal/auth"
+	"github.com/shinkalabs/andromeda-backend/internal/auth/oauth"
 	"github.com/shinkalabs/andromeda-backend/internal/billing"
 	"github.com/shinkalabs/andromeda-backend/internal/config"
+	"github.com/shinkalabs/andromeda-backend/internal/leader"
 	"github.com/shinkalabs/andromeda-backend/internal/notifications"
 	"github.com/shinkalabs/andromeda-backend/internal/pricing"
+	"github.com/shinkalabs/andromeda-backend/internal/redisclient"
 	"github.com/shinkalabs/andromeda-backend/internal/store"
 	"github.com/shinkalabs/andromeda-backend/internal/webhooks"
 )
@@ -33,6 +36,19 @@ func main() {
 		log.Fatalf("store init: %v", err)
 	}
 	defer func() { _ = st.Close() }()
+
+	// P0.3: Redis powers cross-replica OAuth state replay protection and
+	// the auth rate limiter. Production requires it (config.Load fatals
+	// when missing); dev runs without and degrades to per-process state.
+	rdb, err := redisclient.New(cfg.RedisURL, logger)
+	if err != nil {
+		log.Fatalf("redis init: %v", err)
+	}
+	if rdb != nil {
+		defer func() { _ = rdb.Close() }()
+		oauth.SetReplayClient(rdb)
+		logger.Info("oauth state replay backed by Redis")
+	}
 
 	// --- Mailer (SMTP, opt-in) ---
 	// One mailer drives every email side effect: gift purchase receipts,
@@ -77,12 +93,21 @@ func main() {
 
 			// Overage reporting worker — sends meter events to Stripe
 			// every 5 min for subscriptions with active overage.
+			// P0.4: leader-elected so multi-replica deploys cannot
+			// double-report meter events to Stripe.
 			ow := notifications.NewOverageWorker(notifications.OverageWorkerOptions{
 				Store:   pgStore,
 				Billing: billingSvc,
 				Logger:  logger,
 			})
-			go ow.Start(rootCtx)
+			runOverage := &leader.Runner{
+				Pool:   pgStore.Pool(),
+				Name:   "overage",
+				LockID: leader.OverageWorkerLockID,
+				Func:   ow.Start,
+				Logger: logger,
+			}
+			go runOverage.Start(rootCtx)
 		} else {
 			logger.Info("billing service disabled — STRIPE_SECRET_KEY not configured")
 		}
@@ -94,6 +119,10 @@ func main() {
 	if pgStore != nil {
 		whPub := webhooks.NewPublisher(pgStore.Pool())
 
+		// P0.4: every worker below runs only on the elected leader so a
+		// 3-replica deploy doesn't send 3× quota emails / 3× pricing
+		// announcements / apply pricing 3× in parallel.
+
 		quotaWorker := notifications.NewQuotaWorker(notifications.QuotaWorkerOptions{
 			Store:        pgStore,
 			Mailer:       mailer,
@@ -102,7 +131,10 @@ func main() {
 			FromAddr:     cfg.SMTPFrom,
 			Logger:       logger,
 		})
-		go quotaWorker.Start(rootCtx)
+		go (&leader.Runner{
+			Pool: pgStore.Pool(), Name: "quota", LockID: leader.QuotaWorkerLockID,
+			Func: quotaWorker.Start, Logger: logger,
+		}).Start(rootCtx)
 
 		pricingNotifWorker := notifications.NewPricingWorker(notifications.PricingWorkerOptions{
 			Store:        pgStore,
@@ -112,15 +144,21 @@ func main() {
 			FromAddr:     cfg.SMTPFrom,
 			Logger:       logger,
 		})
-		go pricingNotifWorker.Start(rootCtx)
+		go (&leader.Runner{
+			Pool: pgStore.Pool(), Name: "pricing_notify", LockID: leader.PricingNotifyWorkerLockID,
+			Func: pricingNotifWorker.Start, Logger: logger,
+		}).Start(rootCtx)
 
 		// Pricing applier — copies due pricing_history rows into the
 		// live tables (request_costs / plans). The gateway picks up
 		// changes on its own pricer cache refresh (60s).
 		applierWorker := pricing.NewApplier(pgStore, logger)
-		go applierWorker.Start(rootCtx)
+		go (&leader.Runner{
+			Pool: pgStore.Pool(), Name: "pricing_apply", LockID: leader.PricingApplierWorkerLockID,
+			Func: applierWorker.Start, Logger: logger,
+		}).Start(rootCtx)
 
-		logger.Info("notification + applier workers started",
+		logger.Info("leader-elected notification + applier workers started",
 			"smtp_configured", cfg.SMTPHost != "")
 	}
 
@@ -145,8 +183,44 @@ func main() {
 		bcancel()
 	}
 
-	srv := api.NewServer(cfg, capable, billingSvc, billingWH, mailer)
+	srv := api.NewServer(cfg, capable, billingSvc, billingWH, mailer, api.ServerOptions{Redis: rdb})
 	waitBackground := srv.AttachLifecycle(rootCtx)
+
+	// Background scraper for runtime gauges (pgxpool stats). Cheap —
+	// pool.Stat() is atomic counters with no DB round-trip. 15s sample
+	// rate mirrors the gateway so Grafana panels can use a single
+	// scrape_interval across services.
+	if pgStore != nil {
+		go func() {
+			t := time.NewTicker(15 * time.Second)
+			defer t.Stop()
+			scrape := func() {
+				m := srv.Metrics()
+				if m == nil {
+					return
+				}
+				st := pgStore.Pool().Stat()
+				m.DBPoolAcquired.Set(float64(st.AcquiredConns()))
+				m.DBPoolIdle.Set(float64(st.IdleConns()))
+				m.DBPoolTotal.Set(float64(st.TotalConns()))
+				m.DBPoolMax.Set(float64(st.MaxConns()))
+				m.DBPoolNewConnsTotal.Set(float64(st.NewConnsCount()))
+				m.DBPoolAcquireCount.Set(float64(st.AcquireCount()))
+				m.DBPoolEmptyAcquireTotal.Set(float64(st.EmptyAcquireCount()))
+				m.DBPoolCanceledAcquireTotal.Set(float64(st.CanceledAcquireCount()))
+				m.DBPoolAcquireWaitSeconds.Set(st.AcquireDuration().Seconds())
+			}
+			scrape()
+			for {
+				select {
+				case <-rootCtx.Done():
+					return
+				case <-t.C:
+					scrape()
+				}
+			}
+		}()
+	}
 
 	httpServer := &http.Server{
 		Addr:              ":" + cfg.Port,

@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/redis/go-redis/v9"
 )
 
 const (
@@ -63,15 +65,61 @@ type Provider interface {
 // consumedStates tracks state tokens that have already been redeemed so
 // the same state cannot be replayed inside its TTL. Entries auto-expire
 // at the state's expiry timestamp; the janitor removes them lazily.
+//
+// In a multi-replica deploy the in-memory map is per-process — replica A
+// would accept a state that replica B has already redeemed. To close
+// that gap, wire a *redis.Client via SetReplayClient at boot; the
+// markStateConsumed function then prefers SET NX EX in Redis and falls
+// back to memory only when Redis is unreachable.
 var (
 	consumedStatesMu sync.Mutex
 	consumedStates   = map[string]int64{}
+
+	replayClientMu sync.RWMutex
+	replayClient   *redis.Client
 )
+
+// SetReplayClient injects the cross-replica Redis backend for OAuth
+// state replay protection. Pass nil to revert to in-memory mode (dev).
+// Safe to call once at boot.
+func SetReplayClient(c *redis.Client) {
+	replayClientMu.Lock()
+	replayClient = c
+	replayClientMu.Unlock()
+}
+
+func getReplayClient() *redis.Client {
+	replayClientMu.RLock()
+	defer replayClientMu.RUnlock()
+	return replayClient
+}
 
 // markStateConsumed records that `nonce` was successfully verified. Returns
 // false when the nonce was already consumed (replay) and true on first use.
+//
+// Redis path: SET key 1 NX EX (expiryDelta) — atomic across replicas.
+// Memory fallback only kicks in when no Redis is configured OR Redis is
+// transiently unreachable. The fallback is per-process so two replicas
+// can still race during a Redis outage; the alternative is denying every
+// OAuth callback, which is worse.
 func markStateConsumed(nonce []byte, expiryUnix int64) bool {
 	key := base64.RawURLEncoding.EncodeToString(nonce)
+	if c := getReplayClient(); c != nil {
+		ttl := time.Until(time.Unix(expiryUnix, 0))
+		if ttl < time.Second {
+			ttl = time.Second
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		// SetNX returns true when the key was newly created.
+		ok, err := c.SetNX(ctx, "oauth:state:"+key, "1", ttl).Result()
+		if err == nil {
+			return ok
+		}
+		// Redis hiccup — fall through to memory so honest users are not
+		// locked out by an upstream incident. CSRF risk degrades to the
+		// pre-distributed level for the duration of the outage.
+	}
 	consumedStatesMu.Lock()
 	defer consumedStatesMu.Unlock()
 

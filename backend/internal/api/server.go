@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
@@ -9,10 +10,12 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/shinkalabs/andromeda-backend/internal/auth/oauth"
 	"github.com/shinkalabs/andromeda-backend/internal/billing"
 	"github.com/shinkalabs/andromeda-backend/internal/config"
+	bemetrics "github.com/shinkalabs/andromeda-backend/internal/metrics"
 	"github.com/shinkalabs/andromeda-backend/internal/notifications"
 	"github.com/shinkalabs/andromeda-backend/internal/store"
 )
@@ -39,6 +42,8 @@ type Server struct {
 	billingWebhook *billing.WebhookHandler
 	authLimiter    *authRateLimiter
 	mailer         notifications.Mailer
+	metrics        *bemetrics.Metrics
+	metricsHandler http.Handler
 
 	// rootCtx is cancelled by main when the process is asked to stop.
 	// Background goroutines spawned by handlers (e.g. password reset
@@ -51,6 +56,13 @@ type Server struct {
 	bgTasks sync.WaitGroup
 }
 
+// ServerOptions bundles dependencies that are wired at boot. Keeps the
+// constructor signature stable when new optional collaborators (Redis,
+// observability, etc) are added.
+type ServerOptions struct {
+	Redis *redis.Client
+}
+
 // NewServer constructs the backend HTTP server.
 //
 // When `billingSvc` is nil or disabled, the /v1/billing/* routes are
@@ -59,7 +71,10 @@ type Server struct {
 //
 // `mailer` may be nil; when nil, password-reset emails fall back to a
 // log-only path so dev environments without SMTP still operate.
-func NewServer(cfg *config.Config, st BillingCapableStore, billingSvc *billing.Service, billingWH *billing.WebhookHandler, mailer notifications.Mailer) *Server {
+//
+// `opts.Redis` (when non-nil) backs the per-IP auth rate limiter so
+// limits hold across replicas (P0.3 of the robustness plan).
+func NewServer(cfg *config.Config, st BillingCapableStore, billingSvc *billing.Service, billingWH *billing.WebhookHandler, mailer notifications.Mailer, opts ServerOptions) *Server {
 	registry := oauth.Registry{}
 	if cfg.OAuth.GoogleEnabled() {
 		registry["google"] = oauth.NewGoogle(
@@ -75,17 +90,30 @@ func NewServer(cfg *config.Config, st BillingCapableStore, billingSvc *billing.S
 			cfg.OAuth.RedirectBase+"/v1/auth/oauth/github/callback",
 		)
 	}
+	m, mh := bemetrics.New()
+	limiter := newAuthRateLimiter().withMetrics(m)
+	if opts.Redis != nil {
+		// Configure logger via the std slog package; the limiter just
+		// passes warnings through. Default level Info is fine here.
+		limiter = limiter.withRedis(opts.Redis, cfg.RateLimitFailOpen, slog.Default())
+	}
 	return &Server{
 		cfg:            cfg,
 		store:          st,
 		oauthRegistry:  registry,
 		billing:        billingSvc,
 		billingWebhook: billingWH,
-		authLimiter:    newAuthRateLimiter(),
+		authLimiter:    limiter,
 		mailer:         mailer,
+		metrics:        m,
+		metricsHandler: mh,
 		rootCtx:        context.Background(),
 	}
 }
+
+// Metrics returns the Prometheus registry wrapper so main.go can wire
+// the pgxpool scraper without depending on the api package internals.
+func (s *Server) Metrics() *bemetrics.Metrics { return s.metrics }
 
 // AttachLifecycle binds the server to the process-wide context used by
 // background goroutines and the WaitGroup main blocks on at shutdown.
@@ -123,6 +151,7 @@ func (s *Server) Router() http.Handler {
 	r.Use(middleware.Timeout(20 * time.Second))
 	r.Use(securityHeaders(s.cfg.Env == "production"))
 	r.Use(maxBodyMiddleware(defaultMaxBodyBytes))
+	r.Use(s.metrics.Middleware)
 
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   s.cfg.AllowedOrigins,
@@ -135,6 +164,12 @@ func (s *Server) Router() http.Handler {
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	})
+
+	// /metrics is unauthenticated by design — Railway exposes the
+	// backend service on its private network and the public dashboard
+	// origin does not hit this path. If the backend ever becomes
+	// directly reachable, gate this behind a bearer token.
+	r.Method("GET", "/metrics", s.metricsHandler)
 
 	// Stripe webhook lives outside auth — Stripe-Signature is the auth
 	// mechanism and the handler verifies it itself.

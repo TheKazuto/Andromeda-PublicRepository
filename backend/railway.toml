@@ -13,4 +13,9 @@ healthcheckPath = "/health"
 healthcheckTimeout = 30
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 10
-numReplicas = 1
+# P1.1: scaled to 2 replicas. Safe because P0.3 (Redis-backed OAuth
+# state + auth rate limiter), P0.2 (advisory-locked migrations) and
+# P0.4 (leader-elected overage/quota/pricing/applier workers) cover
+# the duplication risks. Ramp to 3 after baseline validates — see
+# docs/ops/scale-rollout.md.
+numReplicas = 2

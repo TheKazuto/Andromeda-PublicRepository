@@ -38,6 +38,7 @@ backend/
 | Method | Path | Auth | Purpose |
 |--------|------|------|---------|
 | GET    | `/health` | — | Liveness probe |
+| GET    | `/metrics` | — | Prometheus (Railway private network only). HTTP request counts/latency, pgxpool stats, auth rate-limit blocked counter, worker tick counts. |
 | POST   | `/v1/auth/signup` | — | Create account, return access JWT + refresh cookie |
 | POST   | `/v1/auth/login` | — | Login, same shape as signup |
 | POST   | `/v1/auth/refresh` | refresh cookie | Rotate access JWT |
@@ -100,6 +101,7 @@ JWT-gated operator console with TOTP MFA and audit log.
 | `ALLOWED_ORIGINS` | Comma-separated CORS allowlist (dashboard origin). |
 | `ENV` | `production` or `development`. |
 | `ADMIN_JWT_SECRET` | `openssl rand -hex 32`. Required for `/admin/*`. |
+| `REDIS_URL` | Backs OAuth state replay (`SET NX EX` per nonce) and the auth rate limiter (token bucket cross-replica). Service refuses to boot in production without it — multi-replica deploys can otherwise be brute-forced because per-replica memory doesn't share state. |
 
 ### Bootstrap admin (first deploy only)
 | Var | Notes |
@@ -131,13 +133,24 @@ JWT-gated operator console with TOTP MFA and audit log.
 | `SMTP_USERNAME` / `SMTP_PASSWORD` | Provider creds. |
 | `SMTP_FROM` | `Andromeda <noreply@shinkalabs.com>`. Validated with `mail.ParseAddress` and stripped of CR/LF before every send (header-injection defense). |
 
+### Redis tuning (opt-in)
+| Var | Default | Notes |
+|-----|---------|-------|
+| `RATE_LIMIT_FAIL_OPEN` | `false` | When Redis is unreachable: `false` (default) falls back to per-replica memory bucket; `true` allows unrestricted traffic + warns at boot. Production should leave it `false`. |
+| `TRUSTED_PROXIES` | empty | CSV of proxies whose `X-Forwarded-For` may be honoured. Empty = use direct peer IP (correct behind Railway + Cloudflare). |
+
 ### Postgres pool tuning (opt-in)
 | Var | Default | Notes |
 |-----|---------|-------|
 | `PG_MAX_CONNS` | `10` | Upper bound on pgx pool size. Raise to match Railway plan limits when the gateway and backend share the same database. |
 | `PG_MIN_CONNS` | `1` | Idle connections kept warm. |
+| `PG_HEALTH_CHECK_SEC` | `30` | pgxpool health-check period. |
 | `PG_CONN_MAX_LIFETIME_SEC` | `3600` | Hard recycle to refresh DNS / pgbouncer state. |
 | `PG_CONN_MAX_IDLE_SEC` | `600` | Drop connections idle for longer than this. |
+| `PG_STATEMENT_TIMEOUT_MS` | `30000` | Postgres `statement_timeout` applied on every new connection. Frees stuck queries from the pool. |
+| `PG_IDLE_IN_TX_TIMEOUT_MS` | `60000` | Postgres `idle_in_transaction_session_timeout`. |
+| `PG_STATEMENT_CACHE_MODE` | (pgx default) | Set to `describe` under PgBouncer transaction-pool mode. |
+| `MIGRATION_DATABASE_URL` | `DATABASE_URL` | Direct Postgres DSN for migrations only — bypass PgBouncer so the session-level advisory lock survives across statements. |
 
 `PORT` is injected by Railway — do not set it.
 
@@ -145,14 +158,35 @@ JWT-gated operator console with TOTP MFA and audit log.
 
 SQL files live under `internal/store/migrations/` and are embedded in the binary. On boot the service:
 
-1. Connects to `DATABASE_URL`.
+1. Connects to `MIGRATION_DATABASE_URL` (or `DATABASE_URL` if not set). The migration connection
+   is opened **directly** with `pgx.Connect`, NOT via the pool — required so the session-level
+   advisory lock survives across statements. Behind PgBouncer in transaction-pool mode you MUST
+   set `MIGRATION_DATABASE_URL` to a direct Postgres DSN.
 2. Acquires a session-level `pg_advisory_lock` (id `0x416E64726F6D6564`). Concurrent boots — blue/green deploys, two replicas restarting in lockstep — serialise here instead of double-applying a migration.
 3. Creates `backend_schema_migrations` if missing.
-4. Applies any file whose name is not yet recorded, each inside its own transaction.
+4. Applies any file whose name is not yet recorded, each inside its own transaction. The
+   `INSERT ... ON CONFLICT DO NOTHING` is defence-in-depth in case a previous run committed the
+   migration but failed to record it.
 
 Latest file: `005_admin_totp_replay.sql` (adds `admin_users.mfa_last_window` for TOTP single-use). Apply before rolling out the binary that depends on it.
 
 The schema is co-owned with the gateway: tables the gateway creates (users, plans, subscriptions, webhook tables, etc.) live in the gateway's migration set. Backend's migrations only add columns the product surface needs.
+
+## Background workers
+
+Workers that have cross-replica side effects (Stripe meter events, emails, pricing rollout) run
+under a leader runner that takes a Postgres advisory lock on a dedicated pool connection with a 30s
+heartbeat. Multi-replica deploys never duplicate emails, meter events, or pricing applies.
+
+| Worker | Lock ID | Purpose |
+|--------|--------:|---------|
+| `overage` | `0x416E64726F6501` | Stripe meter events every 5 min (active overage subs). |
+| `quota` | `0x416E64726F6502` | Quota threshold email + webhook fan-out. |
+| `pricing_notify` | `0x416E64726F6503` | Pricing-change announcement emails + webhooks. |
+| `pricing_apply` | `0x416E64726F6504` | Apply due `pricing_history` rows to live `request_costs` / `plans`. |
+
+The follower replicas log `leader lock unavailable` and re-try every 30s; takeover happens within
+~30s of a leader dying.
 
 ## Security hardening (what to expect)
 

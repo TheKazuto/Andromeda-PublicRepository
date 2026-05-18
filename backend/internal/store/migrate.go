@@ -5,6 +5,7 @@ import (
 	"embed"
 	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 
@@ -26,8 +27,17 @@ const migrationLockID int64 = 0x416E64726F6D6564 // "Andromed"
 // A session-level advisory lock guarantees that two concurrent processes
 // (e.g. blue/green deploys, or two replicas booting at the same moment)
 // serialise migration work without corrupting the schema.
+//
+// PgBouncer note: session-level locks do NOT work under transaction
+// pooling. When DATABASE_URL points at PgBouncer in tx-pool mode, set
+// MIGRATION_DATABASE_URL to a direct Postgres DSN so this connection
+// bypasses the pooler.
 func Migrate(ctx context.Context, databaseURL string) error {
-	conn, err := pgx.Connect(ctx, databaseURL)
+	dsn := databaseURL
+	if override := strings.TrimSpace(os.Getenv("MIGRATION_DATABASE_URL")); override != "" {
+		dsn = override
+	}
+	conn, err := pgx.Connect(ctx, dsn)
 	if err != nil {
 		return fmt.Errorf("connect: %w", err)
 	}
@@ -86,7 +96,7 @@ func Migrate(ctx context.Context, databaseURL string) error {
 			_ = tx.Rollback(ctx)
 			return fmt.Errorf("apply %s: %w", name, err)
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO backend_schema_migrations (name) VALUES ($1)`, name); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO backend_schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING`, name); err != nil {
 			_ = tx.Rollback(ctx)
 			return fmt.Errorf("record %s: %w", name, err)
 		}

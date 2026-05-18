@@ -39,6 +39,20 @@ type Config struct {
 	DashboardBaseURL string
 	OAuth            OAuthConfig
 
+	// Redis is used for cross-replica OAuth state replay protection and
+	// the auth rate limiter. In production REDIS_URL is required — without
+	// it both defences degrade to per-replica memory and a multi-replica
+	// deploy can be brute-forced or replay-attacked. In development the
+	// service still boots with an empty URL and warns.
+	RedisURL           string
+	RateLimitFailOpen  bool
+	// Trusted reverse proxies whose X-Forwarded-For we honor. Empty (the
+	// default) means the auth limiter uses the direct peer IP — safe
+	// behind Railway + Cloudflare, where the platform already injects
+	// the original IP via CF-Connecting-IP / X-Forwarded-For after
+	// stripping client-supplied headers.
+	TrustedProxies []string
+
 	// Stripe billing — empty disables /v1/billing/*. Production requires
 	// the full set; the gateway README has the Stripe Dashboard setup
 	// instructions (products, prices, meter, webhook endpoint).
@@ -88,6 +102,10 @@ func Load() *Config {
 		SMTPPassword:        getenv("SMTP_PASSWORD", ""),
 		SMTPFrom:            getenv("SMTP_FROM", ""),
 
+		RedisURL:               getenv("REDIS_URL", ""),
+		RateLimitFailOpen:      strings.EqualFold(getenv("RATE_LIMIT_FAIL_OPEN", ""), "true"),
+		TrustedProxies:         splitCSV(getenv("TRUSTED_PROXIES", "")),
+
 		AdminJWTSecret:         getenv("ADMIN_JWT_SECRET", ""),
 		AdminToken:             getenv("ADMIN_TOKEN", ""),
 		AdminBootstrapEmail:    strings.ToLower(strings.TrimSpace(getenv("ANDROMEDA_BOOTSTRAP_ADMIN_EMAIL", ""))),
@@ -125,6 +143,17 @@ func Load() *Config {
 
 	if cfg.Env == "production" && cfg.DatabaseURL == "" {
 		log.Fatal("DATABASE_URL must be set in production")
+	}
+
+	// P0.3: in production we require Redis so OAuth state replay and the
+	// auth rate limiter are coherent across replicas. RATE_LIMIT_FAIL_OPEN
+	// only makes sense when Redis is configured; warn loudly if both flags
+	// disagree.
+	if cfg.Env == "production" && cfg.RedisURL == "" {
+		log.Fatal("REDIS_URL must be set in production (used for OAuth state replay protection and the auth rate limiter)")
+	}
+	if cfg.RateLimitFailOpen && cfg.Env == "production" {
+		log.Println("warning: RATE_LIMIT_FAIL_OPEN=true in production — Redis outage will disable the auth rate limiter")
 	}
 
 	if (cfg.OAuth.GoogleEnabled() || cfg.OAuth.GitHubEnabled()) && cfg.OAuth.RedirectBase == "" {

@@ -1,13 +1,19 @@
 package api
 
 import (
+	"context"
+	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	"golang.org/x/time/rate"
+
+	bemetrics "github.com/shinkalabs/andromeda-backend/internal/metrics"
 )
 
 // authRateLimiter is a per-IP token-bucket limiter applied to the public
@@ -28,6 +34,78 @@ type authRateLimiter struct {
 
 	mu      sync.Mutex
 	buckets map[string]*ipBucket
+
+	metrics *bemetrics.Metrics
+
+	// P0.3: Redis-backed bucket shared across replicas. When nil the
+	// limiter is per-process (legacy). When set, Redis is the
+	// authoritative bucket and the in-memory map is the cold path used
+	// only when Redis returns an error AND failOpen is true.
+	redis    *redis.Client
+	failOpen bool
+	logger   *slog.Logger
+}
+
+// withMetrics attaches a metrics recorder so the middleware can increment
+// backend_auth_rate_limit_blocked_total when a request is rejected.
+// Fluent for boot-time wiring.
+func (rl *authRateLimiter) withMetrics(m *bemetrics.Metrics) *authRateLimiter {
+	rl.metrics = m
+	return rl
+}
+
+// withRedis attaches the cross-replica backend. Pass nil to revert to
+// per-process mode. The same Lua token-bucket script as the gateway is
+// used, so the operational semantics stay consistent across services.
+func (rl *authRateLimiter) withRedis(c *redis.Client, failOpen bool, logger *slog.Logger) *authRateLimiter {
+	rl.redis = c
+	rl.failOpen = failOpen
+	rl.logger = logger
+	return rl
+}
+
+// tokenBucketScript: matches gateway/internal/ratelimit/ratelimit.go.
+const tokenBucketScript = `
+local key = KEYS[1]
+local now = tonumber(ARGV[1])
+local rate = tonumber(ARGV[2])
+local burst = tonumber(ARGV[3])
+
+local data = redis.call("HMGET", key, "tokens", "ts")
+local tokens = tonumber(data[1])
+local ts = tonumber(data[2])
+if tokens == nil then
+  tokens = burst
+end
+if ts == nil then
+  ts = now
+end
+
+local elapsed = math.max(0, now - ts)
+tokens = math.min(burst, tokens + (elapsed * rate / 1000))
+if tokens < 1 then
+  redis.call("HMSET", key, "tokens", tokens, "ts", now)
+  redis.call("PEXPIRE", key, math.max(2000, math.ceil((burst / rate) * 2000)))
+  return 0
+end
+
+tokens = tokens - 1
+redis.call("HMSET", key, "tokens", tokens, "ts", now)
+redis.call("PEXPIRE", key, math.max(2000, math.ceil((burst / rate) * 2000)))
+return 1
+`
+
+// allowRedis runs the Lua token bucket against Redis. Returns true when
+// the request is admitted, false when blocked, and (false, err) when
+// Redis itself failed — caller honours failOpen in that case.
+func (rl *authRateLimiter) allowRedis(ctx context.Context, key string, rps, burst int) (bool, error) {
+	bucket := fmt.Sprintf("auth_rl:%s", key)
+	result, err := rl.redis.Eval(ctx, tokenBucketScript, []string{bucket},
+		time.Now().UnixMilli(), rps, burst).Int()
+	if err != nil {
+		return false, err
+	}
+	return result == 1, nil
 }
 
 type ipBucket struct {
@@ -111,7 +189,15 @@ func (rl *authRateLimiter) gcLoop() {
 }
 
 // middleware returns a chi-compatible middleware that 429s requests beyond
-// the configured rate. Uses the direct peer IP from clientIP.
+// the configured rate. Uses the direct peer IP from clientIP. The route
+// label is best-effort (URL path without query); chi RoutePattern is only
+// available after Routes match, which happens after this middleware.
+//
+// When Redis is wired, the bucket is shared across replicas and a Redis
+// hiccup is governed by failOpen — false means deny, true means allow and
+// log. The local in-memory bucket is still used as a backstop on
+// Redis-allow so even a temporary Redis cache stampede cannot let a hot
+// IP exceed N×rate per replica.
 func (rl *authRateLimiter) middleware() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -119,7 +205,39 @@ func (rl *authRateLimiter) middleware() func(http.Handler) http.Handler {
 			if ip == "" {
 				ip = "unknown"
 			}
-			if !rl.allow(ip) {
+
+			blocked := false
+			if rl.redis != nil {
+				// Convert the local rate.Limit (events/sec) to integer rps.
+				rps := int(float64(rl.rps) + 0.5)
+				if rps < 1 {
+					rps = 1
+				}
+				ctx, cancel := context.WithTimeout(r.Context(), 200*time.Millisecond)
+				ok, err := rl.allowRedis(ctx, ip, rps, rl.burst)
+				cancel()
+				if err != nil {
+					if rl.logger != nil {
+						rl.logger.Warn("auth rate limit redis error", "err", err, "fail_open", rl.failOpen)
+					}
+					if !rl.failOpen {
+						blocked = true
+					} else {
+						// Redis down + fail-open: fall back to local
+						// bucket so we still rate-limit per replica.
+						blocked = !rl.allow(ip)
+					}
+				} else {
+					blocked = !ok
+				}
+			} else {
+				blocked = !rl.allow(ip)
+			}
+
+			if blocked {
+				if rl.metrics != nil {
+					rl.metrics.AuthRateLimitBlockedTotal.WithLabelValues(r.URL.Path).Inc()
+				}
 				w.Header().Set("Retry-After", "60")
 				writeError(w, http.StatusTooManyRequests, "too many requests, please retry in a minute")
 				return

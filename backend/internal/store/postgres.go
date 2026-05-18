@@ -21,6 +21,17 @@ type PostgresStore struct {
 
 // NewPostgres opens a pgx pool against databaseURL and verifies connectivity
 // with a ping. Caller is responsible for running migrations beforehand.
+//
+// Pool sizing knobs (env, all optional):
+//
+//	PG_MAX_CONNS              — pool ceiling (default 10)
+//	PG_MIN_CONNS              — warm idle pool (default 1)
+//	PG_HEALTH_CHECK_SEC       — pgxpool health-check period (default 30)
+//	PG_CONN_MAX_LIFETIME_SEC  — max age of any conn (default 3600)
+//	PG_CONN_MAX_IDLE_SEC      — kill idle conns after N seconds (default 600)
+//	PG_STATEMENT_TIMEOUT_MS   — `statement_timeout` per session (default 30000)
+//	PG_IDLE_IN_TX_TIMEOUT_MS  — `idle_in_transaction_session_timeout` (default 60000)
+//	PG_STATEMENT_CACHE_MODE   — set to 'describe' under PgBouncer tx-pool mode
 func NewPostgres(ctx context.Context, databaseURL string) (*PostgresStore, error) {
 	cfg, err := pgxpool.ParseConfig(databaseURL)
 	if err != nil {
@@ -28,9 +39,40 @@ func NewPostgres(ctx context.Context, databaseURL string) (*PostgresStore, error
 	}
 	cfg.MaxConns = int32(envInt("PG_MAX_CONNS", 10))
 	cfg.MinConns = int32(envInt("PG_MIN_CONNS", 1))
-	cfg.HealthCheckPeriod = 30 * time.Second
+	cfg.HealthCheckPeriod = time.Duration(envInt("PG_HEALTH_CHECK_SEC", 30)) * time.Second
 	cfg.MaxConnLifetime = time.Duration(envInt("PG_CONN_MAX_LIFETIME_SEC", 3600)) * time.Second
 	cfg.MaxConnIdleTime = time.Duration(envInt("PG_CONN_MAX_IDLE_SEC", 600)) * time.Second
+
+	if mode := strings.TrimSpace(os.Getenv("PG_STATEMENT_CACHE_MODE")); mode != "" {
+		switch mode {
+		case "describe":
+			cfg.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeDescribeExec
+		case "exec":
+			cfg.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeExec
+		case "simple_protocol":
+			cfg.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
+		case "cache_describe":
+			cfg.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeCacheDescribe
+		case "prepare", "cache_statement":
+			cfg.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeCacheStatement
+		}
+	}
+
+	stmtTimeoutMS := envInt("PG_STATEMENT_TIMEOUT_MS", 30_000)
+	idleTxTimeoutMS := envInt("PG_IDLE_IN_TX_TIMEOUT_MS", 60_000)
+	cfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
+		if stmtTimeoutMS > 0 {
+			if _, err := conn.Exec(ctx, fmt.Sprintf("SET statement_timeout = %d", stmtTimeoutMS)); err != nil {
+				return fmt.Errorf("set statement_timeout: %w", err)
+			}
+		}
+		if idleTxTimeoutMS > 0 {
+			if _, err := conn.Exec(ctx, fmt.Sprintf("SET idle_in_transaction_session_timeout = %d", idleTxTimeoutMS)); err != nil {
+				return fmt.Errorf("set idle_in_transaction_session_timeout: %w", err)
+			}
+		}
+		return nil
+	}
 
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
