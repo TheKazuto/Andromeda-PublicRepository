@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -15,11 +16,23 @@ import (
 
 var ErrLimited = errors.New("rate limited")
 
+// Observer is the minimum metrics surface the rate limiter uses. Lets us
+// record Lua-eval latency, errors and fail-open events without dragging
+// the gateway metrics package as a hard dependency. Nil-safe.
+type Observer interface {
+	ObserveOpLatency(op string, seconds float64)
+	IncError(op, kind string)
+	IncFailOpen(op string)
+}
+
 type Limiter interface {
 	// Allow checks whether one request can be admitted for key.
 	// rps is the sustained refill rate; burst is the bucket capacity.
 	Allow(ctx context.Context, key string, rps, burst int) error
 	Ping(ctx context.Context) error
+	// WithObserver attaches a metrics observer. Returns the same Limiter
+	// to allow fluent wiring at boot.
+	WithObserver(o Observer) Limiter
 }
 
 func New(redisURL string, failOpen bool, logger *slog.Logger) (Limiter, error) {
@@ -42,17 +55,43 @@ func New(redisURL string, failOpen bool, logger *slog.Logger) (Limiter, error) {
 
 type noopLimiter struct{}
 
-func (*noopLimiter) Allow(context.Context, string, int, int) error { return nil }
-func (*noopLimiter) Ping(context.Context) error                    { return nil }
+func (n *noopLimiter) Allow(context.Context, string, int, int) error { return nil }
+func (n *noopLimiter) Ping(context.Context) error                    { return nil }
+func (n *noopLimiter) WithObserver(Observer) Limiter                 { return n }
 
 type redisLimiter struct {
 	client   *redis.Client
 	failOpen bool
 	logger   *slog.Logger
+	obs      Observer
 }
 
 func (l *redisLimiter) Ping(ctx context.Context) error {
 	return l.client.Ping(ctx).Err()
+}
+
+func (l *redisLimiter) WithObserver(o Observer) Limiter {
+	l.obs = o
+	return l
+}
+
+// classifyRedisErr maps a Redis error to a coarse kind label for metrics.
+func classifyRedisErr(err error) string {
+	if err == nil {
+		return ""
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return "timeout"
+	}
+	s := err.Error()
+	switch {
+	case strings.Contains(s, "i/o timeout"), strings.Contains(s, "deadline exceeded"):
+		return "timeout"
+	case strings.Contains(s, "connect"), strings.Contains(s, "EOF"), strings.Contains(s, "broken pipe"), strings.Contains(s, "reset"):
+		return "conn"
+	default:
+		return "other"
+	}
 }
 
 const tokenBucketScript = `
@@ -97,10 +136,21 @@ func (l *redisLimiter) Allow(ctx context.Context, key string, rps, burst int) er
 	}
 
 	bucket := fmt.Sprintf("rl:%s", key)
+	started := time.Now()
 	allowed, err := l.client.Eval(ctx, tokenBucketScript, []string{bucket},
 		time.Now().UnixMilli(), rps, burst).Int()
+	elapsed := time.Since(started).Seconds()
+	if l.obs != nil {
+		l.obs.ObserveOpLatency("ratelimit_eval", elapsed)
+	}
 	if err != nil {
+		if l.obs != nil {
+			l.obs.IncError("ratelimit_eval", classifyRedisErr(err))
+		}
 		if l.failOpen {
+			if l.obs != nil {
+				l.obs.IncFailOpen("ratelimit_eval")
+			}
 			l.logger.Warn("rate limit redis error - failing open", "err", err)
 			return nil
 		}

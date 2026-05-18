@@ -61,6 +61,61 @@ type Metrics struct {
 	// 4xx, 5xx, network_error, dead_letter. Used together with
 	// `gateway_webhook_dlq_depth` to alert on persistent failures.
 	WebhookDeliveriesTotal *prometheus.CounterVec // labels: outcome
+
+	// WebhookRateLimitedTotal counts deliveries deferred because the
+	// per-destination token bucket was empty at the dispatcher worker.
+	// No labels — endpoint_id cardinality would blow up the series
+	// count.
+	WebhookRateLimitedTotal prometheus.Counter
+
+	// Webhook backlog — sampled every 15s by the metrics scraper.
+	WebhookInFlightCount        prometheus.Gauge
+	WebhookPendingCount         prometheus.Gauge
+	WebhookOldestPendingSeconds prometheus.Gauge
+	WebhookOldestInFlightSeconds prometheus.Gauge
+
+	// Postgres pgxpool — sampled every 15s by the metrics scraper.
+	// Mirrors pgxpool.Stat() so dashboards can alert on acquire wait /
+	// pool saturation per the robustness plan F0/F1 tasks.
+	DBPoolAcquired           prometheus.Gauge
+	DBPoolIdle               prometheus.Gauge
+	DBPoolTotal              prometheus.Gauge
+	DBPoolMax                prometheus.Gauge
+	DBPoolNewConnsTotal      prometheus.Gauge // monotonic counter sourced from pgxpool; expose as gauge of "current value"
+	DBPoolAcquireCount       prometheus.Gauge
+	DBPoolEmptyAcquireTotal  prometheus.Gauge
+	DBPoolCanceledAcquireTotal prometheus.Gauge
+	DBPoolAcquireWaitSeconds prometheus.Gauge // total wait time so far, in seconds (cumulative)
+
+	// Redis — per-operation latency histogram + error counter. Op label
+	// is the high-level operation name (`ratelimit_eval`, `idempotency_get`,
+	// `idempotency_set`, `set_nx`). Keep cardinality bounded.
+	RedisOpLatency *prometheus.HistogramVec // labels: op
+	RedisErrors    *prometheus.CounterVec   // labels: op, kind (timeout|conn|other)
+	RedisFailOpen  *prometheus.CounterVec   // labels: op (rate limit fails open when Redis unreachable)
+
+	// Audit signer — latency per signature + failure counter. Backend
+	// label distinguishes `env` (in-memory ed25519) from `vault` (Vault
+	// Transit HTTP round-trip).
+	AuditSignerLatency *prometheus.HistogramVec // labels: backend
+	AuditAppendLatency prometheus.Histogram     // end-to-end Recorder.Append wall time
+	AuditFailuresTotal *prometheus.CounterVec   // labels: stage (sign|append|update|commit)
+	AuditDegraded      prometheus.Gauge         // 0 = healthy, 1 = signer unavailable / fallback active
+	AuditOutboxDepth   prometheus.Gauge         // rows with signature IS NULL waiting to be signed
+	AuditOutboxOldestSeconds prometheus.Gauge   // age in seconds of the oldest pending signature
+
+	// Audit snapshot worker — daily R2/S3 dump for DR.
+	AuditSnapshotRowsTotal       prometheus.Counter
+	AuditSnapshotBytesTotal      prometheus.Counter
+	AuditSnapshotFailuresTotal   *prometheus.CounterVec // labels: stage (cursor|fetch|build|upload|record)
+	AuditSnapshotLastSuccessUnix prometheus.Gauge       // unix timestamp of the last successful tick
+
+	// Gas sponsor — latency for sign-and-send (single fee payer for now;
+	// P0.5 introduces a pool with per-key labels). Result label is
+	// `submitted` / `simulation_failed` / `rpc_error` / `rejected`.
+	GasSponsorLatency  *prometheus.HistogramVec // labels: result
+	GasSponsorRequests *prometheus.CounterVec   // labels: result
+	GasSponsorDuplicateSig prometheus.Counter
 }
 
 // New builds and registers every collector. Returns the Metrics bundle
@@ -193,6 +248,12 @@ func New() (*Metrics, http.Handler) {
 			Name:      "deliveries_total",
 			Help:      "Delivery attempts by outcome (2xx/4xx/5xx/network_error/dead_letter).",
 		}, []string{"outcome"})
+	m.WebhookRateLimitedTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "gateway",
+		Subsystem: "webhook",
+		Name:      "rate_limited_total",
+		Help:      "Cumulative deliveries deferred because the per-endpoint token bucket was empty.",
+	})
 
 	m.ListenerEventsDropped = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
@@ -201,6 +262,144 @@ func New() (*Metrics, http.Handler) {
 			Name:      "events_dropped_total",
 			Help:      "On-chain events dropped before publish (rate_limit / no_tenant / parse_error).",
 		}, []string{"reason"})
+
+	// --- Webhook backlog gauges (sampled by metrics scraper) ---
+	m.WebhookInFlightCount = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "gateway",
+		Subsystem: "webhook",
+		Name:      "in_flight_count",
+		Help:      "Webhook deliveries currently marked in_flight (claimed by a dispatcher).",
+	})
+	m.WebhookPendingCount = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "gateway",
+		Subsystem: "webhook",
+		Name:      "pending_count",
+		Help:      "Webhook deliveries currently pending (waiting for next_attempt_at).",
+	})
+	m.WebhookOldestPendingSeconds = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "gateway",
+		Subsystem: "webhook",
+		Name:      "oldest_pending_age_seconds",
+		Help:      "Age in seconds of the oldest pending (eligible) webhook delivery; 0 when queue is empty.",
+	})
+	m.WebhookOldestInFlightSeconds = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "gateway",
+		Subsystem: "webhook",
+		Name:      "oldest_in_flight_age_seconds",
+		Help:      "Age in seconds of the oldest in_flight webhook delivery; alerts on stuck/crashed dispatchers.",
+	})
+
+	// --- DB pool gauges (pgxpool.Stat sampled by metrics scraper) ---
+	m.DBPoolAcquired = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "gateway", Subsystem: "db_pool", Name: "acquired_conns",
+		Help: "Postgres connections currently checked out (pgxpool.Stat.AcquiredConns).",
+	})
+	m.DBPoolIdle = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "gateway", Subsystem: "db_pool", Name: "idle_conns",
+		Help: "Postgres connections currently idle in the pool (pgxpool.Stat.IdleConns).",
+	})
+	m.DBPoolTotal = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "gateway", Subsystem: "db_pool", Name: "total_conns",
+		Help: "Total open Postgres connections (pgxpool.Stat.TotalConns).",
+	})
+	m.DBPoolMax = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "gateway", Subsystem: "db_pool", Name: "max_conns",
+		Help: "Configured pool ceiling (pgxpool.Config.MaxConns).",
+	})
+	m.DBPoolNewConnsTotal = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "gateway", Subsystem: "db_pool", Name: "new_conns_total",
+		Help: "Cumulative new connections opened (pgxpool.Stat.NewConnsCount).",
+	})
+	m.DBPoolAcquireCount = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "gateway", Subsystem: "db_pool", Name: "acquire_count_total",
+		Help: "Cumulative successful Acquire() calls (pgxpool.Stat.AcquireCount).",
+	})
+	m.DBPoolEmptyAcquireTotal = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "gateway", Subsystem: "db_pool", Name: "empty_acquire_total",
+		Help: "Cumulative Acquire() calls that had to wait on an empty pool (pgxpool.Stat.EmptyAcquireCount).",
+	})
+	m.DBPoolCanceledAcquireTotal = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "gateway", Subsystem: "db_pool", Name: "canceled_acquire_total",
+		Help: "Cumulative Acquire() calls cancelled before getting a connection (pgxpool.Stat.CanceledAcquireCount).",
+	})
+	m.DBPoolAcquireWaitSeconds = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "gateway", Subsystem: "db_pool", Name: "acquire_wait_seconds_total",
+		Help: "Cumulative wall time spent waiting in Acquire() (pgxpool.Stat.AcquireDuration, seconds).",
+	})
+
+	// --- Redis ---
+	m.RedisOpLatency = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Namespace: "gateway", Subsystem: "redis", Name: "op_latency_seconds",
+		Help:    "Latency of Redis operations by logical op name (ratelimit_eval, idempotency_get, …).",
+		Buckets: []float64{0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5},
+	}, []string{"op"})
+	m.RedisErrors = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "gateway", Subsystem: "redis", Name: "errors_total",
+		Help: "Redis errors by op and coarse kind (timeout|conn|other).",
+	}, []string{"op", "kind"})
+	m.RedisFailOpen = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "gateway", Subsystem: "redis", Name: "fail_open_total",
+		Help: "Times a feature fell open because Redis was unavailable (rate limit).",
+	}, []string{"op"})
+
+	// --- Audit signer ---
+	m.AuditSignerLatency = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Namespace: "gateway", Subsystem: "audit", Name: "signer_latency_seconds",
+		Help:    "Wall time of one ed25519 signature (env: in-memory; vault: Vault Transit HTTP round-trip).",
+		Buckets: []float64{0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5},
+	}, []string{"backend"})
+	m.AuditAppendLatency = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Namespace: "gateway", Subsystem: "audit", Name: "append_latency_seconds",
+		Help:    "End-to-end Recorder.Append wall time (lock + tx + prev lookup + sign + insert + commit).",
+		Buckets: []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5},
+	})
+	m.AuditFailuresTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "gateway", Subsystem: "audit", Name: "failures_total",
+		Help: "Audit failures by stage (sign|append).",
+	}, []string{"stage"})
+	m.AuditDegraded = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "gateway", Subsystem: "audit", Name: "degraded",
+		Help: "1 when the audit signer is unavailable or running in fallback mode, 0 otherwise.",
+	})
+	m.AuditOutboxDepth = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "gateway", Subsystem: "audit", Name: "outbox_depth",
+		Help: "Rows in audit_log with signature IS NULL waiting to be signed by the worker.",
+	})
+	m.AuditOutboxOldestSeconds = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "gateway", Subsystem: "audit", Name: "outbox_oldest_age_seconds",
+		Help: "Age in seconds of the oldest row waiting for signature; 0 when the outbox is empty.",
+	})
+	m.AuditSnapshotRowsTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "gateway", Subsystem: "audit", Name: "snapshot_rows_total",
+		Help: "Cumulative audit_log rows uploaded to R2/S3 by the snapshotter worker.",
+	})
+	m.AuditSnapshotBytesTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "gateway", Subsystem: "audit", Name: "snapshot_bytes_total",
+		Help: "Cumulative compressed bytes uploaded to R2/S3 by the snapshotter worker.",
+	})
+	m.AuditSnapshotFailuresTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "gateway", Subsystem: "audit", Name: "snapshot_failures_total",
+		Help: "Audit snapshot worker failures by stage (cursor|fetch|build|upload|record).",
+	}, []string{"stage"})
+	m.AuditSnapshotLastSuccessUnix = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "gateway", Subsystem: "audit", Name: "snapshot_last_success_timestamp_seconds",
+		Help: "Unix timestamp of the last successful snapshot tick; 0 until first success.",
+	})
+
+	// --- Gas sponsor ---
+	m.GasSponsorLatency = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Namespace: "gateway", Subsystem: "gas_sponsor", Name: "latency_seconds",
+		Help:    "End-to-end gas sponsor send latency by outcome.",
+		Buckets: []float64{0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60},
+	}, []string{"result"})
+	m.GasSponsorRequests = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "gateway", Subsystem: "gas_sponsor", Name: "requests_total",
+		Help: "Gas sponsor send attempts by outcome (submitted|simulation_failed|rpc_error|rejected).",
+	}, []string{"result"})
+	m.GasSponsorDuplicateSig = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "gateway", Subsystem: "gas_sponsor", Name: "duplicate_signature_total",
+		Help: "Cumulative count of Solana sendTransaction calls that returned duplicate-signature.",
+	})
 
 	reg.MustRegister(
 		m.HTTPRequestsTotal,
@@ -220,6 +419,36 @@ func New() (*Metrics, http.Handler) {
 		m.ListenerEventsDropped,
 		m.WebhookPublishFailures,
 		m.WebhookDeliveriesTotal,
+		m.WebhookRateLimitedTotal,
+		m.WebhookInFlightCount,
+		m.WebhookPendingCount,
+		m.WebhookOldestPendingSeconds,
+		m.WebhookOldestInFlightSeconds,
+		m.DBPoolAcquired,
+		m.DBPoolIdle,
+		m.DBPoolTotal,
+		m.DBPoolMax,
+		m.DBPoolNewConnsTotal,
+		m.DBPoolAcquireCount,
+		m.DBPoolEmptyAcquireTotal,
+		m.DBPoolCanceledAcquireTotal,
+		m.DBPoolAcquireWaitSeconds,
+		m.RedisOpLatency,
+		m.RedisErrors,
+		m.RedisFailOpen,
+		m.AuditSignerLatency,
+		m.AuditAppendLatency,
+		m.AuditFailuresTotal,
+		m.AuditDegraded,
+		m.AuditOutboxDepth,
+		m.AuditOutboxOldestSeconds,
+		m.AuditSnapshotRowsTotal,
+		m.AuditSnapshotBytesTotal,
+		m.AuditSnapshotFailuresTotal,
+		m.AuditSnapshotLastSuccessUnix,
+		m.GasSponsorLatency,
+		m.GasSponsorRequests,
+		m.GasSponsorDuplicateSig,
 	)
 
 	handler := promhttp.HandlerFor(reg, promhttp.HandlerOpts{
@@ -246,6 +475,131 @@ func (m *Metrics) RecordDeliveryOutcome(outcome string) {
 		return
 	}
 	m.WebhookDeliveriesTotal.WithLabelValues(outcome).Inc()
+}
+
+// RecordWebhookRateLimited implements webhooks.DispatcherMetrics.
+func (m *Metrics) RecordWebhookRateLimited() {
+	if m == nil || m.WebhookRateLimitedTotal == nil {
+		return
+	}
+	m.WebhookRateLimitedTotal.Inc()
+}
+
+// --- ratelimit.Observer adapter ---
+
+// ObserveOpLatency records latency for a Redis-backed op (ratelimit_eval,
+// idempotency_get, …). Implements ratelimit.Observer.
+func (m *Metrics) ObserveOpLatency(op string, seconds float64) {
+	if m == nil || m.RedisOpLatency == nil {
+		return
+	}
+	m.RedisOpLatency.WithLabelValues(op).Observe(seconds)
+}
+
+// IncError increments redis_errors_total for the given op/kind.
+// Implements ratelimit.Observer.
+func (m *Metrics) IncError(op, kind string) {
+	if m == nil || m.RedisErrors == nil {
+		return
+	}
+	if kind == "" {
+		kind = "other"
+	}
+	m.RedisErrors.WithLabelValues(op, kind).Inc()
+}
+
+// IncFailOpen increments redis_fail_open_total for the given op.
+// Implements ratelimit.Observer.
+func (m *Metrics) IncFailOpen(op string) {
+	if m == nil || m.RedisFailOpen == nil {
+		return
+	}
+	m.RedisFailOpen.WithLabelValues(op).Inc()
+}
+
+// --- audit.SignerObserver adapter ---
+
+// ObserveAuditSign records one signature latency for the named signer
+// backend (`env` | `vault`). Implements audit.SignerObserver.
+func (m *Metrics) ObserveAuditSign(backend string, seconds float64) {
+	if m == nil || m.AuditSignerLatency == nil {
+		return
+	}
+	m.AuditSignerLatency.WithLabelValues(backend).Observe(seconds)
+}
+
+// ObserveAuditAppend records one Recorder.Append wall time.
+func (m *Metrics) ObserveAuditAppend(seconds float64) {
+	if m == nil || m.AuditAppendLatency == nil {
+		return
+	}
+	m.AuditAppendLatency.Observe(seconds)
+}
+
+// IncAuditFailure increments audit_failures_total{stage=...}.
+func (m *Metrics) IncAuditFailure(stage string) {
+	if m == nil || m.AuditFailuresTotal == nil {
+		return
+	}
+	m.AuditFailuresTotal.WithLabelValues(stage).Inc()
+}
+
+// SetAuditDegraded sets the audit_degraded gauge (1 = degraded).
+func (m *Metrics) SetAuditDegraded(degraded bool) {
+	if m == nil || m.AuditDegraded == nil {
+		return
+	}
+	if degraded {
+		m.AuditDegraded.Set(1)
+	} else {
+		m.AuditDegraded.Set(0)
+	}
+}
+
+// SetAuditOutboxDepth records the current count of unsigned audit rows.
+func (m *Metrics) SetAuditOutboxDepth(depth int64) {
+	if m == nil || m.AuditOutboxDepth == nil {
+		return
+	}
+	m.AuditOutboxDepth.Set(float64(depth))
+}
+
+// SetAuditOutboxOldestSeconds records the age of the oldest pending row.
+func (m *Metrics) SetAuditOutboxOldestSeconds(seconds float64) {
+	if m == nil || m.AuditOutboxOldestSeconds == nil {
+		return
+	}
+	m.AuditOutboxOldestSeconds.Set(seconds)
+}
+
+// ObserveSnapshotUpload implements audit.SnapshotObserver. Records one
+// successful upload's row + byte counts.
+func (m *Metrics) ObserveSnapshotUpload(rows int, bytes int64) {
+	if m == nil {
+		return
+	}
+	if m.AuditSnapshotRowsTotal != nil {
+		m.AuditSnapshotRowsTotal.Add(float64(rows))
+	}
+	if m.AuditSnapshotBytesTotal != nil {
+		m.AuditSnapshotBytesTotal.Add(float64(bytes))
+	}
+}
+
+// IncSnapshotFailure implements audit.SnapshotObserver.
+func (m *Metrics) IncSnapshotFailure(stage string) {
+	if m == nil || m.AuditSnapshotFailuresTotal == nil {
+		return
+	}
+	m.AuditSnapshotFailuresTotal.WithLabelValues(stage).Inc()
+}
+
+// SetSnapshotLastSuccessUnix implements audit.SnapshotObserver.
+func (m *Metrics) SetSnapshotLastSuccessUnix(unix int64) {
+	if m == nil || m.AuditSnapshotLastSuccessUnix == nil {
+		return
+	}
+	m.AuditSnapshotLastSuccessUnix.Set(float64(unix))
 }
 
 // StatusClass converts an HTTP status into a coarse class label
