@@ -9,7 +9,10 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sony/gobreaker/v2"
@@ -18,6 +21,58 @@ import (
 	"github.com/shinkalabs/andromeda-gateway/internal/config"
 	"github.com/shinkalabs/andromeda-gateway/internal/routes"
 )
+
+// proxyBufferPool wraps a sync.Pool so it satisfies
+// httputil.BufferPool. ReverseProxy borrows a buffer per stream-copy
+// from upstream → client; reusing 32 KB slabs cuts GC pressure under
+// burst load substantially. The size matches Go's io.Copy default
+// (32 KB) so we never hit io.Copy's internal fallback.
+//
+// Security note: buffers are NOT zeroed when returned to the pool —
+// they only carry response bytes that have already been written to
+// the client socket. We never put a request body buffer here.
+type proxyBufferPool struct {
+	pool sync.Pool
+}
+
+func newProxyBufferPool() *proxyBufferPool {
+	return &proxyBufferPool{
+		pool: sync.Pool{
+			New: func() any {
+				buf := make([]byte, 32*1024)
+				return &buf
+			},
+		},
+	}
+}
+
+// Get implements httputil.BufferPool.
+func (p *proxyBufferPool) Get() []byte {
+	buf := p.pool.Get().(*[]byte)
+	return *buf
+}
+
+// Put implements httputil.BufferPool.
+func (p *proxyBufferPool) Put(b []byte) {
+	if cap(b) < 32*1024 {
+		return
+	}
+	b = b[:cap(b)]
+	p.pool.Put(&b)
+}
+
+// sharedBufferPool is created once and shared across every Target's
+// ReverseProxy so the pool absorbs traffic from all upstreams.
+var sharedBufferPool = newProxyBufferPool()
+
+func envInt(key string, fallback int) int {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return fallback
+}
 
 // ErrCircuitOpen is returned by Allow when the upstream's breaker has
 // tripped. Callers must short-circuit with 503 Service Unavailable.
@@ -167,6 +222,28 @@ func (r *Registry) Get(name string) *Target {
 	return nil
 }
 
+// buildUpstreamTransport returns an *http.Transport tuned for high
+// concurrency against a single upstream host (the engine in the private
+// network). Sizing comes from env so operators can right-size per env:
+//
+//	UPSTREAM_MAX_IDLE_CONNS           — total idle pool (default 2000)
+//	UPSTREAM_MAX_IDLE_CONNS_PER_HOST  — per-host idle pool (default 300)
+//	UPSTREAM_MAX_CONNS_PER_HOST       — hard ceiling per host (default 500)
+//	UPSTREAM_IDLE_CONN_TIMEOUT_SEC    — drop idle after N seconds (default 90)
+//
+// We deliberately leave DialContext defaults from net/http — Railway's
+// private network handles routing without us tweaking it.
+func buildUpstreamTransport(responseHeaderTimeout time.Duration) *http.Transport {
+	return &http.Transport{
+		ResponseHeaderTimeout: responseHeaderTimeout,
+		IdleConnTimeout:       time.Duration(envInt("UPSTREAM_IDLE_CONN_TIMEOUT_SEC", 90)) * time.Second,
+		MaxIdleConns:          envInt("UPSTREAM_MAX_IDLE_CONNS", 2000),
+		MaxIdleConnsPerHost:   envInt("UPSTREAM_MAX_IDLE_CONNS_PER_HOST", 300),
+		MaxConnsPerHost:       envInt("UPSTREAM_MAX_CONNS_PER_HOST", 500),
+		ForceAttemptHTTP2:     true,
+	}
+}
+
 func newTarget(name, baseURL, authHeader, authValue string, timeout time.Duration, obs TripObserver) (*Target, error) {
 	if baseURL == "" {
 		// Allow empty in development — handler will return 502 if hit.
@@ -179,14 +256,9 @@ func newTarget(name, baseURL, authHeader, authValue string, timeout time.Duratio
 	// otelhttp.NewTransport propagates the W3C Trace Context to the
 	// upstream — when tracing is disabled (no OTEL_EXPORTER endpoint)
 	// it's a zero-cost pass-through.
-	baseTransport := &http.Transport{
-		ResponseHeaderTimeout: timeout,
-		IdleConnTimeout:       90 * time.Second,
-		MaxIdleConnsPerHost:   32,
-	}
 	httpClient := &http.Client{
 		Timeout:   timeout,
-		Transport: otelhttp.NewTransport(baseTransport),
+		Transport: otelhttp.NewTransport(buildUpstreamTransport(timeout)),
 	}
 	t := &Target{
 		Name:       name,
@@ -221,11 +293,17 @@ func newTarget(name, baseURL, authHeader, authValue string, timeout time.Duratio
 			}
 			pr.Out.Host = u.Host
 		},
-		Transport: otelhttp.NewTransport(&http.Transport{
-			ResponseHeaderTimeout: timeout,
-			IdleConnTimeout:       90 * time.Second,
-			MaxIdleConnsPerHost:   32,
-		}),
+		Transport: otelhttp.NewTransport(buildUpstreamTransport(timeout)),
+		// FlushInterval = -1 streams chunks immediately — required for
+		// SSE / MCP long-lived responses. -1 means "flush after every
+		// write"; positive values batch by duration. For non-streaming
+		// REST endpoints the behavior is unchanged because the response
+		// body is short and arrives in one go.
+		FlushInterval: -1,
+		// P2.2: recycle 32 KB copy buffers across requests so io.Copy on
+		// upstream → client response bodies doesn't allocate fresh per
+		// request. ReverseProxy's default would do exactly that.
+		BufferPool: sharedBufferPool,
 		ModifyResponse: func(resp *http.Response) error {
 			resp.Header.Set("X-Andromeda-Upstream", name)
 			return nil
