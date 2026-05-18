@@ -48,6 +48,17 @@ type Config struct {
 	// seed or 64-byte private key). Only used when AuditSignerKind == "env".
 	AuditPrivateKeyB64 string
 
+	// Audit snapshot worker (P2.3 follow-up — DR defence-in-depth).
+	// Off by default; opt-in via AUDIT_SNAPSHOT_ENABLED=true. Targets
+	// Cloudflare R2 by default but any S3-compatible endpoint works.
+	AuditSnapshotEnabled   bool
+	AuditSnapshotEndpoint  string
+	AuditSnapshotBucket    string
+	AuditSnapshotRegion    string
+	AuditSnapshotAccessKey string
+	AuditSnapshotSecretKey string
+	AuditSnapshotPrefix    string
+
 	// Vault Transit Engine config — used only when AuditSignerKind == "vault".
 	AuditVaultAddr      string
 	AuditVaultToken     string
@@ -162,6 +173,13 @@ func Load() *Config {
 		TrustedProxyCIDRs:      splitCSV(getenv("TRUSTED_PROXY_CIDRS", "")),
 		DefaultRequestCost:     getenvInt("DEFAULT_REQUEST_COST", 1),
 		PricingRefreshSeconds:  time.Duration(getenvInt("PRICING_REFRESH_SECONDS", 60)) * time.Second,
+		AuditSnapshotEnabled:    getenvBool("AUDIT_SNAPSHOT_ENABLED", false),
+		AuditSnapshotEndpoint:   strings.TrimRight(getenv("AUDIT_SNAPSHOT_S3_ENDPOINT", ""), "/"),
+		AuditSnapshotBucket:     getenv("AUDIT_SNAPSHOT_S3_BUCKET", ""),
+		AuditSnapshotRegion:     getenv("AUDIT_SNAPSHOT_S3_REGION", "auto"),
+		AuditSnapshotAccessKey:  getenv("AUDIT_SNAPSHOT_S3_ACCESS_KEY_ID", ""),
+		AuditSnapshotSecretKey:  getenv("AUDIT_SNAPSHOT_S3_SECRET_ACCESS_KEY", ""),
+		AuditSnapshotPrefix:     getenv("AUDIT_SNAPSHOT_S3_PREFIX", "audit/"),
 		AuditSignerKind:        strings.ToLower(getenv("ANDROMEDA_AUDIT_SIGNER", "env")),
 		AuditPrivateKeyB64:     getenv("ANDROMEDA_AUDIT_PRIVATE_KEY", ""),
 		AuditVaultAddr:         getenv("ANDROMEDA_AUDIT_VAULT_ADDR", ""),
@@ -226,6 +244,19 @@ func (c *Config) validate() error {
 		// explicit rather than override silently.
 		if c.RateLimitFailOpen {
 			return fmt.Errorf("RATE_LIMIT_FAIL_OPEN must be false in production — when Redis is unavailable the gateway must reject with 503, not serve unthrottled")
+		}
+		// P2.1: an empty ALLOWED_ORIGINS in production silently disables
+		// CORS (the cors middleware no-ops). The dashboard would still
+		// work because credentialed XHR doesn't need wildcard, but ANY
+		// third-party site could exfil JSON via fetch(). Force operators
+		// to list the dashboard origin explicitly.
+		if len(c.AllowedOrigins) == 0 {
+			return fmt.Errorf("ALLOWED_ORIGINS is required in production (comma-separated dashboard origins, e.g. https://app.andromedainfra.pro)")
+		}
+		for _, o := range c.AllowedOrigins {
+			if o == "*" {
+				return fmt.Errorf("ALLOWED_ORIGINS=* is not allowed in production — list each dashboard origin explicitly")
+			}
 		}
 	}
 	if c.DefaultRequestCost < 1 {

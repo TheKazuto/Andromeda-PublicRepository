@@ -174,6 +174,16 @@ func (s *Server) Router() http.Handler {
 	r.Use(middleware.RequestID)
 	r.Use(trustedRealIP(s.cfg.TrustedProxyCIDRs))
 	r.Use(middleware.Recoverer)
+	// P2.1: defence-in-depth headers on every response (HSTS in prod,
+	// X-Content-Type-Options, X-Frame-Options, Referrer-Policy,
+	// Permissions-Policy, Cross-Origin-Resource-Policy).
+	r.Use(securityHeadersMiddleware(s.cfg.Env == "production"))
+	// P2.1: Cache-Control: no-store by default. Only the allowlist in
+	// security.go (capabilities, openapi.json, pricing/plans, health,
+	// info) gets `public, max-age=60`. Every other route — including
+	// auth, signing, recovery, billing, usage, admin, MCP, audit — is
+	// `no-store` so a misconfigured CDN cannot leak tenant responses.
+	r.Use(cacheControlMiddleware)
 	// Cap incoming bodies before any handler sees them. http.MaxBytesReader
 	// short-circuits with 413 if the client streams past the limit, so
 	// downstream handlers (and the reverse-proxy) see only bounded data.

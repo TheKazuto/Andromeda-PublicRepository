@@ -59,11 +59,25 @@ type Entry struct {
 	Signature    []byte
 }
 
+// Observer is the minimum metrics surface the Recorder + SignerWorker
+// use. Lets us export Vault/env signer latency, append-stage failure
+// counters, and the outbox depth/age without depending on the gateway
+// metrics package directly. Nil-safe.
+type Observer interface {
+	ObserveAuditSign(backend string, seconds float64)
+	ObserveAuditAppend(seconds float64)
+	IncAuditFailure(stage string)
+	SetAuditOutboxDepth(depth int64)
+	SetAuditOutboxOldestSeconds(seconds float64)
+	SetAuditDegraded(degraded bool)
+}
+
 // Recorder appends signed entries to audit_log. Safe for concurrent use.
 type Recorder struct {
 	pool   *pgxpool.Pool
 	signer Signer
 	logger *slog.Logger
+	obs    Observer
 
 	// chainLocks serialises Append within this process, per api_key_id,
 	// ahead of the transactional pg_advisory_xact_lock (which serialises
@@ -72,6 +86,24 @@ type Recorder struct {
 	// holding pool connections for nothing. Keyed by api_key_id string;
 	// entries are never evicted (bounded by the tenant count).
 	chainLocks sync.Map // string -> *sync.Mutex
+}
+
+// WithObserver attaches a metrics observer. Returns the Recorder for
+// fluent boot-time wiring. Nil observer is a no-op.
+func (r *Recorder) WithObserver(o Observer) *Recorder {
+	r.obs = o
+	return r
+}
+
+// signerBackend returns a short label for the active Signer implementation,
+// used as a Prometheus label. Keeps cardinality bounded to {env,vault}.
+func (r *Recorder) signerBackend() string {
+	switch r.signer.(type) {
+	case *VaultTransitSigner:
+		return "vault"
+	default:
+		return "env"
+	}
 }
 
 func (r *Recorder) tenantLock(apiKeyID string) *sync.Mutex {
@@ -113,9 +145,21 @@ func (r *Recorder) PublicKeyBase64() string {
 	return base64.StdEncoding.EncodeToString(r.signer.PublicKey())
 }
 
+// SignerForWorker exposes the underlying Signer so the asynchronous
+// SignerWorker can share the same key material. Returns the Recorder's
+// configured signer (env or Vault); the caller MUST NOT swap it out
+// mid-flight or the chain's external proof becomes unverifiable.
+func (r *Recorder) SignerForWorker() Signer {
+	return r.signer
+}
+
 // Append writes one signed entry. Errors are returned to the caller; audit
 // failure should not silently succeed.
 func (r *Recorder) Append(ctx context.Context, ev Event) (*Entry, error) {
+	appendStart := time.Now()
+	if r.obs != nil {
+		defer func() { r.obs.ObserveAuditAppend(time.Since(appendStart).Seconds()) }()
+	}
 	if ev.EventType == "" || ev.ResourceType == "" {
 		return nil, errors.New("audit: event_type and resource_type are required")
 	}
@@ -193,24 +237,28 @@ func (r *Recorder) Append(ctx context.Context, ev Event) (*Entry, error) {
 	h.Write(prevHash)
 	h.Write(recordJSON)
 	entryHash := h.Sum(nil)
-	signature, err := r.signer.Sign(ctx, entryHash)
-	if err != nil {
-		return nil, fmt.Errorf("audit sign: %w", err)
-	}
 
+	// P1.4: the row is persisted with signature NULL — the SignerWorker
+	// drains the queue out-of-band and updates signature later. Chain
+	// integrity is preserved because the chain is defined by prev_hash +
+	// entry_hash; the signature is an external proof attached after the
+	// fact. Hot path no longer blocks on Vault.
 	var seq int64
 	err = tx.QueryRow(ctx, `
 		INSERT INTO audit_log
 		    (api_key_id, ts, event_type, resource_type, resource_id, actor,
-		     payload, cu_consumed, prev_hash, entry_hash, signature)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		     payload, cu_consumed, prev_hash, entry_hash, signature, pending_signed_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, NOW())
 		RETURNING seq
 	`, ev.APIKeyID, now, ev.EventType, ev.ResourceType, ev.ResourceID, ev.Actor,
-		string(payloadJSON), ev.CUConsumed, prevHash, entryHash, signature).Scan(&seq)
+		string(payloadJSON), ev.CUConsumed, prevHash, entryHash).Scan(&seq)
 	if err != nil {
 		return nil, fmt.Errorf("audit insert: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
+		if r.obs != nil {
+			r.obs.IncAuditFailure("append")
+		}
 		return nil, fmt.Errorf("audit commit: %w", err)
 	}
 
@@ -226,7 +274,10 @@ func (r *Recorder) Append(ctx context.Context, ev Event) (*Entry, error) {
 		CUConsumed:   ev.CUConsumed,
 		PrevHash:     prevHash,
 		EntryHash:    entryHash,
-		Signature:    signature,
+		// Signature is filled by SignerWorker out-of-band. Callers that
+		// need the signature now (e.g. /audit/verify built-in test) must
+		// poll the row.
+		Signature: nil,
 	}, nil
 }
 
