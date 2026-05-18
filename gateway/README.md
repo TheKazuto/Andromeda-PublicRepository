@@ -82,9 +82,9 @@ admin, future-sign) need scope `admin`. Request bodies are capped at 10 MiB by d
 `GATEWAY_MAX_BODY_BYTES`); signing/mutating routes carry tighter per-route caps (1 MiB) at the
 handler level.
 
-Every response is served with `Cache-Control: no-store` and `Vary: Authorization, X-Api-Key` by
-default — only the public allowlist (`/v1/capabilities`, `/v1/info`, `/openapi.json`,
-`/v1/pricing/plans`, `/health`) is cacheable at the CDN. Defence-in-depth headers (HSTS in
+Every response is served with `Cache-Control: no-store` and `Vary: Origin, Authorization, X-Api-Key`
+by default — only the public allowlist (`/capabilities`, `/openapi.json`, `/openapi.yaml`,
+`/v1/pricing`, `/health`, `/health/ready`) is cacheable at the CDN. Defence-in-depth headers (HSTS in
 production, `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, `Permissions-Policy`,
 `Cross-Origin-Resource-Policy`) are on every response.
 
