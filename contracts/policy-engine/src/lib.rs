@@ -46,7 +46,8 @@ use andromeda_auth::challenge::{
     quorum_session_open_challenge,
 };
 use andromeda_auth::{
-    validate_slot, verify_signature, AuthError, VerifyInput, MEMBER_SLOT_LEN, SCHEME_ED25519,
+    validate_oidc_slot, validate_slot, verify_signature, AuthError, VerifyInput,
+    MEMBER_SLOT_LEN, SCHEME_ED25519,
     SCHEME_OIDC_JWT, SCHEME_SECP256K1, SCHEME_SECP256R1, SCHEME_WEBAUTHN,
 };
 use andromeda_oidc_verifier as oidc_verifier;
@@ -335,6 +336,14 @@ pub struct RuleRemoved {
     pub generation: u64,
 }
 
+// L2 audit convention (2026-05-16): events SHOULD be emitted *after* every
+// validation has passed and *before* any state mutation. Today several
+// handlers (e.g. `request_signature`, `recover_as_primary_oidc`,
+// `quorum_session_finalize`) emit `SignatureRequested` near the top of the
+// handler; this is intentional so off-chain consumers see "request seen"
+// even for rejected attempts (debugging / metrics). Future handlers must NOT
+// emit success-implying events (`SignatureApproved`, `RuleAdded`, etc.)
+// before the corresponding state transition succeeds.
 #[event(discriminator = 20)]
 pub struct SignatureRequested {
     pub engine: Address,
@@ -976,6 +985,16 @@ const DEVNET_FALLBACK_AUDIENCES: &[&[u8]] = &[b"andromeda-devnet"];
 // `UncheckedAccount` without depending on the `andromeda_jwk_registry`
 // crate (would pull a heavy import for a 256-byte read).
 
+/// Canonical `andromeda_jwk_registry` program ID
+/// (`8xL2mrQ2amDpinQMHJPaEELbgEXWRVGn4PQ7kzDm7vNM`). Mirrors the
+/// `declare_id!` in `contracts/jwk-registry/src/lib.rs`. Used by C1 audit
+/// fix to defend `oidc_session_open` against accounts whose layout matches
+/// `JwkRegistry` but are owned by a different program.
+pub const JWK_REGISTRY_PROGRAM_ID: Address = Address::new_from_array([
+    0x76, 0x2e, 0x45, 0x5b, 0x2c, 0xb1, 0x1c, 0x44, 0x7a, 0x39, 0xdf, 0x49, 0xbd, 0x8f, 0x10, 0xae,
+    0x25, 0x41, 0x96, 0xad, 0xb4, 0x5c, 0xd6, 0x59, 0x84, 0x6e, 0x39, 0x84, 0x59, 0xbe, 0x80, 0x3a,
+]);
+
 pub const JWK_REGISTRY_MAX_ENTRIES: usize = 8;
 pub const JWK_ENTRY_LEN: usize = 400;
 /// 1 disc + 1 version + 1 entry_count + 6 reserved + 32×4 (roles) + 8×5
@@ -1556,6 +1575,16 @@ mod policy_engine_program {
             // sub_data[0] = account discriminator (= 2 for rules). Offsets
             // below are 1-based relative to the start of the account data.
             // (Mirror of ABI §3.4 RuleHeader layout.)
+            //
+            // M1 audit fix (2026-05-16): defense-in-depth — the address binding
+            // + owner check above already constrain this to a sub-PDA written
+            // by `add_rule_*`, but explicitly checking the discriminator
+            // hardens the loop against any future refactor that changes how
+            // rule PDAs are derived or owned.
+            require!(
+                sub_data[0] == 2,
+                PolicyEngineError::InvalidRuleHeader
+            );
             let header_kind = sub_data[1];
             let header_index = sub_data[2];
             let header_enabled = sub_data[3];
@@ -3075,8 +3104,9 @@ mod policy_engine_program {
             PolicyEngineError::GenericError
         );
         if primary_present == 1 {
-            validate_slot(&primary_slot)
-                .map_err(|_| PolicyEngineError::InvalidOwnerSlot)?;
+            // H0 audit fix (2026-05-16): OIDC primary slots use `[scheme, addr_seed(32), 0]`
+            // (see `validate_oidc_slot`); the legacy `validate_slot` rejects scheme=4 by
+            // design. Branch so each scheme is validated by its own layout helper.
             require!(
                 primary_slot[0] == SCHEME_ED25519
                     || primary_slot[0] == SCHEME_SECP256K1
@@ -3085,6 +3115,13 @@ mod policy_engine_program {
                     || primary_slot[0] == SCHEME_OIDC_JWT,
                 PolicyEngineError::UnsupportedScheme
             );
+            if primary_slot[0] == SCHEME_OIDC_JWT {
+                validate_oidc_slot(&primary_slot)
+                    .map_err(|_| PolicyEngineError::InvalidOwnerSlot)?;
+            } else {
+                validate_slot(&primary_slot)
+                    .map_err(|_| PolicyEngineError::InvalidOwnerSlot)?;
+            }
         }
 
         // Singleton enforcement.
@@ -3806,6 +3843,28 @@ mod policy_engine_program {
         let payer_addr = *ctx.accounts.payer.address();
         let jwk_registry_addr = *ctx.accounts.jwk_registry.address();
 
+        // M6 audit fix (2026-05-16): block session creation while paused.
+        require!(
+            ctx.accounts.engine.paused == 0,
+            PolicyEngineError::EnginePaused
+        );
+
+        // C1 audit fix (2026-05-16): the JWK registry that backs this session
+        // MUST be the one pinned in the RecoveryRule at init time. Without this
+        // anyone could craft a forged registry with a controlled RSA modulus and
+        // open a session against any OIDC primary.
+        require!(
+            jwk_registry_addr == ctx.accounts.rule_pda.jwk_registry_addr,
+            PolicyEngineError::OidcJwkNotFound
+        );
+        // Defense-in-depth: the account must be owned by the canonical
+        // `andromeda_jwk_registry` program. Layout coincidence with another
+        // program would otherwise still pass `read_jwk_entry`.
+        require!(
+            ctx.accounts.jwk_registry.to_account_view().owner() == &JWK_REGISTRY_PROGRAM_ID,
+            PolicyEngineError::OidcJwkNotFound
+        );
+
         // 0. nonce reject-fast.
         let on_chain_nonce: u64 = ctx.accounts.engine.next_oidc_session_nonce.into();
         require!(
@@ -3823,7 +3882,9 @@ mod policy_engine_program {
             primary_slot[0] == SCHEME_OIDC_JWT,
             PolicyEngineError::UnsupportedScheme
         );
-        validate_slot(&primary_slot)
+        // H0 audit fix (2026-05-16): OIDC slot has its own layout
+        // (`[4, addr_seed(32), 0]`); the legacy `validate_slot` rejects it.
+        validate_oidc_slot(&primary_slot)
             .map_err(|_| PolicyEngineError::InvalidOwnerSlot)?;
 
         // 2. JWT length bounds.
@@ -3834,6 +3895,13 @@ mod policy_engine_program {
         );
 
         // 3. effective expiry — capped at now + OIDC_SESSION_TTL_SECONDS.
+        //
+        // L1 audit fix (2026-05-16): `not_after_unix_ts` is a HARD UPPER
+        // BOUND, not a default. Effective expiry is
+        // `min(not_after_unix_ts, now + OIDC_SESSION_TTL_SECONDS)`. A caller
+        // passing a value smaller than `now + TTL` shortens the session;
+        // larger values are silently clamped by the TTL. Documented in
+        // GitBook (Login Social section).
         let not_after_i = if not_after_unix_ts <= i64::MAX as u64 {
             not_after_unix_ts as i64
         } else {
@@ -3911,6 +3979,20 @@ mod policy_engine_program {
         require!(parsed.issuer_hash == reg_iss_hash, PolicyEngineError::OidcIssuerMismatch);
         require!(parsed.audience_hash == reg_aud_hash, PolicyEngineError::OidcAudienceMismatch);
         require!(parsed.kid_hash == reg_kid_hash, PolicyEngineError::OidcJwkInactive);
+
+        // M8 audit fix (2026-05-16): the RecoveryRule pins a 16-byte prefix of
+        // `(sha256(iss), sha256(aud))` independently of the registry. Defense
+        // in depth: even if a pinning bypass on the registry slipped past in a
+        // future refactor, the (iss, aud) must still match what the dWallet
+        // owner authorised when the rule was added.
+        require!(
+            parsed.issuer_hash[..16] == ctx.accounts.rule_pda.oidc_iss_hash,
+            PolicyEngineError::OidcIssuerMismatch
+        );
+        require!(
+            parsed.audience_hash[..16] == ctx.accounts.rule_pda.oidc_aud_hash,
+            PolicyEngineError::OidcAudienceMismatch
+        );
 
         // 8. Identity match — the JWT's user MUST be the OIDC primary of
         // this dWallet. primary_slot[1..33] holds the addr_seed for
@@ -4189,6 +4271,12 @@ mod policy_engine_program {
         let dwallet_addr = *ctx.accounts.dwallet_account.address();
         let owner_slot = ctx.accounts.engine.owner_slot;
         let on_chain_nonce: u64 = ctx.accounts.engine.next_admin_nonce.into();
+
+        // M6 audit fix (2026-05-16): block session creation while paused.
+        require!(
+            ctx.accounts.engine.paused == 0,
+            PolicyEngineError::EnginePaused
+        );
 
         // Validate the SessionKey rule exists at the declared slot.
         let slot = rule_index as usize;
@@ -5311,6 +5399,12 @@ mod policy_engine_program {
         let rule_addr = *ctx.accounts.rule_pda.address();
         let payer_addr = *ctx.accounts.payer.address();
 
+        // M6 audit fix (2026-05-16): block session creation while paused.
+        require!(
+            ctx.accounts.engine.paused == 0,
+            PolicyEngineError::EnginePaused
+        );
+
         let ttl = expires_at.saturating_sub(current_ts);
         require!(
             ttl > 0 && ttl <= MAX_QUORUM_SESSION_TTL_SECONDS,
@@ -5628,12 +5722,23 @@ mod policy_engine_program {
     pub fn quorum_session_finalize(
         ctx: Ctx<QuorumSessionFinalizeAccts>,
         _init_authority_hash: Address,
+        _rule_index: u8,
         _session_nonce: u64,
         cpi_authority_bump: u8,
     ) -> Result<(), ProgramError> {
         let current_ts: i64 = ctx.accounts.clock.unix_timestamp.into();
         let engine_addr = *ctx.accounts.engine.address();
+        let rule_addr = *ctx.accounts.rule_pda.address();
         let request_hash = Address::from(ctx.accounts.session.message_digest);
+
+        // H2 audit fix (2026-05-16): the session pinned its `rule_pda` at open
+        // time. Even with `rule_index` parametrized in the accounts struct,
+        // require the runtime equality so the dispatched policy is exactly the
+        // one the quorum signed off on.
+        require!(
+            ctx.accounts.session.rule_pda == rule_addr,
+            PolicyEngineError::InvalidRuleHeader
+        );
 
         ctx.accounts.program.emit_event(
             &SignatureRequested {
@@ -5693,6 +5798,23 @@ mod policy_engine_program {
         }
 
         // Daily-limit (state on RecoveryRule, shared across sessions).
+        //
+        // L3 audit fix (2026-05-16): the daily window is bucketed by the UTC
+        // midnight boundary (`current_ts / 86_400 * 86_400`). For users in
+        // other timezones "daily" does NOT correspond to local calendar days.
+        // This is intentional — on-chain time is UTC and a per-tenant TZ
+        // would add state without buying real security. Documented in
+        // GitBook (Recovery section).
+        //
+        // M7 audit note (2026-05-16): the TOCTOU race that would let two
+        // concurrent finalizes overshoot the daily limit is mitigated by the
+        // Solana runtime: `rule_pda` is `mut` in `QuorumSessionFinalizeAccts`,
+        // so two txs that touch the same `rule_pda` cannot execute in
+        // parallel — the runtime serializes them. The off-chain gateway also
+        // pre-checks the limit before dispatch as a primary guard. The race
+        // re-appears only if a future ABI change moves the daily state out of
+        // `RecoveryRule` (e.g. into a sibling read-only PDA); that change MUST
+        // re-introduce nonce-based ordering at the same time.
         if ctx.accounts.rule_pda.daily_limit_present == 1 {
             let limit: u64 = ctx.accounts.rule_pda.daily_limit.into();
             let current_day_unix: i64 = ctx.accounts.rule_pda.current_day_unix.into();
@@ -5811,6 +5933,12 @@ mod policy_engine_program {
         let rule_addr = *ctx.accounts.rule_pda.address();
         let dwallet_addr = *ctx.accounts.dwallet_account.address();
         let payer_addr = *ctx.accounts.payer.address();
+
+        // M6 audit fix (2026-05-16): block session creation while paused.
+        require!(
+            ctx.accounts.engine.paused == 0,
+            PolicyEngineError::EnginePaused
+        );
 
         // 0. nonce reject-fast.
         let on_chain_nonce: u64 = ctx.accounts.rule_pda.next_passkey_session_nonce.into();
@@ -6664,7 +6792,7 @@ pub struct QuorumSessionContributeAccts {
 }
 
 #[derive(Accounts)]
-#[instruction(init_authority_hash: Address, session_nonce: u64)]
+#[instruction(init_authority_hash: Address, rule_index: u8, session_nonce: u64)]
 pub struct QuorumSessionFinalizeAccts {
     pub dwallet_account: UncheckedAccount,
 
@@ -6674,9 +6802,15 @@ pub struct QuorumSessionFinalizeAccts {
     ))]
     pub engine: Account<PolicyEngine>,
 
+    // H1 audit fix (2026-05-16): `rule_index` was hardcoded to `0u8`, which both
+    // broke multi-rule recovery (DoS) and let a permissive rule_0 bypass a
+    // restrictive rule_N when the session opened against rule_N. Now passed in
+    // as an instruction parameter so the PDA derivation matches the rule that
+    // owns the session. Cross-check `session.rule_pda == *rule_pda.address()`
+    // is enforced in the handler (H2).
     #[account(mut, address = RecoveryRule::seeds(
         engine.address(),
-        0u8
+        rule_index
     ))]
     pub rule_pda: Account<RecoveryRule>,
 
