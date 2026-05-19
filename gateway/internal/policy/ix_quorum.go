@@ -146,6 +146,9 @@ func QuorumSessionContribute(p QuorumSessionContributeParams) (solana.Instructio
 
 // ── Disc 85 — quorum_session_finalize ────────────────────────────────────
 
+// QuorumSessionFinalizeParams — `RuleIndex` was added by audit fix H1
+// (2026-05-16): the on-chain Accts struct no longer hardcodes `rule_index = 0`.
+// Callers MUST pass the same `RuleIndex` used when the session was opened.
 type QuorumSessionFinalizeParams struct {
 	ProgramID         solana.PublicKey
 	Engine            solana.PublicKey
@@ -157,12 +160,13 @@ type QuorumSessionFinalizeParams struct {
 	CallerProgram     solana.PublicKey
 	DWalletProgram    solana.PublicKey
 	InitAuthorityHash [32]byte
+	RuleIndex         uint8
 	SessionNonce      uint64
 	CPIAuthorityBump  uint8
 }
 
 func QuorumSessionFinalize(p QuorumSessionFinalizeParams) (solana.Instruction, error) {
-	rulePDA, _, err := RulePDA(p.ProgramID, p.Engine, KindRecovery, 0)
+	rulePDA, _, err := RulePDA(p.ProgramID, p.Engine, KindRecovery, p.RuleIndex)
 	if err != nil {
 		return nil, err
 	}
@@ -174,9 +178,11 @@ func QuorumSessionFinalize(p QuorumSessionFinalizeParams) (solana.Instruction, e
 	if err != nil {
 		return nil, err
 	}
-	data := make([]byte, 0, 1+32+8+1)
+	// disc + init_authority_hash + rule_index + session_nonce + cpi_authority_bump
+	data := make([]byte, 0, 1+32+1+8+1)
 	data = append(data, DiscQuorumSessionFinalize)
 	data = append(data, p.InitAuthorityHash[:]...)
+	data = append(data, p.RuleIndex)
 	var b8 [8]byte
 	binary.LittleEndian.PutUint64(b8[:], p.SessionNonce)
 	data = append(data, b8[:]...)

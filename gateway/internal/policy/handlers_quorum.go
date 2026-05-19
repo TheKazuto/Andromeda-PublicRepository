@@ -477,6 +477,7 @@ func (s *Service) quorumFinalize(w http.ResponseWriter, r *http.Request) {
 		CallerProgram:     callerProgram,
 		DWalletProgram:    IkaDwalletProgramID,
 		InitAuthorityHash: derived.initHash,
+		RuleIndex:         req.RuleIndex,
 		SessionNonce:      req.SessionNonce,
 		CPIAuthorityBump:  derived.cpiAuthorityBump,
 	})
