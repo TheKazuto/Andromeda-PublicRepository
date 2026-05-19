@@ -1261,6 +1261,9 @@ export async function buildQuorumSessionContributeInstruction(
   ])
 }
 
+// `ruleIndex` added by audit fix H1 (2026-05-16): on-chain Accts struct no
+// longer hardcodes `rule_index = 0`. Callers MUST pass the same `ruleIndex`
+// used when the session was opened.
 export interface QuorumSessionFinalizeInput {
   programId: Address
   dwallet: Address
@@ -1272,6 +1275,7 @@ export interface QuorumSessionFinalizeInput {
   callerProgram: Address
   dwalletProgram: Address
   initAuthorityHash: Uint8Array
+  ruleIndex: number
   sessionNonce: bigint
   cpiAuthorityBump: number
 }
@@ -1280,13 +1284,16 @@ export async function buildQuorumSessionFinalizeInstruction(
   input: QuorumSessionFinalizeInput,
 ): Promise<Instruction> {
   assertLen(input.initAuthorityHash, 32, 'init_authority_hash')
-  const rule = (await rulePda(input.programId, input.engine, KIND_RECOVERY_K, 0)).address
+  const rule = (
+    await rulePda(input.programId, input.engine, KIND_RECOVERY_K, input.ruleIndex)
+  ).address
   const session = (await quorumSessionPda(input.programId, input.engine, input.sessionNonce))
     .address
   const eventAuth = (await eventAuthorityPda(input.programId)).address
   const data = concat([
     new Uint8Array([POLICY_ENGINE_INSTRUCTION_DISCRIMINATOR.quorumSessionFinalize]),
     input.initAuthorityHash,
+    new Uint8Array([input.ruleIndex]),
     u64LE(input.sessionNonce),
     new Uint8Array([input.cpiAuthorityBump]),
   ])
