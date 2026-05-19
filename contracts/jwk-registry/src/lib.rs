@@ -81,6 +81,19 @@ pub const RSA_EXPONENT: u32 = 65_537;
 pub const MAX_TIMELOCK_SECONDS: u64 = 30 * 24 * 3_600;
 pub const MIN_TIMELOCK_SECONDS: u64 = 3_600;
 pub const MAX_GRACE_SECONDS: u64 = 30 * 24 * 3_600;
+
+/// Mirrors `policy_engine::OIDC_SESSION_TTL_SECONDS`. Sources of drift between
+/// the two crates are caught by the cross-language drift tests + manual review
+/// when either constant changes.
+pub const OIDC_SESSION_TTL_SECONDS: u64 = 600;
+
+/// Audit fix H3 (2026-05-16): minimum `grace_period_post_revoke_seconds`. Set
+/// to `2 ×` the OIDC session TTL so a freshly opened session always lives
+/// shorter than the window during which a revoked slot may not be recycled.
+/// Without this floor an operator could configure e.g. `grace = 60s`, and a
+/// `propose_jwk` would reuse the slot while a sibling `OidcSession` (verified
+/// against the now-revoked modulus) was still live.
+pub const MIN_GRACE_POST_REVOKE_SECONDS: u64 = 2 * OIDC_SESSION_TTL_SECONDS;
 /// Upper bound on `valid_until_ts - now` at activation. The runbook computes
 /// `valid_until_ts ≈ last_seen_in_jwks + max_provider_token_ttl + grace`,
 /// which is on the order of days — never months.
@@ -804,6 +817,7 @@ impl InitRegistry {
             timelock_seconds >= MIN_TIMELOCK_SECONDS
                 && timelock_seconds <= MAX_TIMELOCK_SECONDS
                 && grace_period_seconds <= MAX_GRACE_SECONDS
+                && grace_period_post_revoke_seconds >= MIN_GRACE_POST_REVOKE_SECONDS
                 && grace_period_post_revoke_seconds <= MAX_GRACE_SECONDS,
             JwkRegistryError::InvalidConfig
         );
@@ -993,11 +1007,24 @@ impl AuthorityAction {
         let timelock = u64_to_i64(self.registry.timelock_seconds.into());
         let ready_at = current_ts.saturating_add(timelock);
         if role == ROLE_AUTHORITY {
-            require!(new_key != self.registry.emergency_revoker, JwkRegistryError::InvalidKey);
+            // H4 audit fix (2026-05-16): reject if the proposed authority would
+            // collide with either the current or the pending emergency revoker.
+            // Without this, two concurrent rotations could end at the same key
+            // and collapse role separation (single-key insider compromise).
+            require!(
+                new_key != self.registry.emergency_revoker
+                    && new_key != self.registry.pending_emergency_revoker,
+                JwkRegistryError::InvalidKey
+            );
             self.registry.pending_authority = new_key;
             self.registry.authority_rotation_ready_at = ready_at.into();
         } else {
-            require!(new_key != self.registry.authority, JwkRegistryError::InvalidKey);
+            // H4 audit fix (2026-05-16): symmetric guard for emergency revoker.
+            require!(
+                new_key != self.registry.authority
+                    && new_key != self.registry.pending_authority,
+                JwkRegistryError::InvalidKey
+            );
             self.registry.pending_emergency_revoker = new_key;
             self.registry.emergency_revoker_rotation_ready_at = ready_at.into();
         }
@@ -1119,7 +1146,15 @@ impl PermissionlessAction {
             require!(pending != ZERO_ADDRESS, JwkRegistryError::NoPendingRotation);
             let ready_at: i64 = self.registry.authority_rotation_ready_at.into();
             require!(current_ts >= ready_at, JwkRegistryError::TimelockNotElapsed);
-            require!(pending != self.registry.emergency_revoker, JwkRegistryError::InvalidKey);
+            // H4 audit fix (2026-05-16): a concurrent emergency-revoker
+            // rotation may have proposed the same address after this one was
+            // proposed. Catch both current AND pending collisions at activate
+            // time.
+            require!(
+                pending != self.registry.emergency_revoker
+                    && pending != self.registry.pending_emergency_revoker,
+                JwkRegistryError::InvalidKey
+            );
             self.registry.authority = pending;
             self.registry.pending_authority = ZERO_ADDRESS;
             self.registry.authority_rotation_ready_at = 0i64.into();
@@ -1129,7 +1164,12 @@ impl PermissionlessAction {
             require!(pending != ZERO_ADDRESS, JwkRegistryError::NoPendingRotation);
             let ready_at: i64 = self.registry.emergency_revoker_rotation_ready_at.into();
             require!(current_ts >= ready_at, JwkRegistryError::TimelockNotElapsed);
-            require!(pending != self.registry.authority, JwkRegistryError::InvalidKey);
+            // H4 audit fix (2026-05-16): symmetric guard.
+            require!(
+                pending != self.registry.authority
+                    && pending != self.registry.pending_authority,
+                JwkRegistryError::InvalidKey
+            );
             self.registry.emergency_revoker = pending;
             self.registry.pending_emergency_revoker = ZERO_ADDRESS;
             self.registry.emergency_revoker_rotation_ready_at = 0i64.into();

@@ -1,6 +1,6 @@
 # `andromeda_jwk_registry` — on-chain JWK registry (Quasar program)
 
-Trust root for the **Login Social** feature (`loginsocial.md`, Caminho A). Stores the OIDC RSA signing keys (Google / Apple) — modulus `n` + exponent `e` + validity window — that the `policy-engine` program uses to verify a provider's `id_token` on-chain (`sol_big_mod_exp`) when opening the OIDC primary session (`scheme = 4 = OidcJwt`).
+Trust root for Andromeda's social-login recovery flow. Stores the OIDC RSA signing keys (Google / Apple) — modulus `n` + exponent `e` + validity window — that the `policy-engine` program uses to verify a provider's `id_token` on-chain (`sol_big_mod_exp`) when opening the OIDC primary session (`scheme = 4 = OidcJwt`).
 
 | | |
 |---|---|
@@ -13,7 +13,7 @@ Trust root for the **Login Social** feature (`loginsocial.md`, Caminho A). Store
 
 ---
 
-## Trust model (see `loginsocial.md` §4.1, §8)
+## Trust model
 
 Two **separate** privileged roles, both real Solana transaction signers (this program is ops-facing, not user-facing — there is no challenge/precompile flow):
 
@@ -30,7 +30,7 @@ What a compromised `authority` can do: add a bogus key for a legitimate issuer a
 
 - PDA seeds: `[b"jwk_registry", registry_seed: Address]`. The **canonical** registry (the one `ika-backend` / `policy-engine` / clients pin) uses `registry_seed = <the all-zero Address>`. Non-zero seeds create independent registries (test harnesses, a future "staging" registry); they are isolated and harmless. `ika-backend` reads the resolved address from `IKA_OIDC_JWK_REGISTRY_ADDRESS`.
 - Discriminator `1`. Fixed size (`set_inner`, no `realloc`).
-- Fields: `version`, `entry_count` (slots not `EMPTY`), `authority`, `pending_authority`, `emergency_revoker`, `pending_emergency_revoker`, `timelock_seconds`, `grace_period_seconds`, `grace_period_post_revoke_seconds` (H4 audit fix — minimum delay between `revoke_jwk` and any `propose_jwk` that recycles the same slot; defends against a compromised `authority` resurrecting a slot the `emergency_revoker` just killed), `authority_rotation_ready_at`, `emergency_revoker_rotation_ready_at`, `entries_flat: [u8; MAX_JWKS * JWK_ENTRY_LEN]`.
+- Fields: `version`, `entry_count` (slots not `EMPTY`), `authority`, `pending_authority`, `emergency_revoker`, `pending_emergency_revoker`, `timelock_seconds`, `grace_period_seconds`, `grace_period_post_revoke_seconds` (minimum delay between `revoke_jwk` and any `propose_jwk` that recycles the same slot; floor of 1200s = 2× OIDC session TTL prevents a compromised `authority` from resurrecting a slot the `emergency_revoker` just killed before live sessions expire), `authority_rotation_ready_at`, `emergency_revoker_rotation_ready_at`, `entries_flat: [u8; MAX_JWKS * JWK_ENTRY_LEN]`.
 - `MAX_JWKS = 8`, `JWK_ENTRY_LEN = 400` ⇒ `entries_flat` = 3200 bytes; account ≈ 3.4 KB; rent ≈ 0.025 SOL. `MAX_JWKS` is kept small so the `set_inner` temporary stays well under the 4 KB BPF stack frame. 8 slots cover Google (2–3 keys) + Apple (2–4 keys) on devnet pre-alpha; if it ever gets tight the account can be re-created larger (the watcher alerts on `RegistryFull`).
 - Per-entry layout (within a 400-byte slot, 8-aligned, no padding): `status(1) alg(1) _resv(6) issuer_hash(32) audience_hash(32) kid_hash(32) modulus_n(256, BE) exponent_e(4, u32 LE) _resv(4) proposed_at(8, i64 LE) valid_from(8) valid_until(8) revoked_at(8)`.
 - Entry status: `0 EMPTY · 1 PENDING · 2 ACTIVE · 3 REVOKED · 4 EXPIRED`. A `REVOKED` or `EXPIRED` slot is recyclable by a future `propose_jwk` (which abruptly invalidates any session that still referenced the old `(issuer, audience, kid)` triple — by design; sessions are ≤ 10 min and only past-grace/revoked keys get recycled).
@@ -41,14 +41,14 @@ What a compromised `authority` can do: add a bogus key for a legitimate issuer a
 
 | Disc | Name | Signer(s) | Effect |
 |---|---|---|---|
-| 0 | `init_registry(registry_seed, authority, emergency_revoker, timelock_seconds, grace_period_seconds, grace_period_post_revoke_seconds)` | `payer` + `authority` (co-signs to prove consent / prevent PDA squat) | Create the registry. `timelock_seconds ≤ 30d`, `grace_period_seconds ≤ 30d`, `grace_period_post_revoke_seconds ≤ 30d`, `authority ≠ emergency_revoker`, neither zero. Devnet runbook: 7d post-revoke; mainnet: 30d. |
-| 1 | `propose_jwk(registry_seed, issuer_hash, audience_hash, kid_hash, alg, modulus_n[256], exponent_e)` | `payer` + `authority` | Add a PENDING entry. Rejects: `alg ≠ RS256`; modulus not a full odd 2048-bit value (`n[0] & 0x80 != 0 && n[255] & 1 == 1`); `exponent_e ≠ 65537`; an entry for this triple already exists in any non-EMPTY status; no free slot AND the only recyclable slots are REVOKED still inside the `grace_period_post_revoke_seconds` window (returns `RevokeGraceNotElapsed`). EXPIRED slots are preferred over REVOKED ones, so an emergency revoke blocks recycling for the full post-revoke grace even when other recyclable slots exist. |
+| 0 | `init_registry(registry_seed, authority, emergency_revoker, timelock_seconds, grace_period_seconds, grace_period_post_revoke_seconds)` | `payer` + `authority` (co-signs to prove consent / prevent PDA squat) | Create the registry. `timelock_seconds ≤ 30d`, `grace_period_seconds ≤ 30d`, `1200s ≤ grace_period_post_revoke_seconds ≤ 30d` (lower bound = `2 × OIDC_SESSION_TTL` so a revoked slot can never be recycled while a session opened against the old modulus is still live), `authority ≠ emergency_revoker`, neither zero. Devnet runbook: 7d post-revoke; mainnet: 30d. |
+| 1 | `propose_jwk(registry_seed, issuer_hash, audience_hash, kid_hash, alg, modulus_n[256], exponent_e)` | `payer` + `authority` | Add a PENDING entry. Rejects: `alg ≠ RS256`; modulus not a full odd 2048-bit value (`n[0] & 0x80 != 0 && n[255] & 1 == 1`); `exponent_e ≠ 65537`; an entry for this triple already exists in any non-EMPTY status; no free slot AND the only recyclable slots are REVOKED still inside the `grace_period_post_revoke_seconds` window (returns `RevokeGraceNotElapsed`). EXPIRED slots are preferred over REVOKED ones, so an emergency revoke blocks recycling for the full post-revoke grace even when other recyclable slots exist. **Operational requirement:** the on-chain program accepts the 32-byte SHA-256 hashes opaquely. The gateway / watcher MUST validate `issuer_hash == sha256(iss)`, `audience_hash == sha256(aud)`, `kid_hash == sha256(kid)` against the actual JWKS values before submitting; a bug here detaches the registry entry from any provider and is invisible to on-chain checks. |
 | 2 | `activate_jwk(registry_seed, issuer_hash, audience_hash, kid_hash, valid_until_ts)` | `payer` + `authority` | PENDING → ACTIVE. Requires `now ≥ proposed_at + timelock_seconds`; `now < valid_until_ts ≤ now + 30d`. Sets `valid_from = now`, `valid_until = valid_until_ts`. |
 | 3 | `revoke_jwk(registry_seed, issuer_hash, audience_hash, kid_hash)` | `payer` + (`authority` **or** `emergency_revoker`) | PENDING/ACTIVE → REVOKED, `revoked_at = now`. Immediate; ignores grace. |
 | 4 | `expire_jwk(registry_seed, issuer_hash, audience_hash, kid_hash)` | `payer` (permissionless) | ACTIVE → EXPIRED. Requires `now > valid_until + grace_period_seconds`. Cleanup; the slot becomes recyclable. |
 | 5 | `bootstrap_jwk(registry_seed, issuer_hash, audience_hash, kid_hash, alg, modulus_n[256], exponent_e, valid_until_ts)` | `payer` + `authority` | **Genesis only:** insert the first key directly as ACTIVE, skipping the timelock. Requires `entry_count == 0`. Production should prefer `propose_jwk` + (timelock) + `activate_jwk`; this exists so devnet does not have to wait the timelock for the very first key. Emits `JwkProposed` + `JwkActivated`. |
-| 6 | `rotate_role(registry_seed, role, new_key)` | `payer` + `authority` | `role`: `0 = authority`, `1 = emergency_revoker`. Sets `pending_*` + `*_rotation_ready_at = now + timelock_seconds`. `new_key` must be non-zero and not equal the other role. |
-| 7 | `activate_role_rotation(registry_seed, role)` | `payer` (permissionless) | Finalize a pending rotation once `now ≥ *_rotation_ready_at`. Re-checks role non-collision. |
+| 6 | `rotate_role(registry_seed, role, new_key)` | `payer` + `authority` | `role`: `0 = authority`, `1 = emergency_revoker`. Sets `pending_*` + `*_rotation_ready_at = now + timelock_seconds`. `new_key` must be non-zero and must not equal either the current OR the pending value of the other role (blocks two concurrent rotations from collapsing both roles to the same key). |
+| 7 | `activate_role_rotation(registry_seed, role)` | `payer` (permissionless) | Finalize a pending rotation once `now ≥ *_rotation_ready_at`. Re-checks role non-collision against current + pending values of the sibling role. |
 | 8 | `cancel_role_rotation(registry_seed, role)` | `payer` + `authority` | Clear a pending rotation. |
 
 **Account slices** (in order):
@@ -68,11 +68,7 @@ On devnet the single ops key is both `authority`/`revoker` and `payer` — pass 
 ## Companion / consumers
 
 - `jwk-rotator/` — the off-chain watcher: fetches Google/Apple JWKS, diffs vs. on-chain, `propose_jwk`s new keys, alerts ops. Never activates.
-- `docs/RUNBOOK_JWK_ROTATION.md` — normal rotation + emergency revoke runbook (how `valid_until_ts` is computed, when to recycle, fast activation).
 - `scripts/test_jwk_registry.go` — devnet integration test (init → bootstrap/propose → activate → revoke → expire → role rotation), analogous to the other `scripts/test_*.go`. Run **after** deploy.
-- `contracts/oidc-verifier/` (Fase 2) — re-derives `sha256(iss)/sha256(aud)/sha256(kid)` from the JWT and looks up the ACTIVE entry; mirrors the strict RSA-2048/RS256 profile check.
+- `contracts/oidc-verifier/` — re-derives `sha256(iss)/sha256(aud)/sha256(kid)` from the JWT and looks up the ACTIVE entry; mirrors the strict RSA-2048/RS256 profile check.
 - `contracts/policy-engine/` — the OIDC session-open handler reads the ACTIVE entry's `n`/`e`; the per-use OIDC primary handler re-checks the entry is still ACTIVE on every signature use.
 
-## Security audit
-
-Required before deploy — see `docs/AUDIT_CHECKLIST_OIDC.md` §1. Focus: authority/emergency_revoker separation, timelock not bypassable for ACTIVE keys, status state machine, slot recycling vs. live sessions, RSA profile validation, arithmetic overflow on timestamps.
