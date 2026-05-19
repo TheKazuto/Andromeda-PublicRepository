@@ -70,6 +70,15 @@ pub const MAX_TOKEN_LIFETIME_SECONDS: i64 = 4 * 3600;
 /// Length of the canonical base64url-no-pad `oidc_nonce` (32 bytes → 43 chars).
 pub const OIDC_NONCE_B64_LEN: usize = 43;
 
+/// M3 audit fix (2026-05-16): minimum claim lengths. Real OIDC providers never
+/// emit single-character `sub`/`iss`/`aud` — Google `sub` is ~21 digits, Apple
+/// `sub` ~36, and any `iss` starts with `https://` (≥8 chars). Rejecting
+/// pathologically short claims shrinks the surface for crafted tokens without
+/// constraining legitimate ones.
+pub const MIN_ISS_LEN: usize = 8;
+pub const MIN_AUD_LEN: usize = 4;
+pub const MIN_SUB_LEN: usize = 6;
+
 // ── Public types ───────────────────────────────────────────────
 
 #[derive(Clone, Copy)]
@@ -93,6 +102,24 @@ pub struct VerifyOidcInput<'a> {
     pub nonce_randomness: &'a [u8; 32],
     /// `Clock` sysvar timestamp.
     pub now_unix_ts: i64,
+}
+
+/// L5 audit fix (2026-05-16): manual `Debug` that REDACTS the raw JWT and the
+/// nonce randomness so a stray `{:?}` in upstream host code (gateway logs,
+/// ika-backend traces) cannot leak the token or the unhashed seed.
+impl<'a> core::fmt::Debug for VerifyOidcInput<'a> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("VerifyOidcInput")
+            .field("jwt", &format_args!("[REDACTED {} bytes]", self.jwt.len()))
+            .field("modulus_n_len", &self.modulus_n.len())
+            .field("exponent_e", &self.exponent_e)
+            .field("allowed_issuers_count", &self.allowed_issuers.len())
+            .field("allowed_audiences_count", &self.allowed_audiences.len())
+            .field("not_after_unix_ts", &self.not_after_unix_ts)
+            .field("nonce_randomness", &"[REDACTED 32 bytes]")
+            .field("now_unix_ts", &self.now_unix_ts)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -204,11 +231,25 @@ pub fn verify(input: VerifyOidcInput<'_>) -> Result<ParsedOidc, OidcVerifyError>
     let header = claims::parse_header(hdr)?;
     let cl = claims::parse_claims(pl)?;
 
-    // 4. issuer / audience allowlist (exact comparisons against a constant set).
-    if !contains_exact(input.allowed_issuers, cl.iss) {
+    // M3 audit fix (2026-05-16): reject pathologically short claims. Real
+    // providers never emit them; rejecting tightens the surface for crafted
+    // tokens that pair short values with chosen issuer/audience entries.
+    if cl.iss.len() < MIN_ISS_LEN
+        || cl.aud.len() < MIN_AUD_LEN
+        || cl.sub.len() < MIN_SUB_LEN
+    {
+        return Err(E::MalformedClaims);
+    }
+
+    // 4. issuer / audience allowlist (constant-flow comparisons against a
+    // constant set — see M5 audit fix). `iss` / `aud` are public values that
+    // come from the JWT, so the practical timing leak is minimal, but the
+    // verify path runs on attacker-controlled bytes overall and the helper
+    // costs no extra CU above the noise.
+    if !contains_exact_ct(input.allowed_issuers, cl.iss) {
         return Err(E::IssuerNotAllowed);
     }
-    if !contains_exact(input.allowed_audiences, cl.aud) {
+    if !contains_exact_ct(input.allowed_audiences, cl.aud) {
         return Err(E::AudienceNotAllowed);
     }
 
@@ -216,7 +257,11 @@ pub fn verify(input: VerifyOidcInput<'_>) -> Result<ParsedOidc, OidcVerifyError>
     let h = hash::sha256(seg.signing_input);
     let jwt_digest = h;
     let expected_em = pkcs1::build_em_sha256(&h);
-    let recovered = pkcs1::rsa2048_modexp(&sig_buf, &modulus);
+    // L4 audit fix (2026-05-16): `rsa2048_modexp` now signals "feature OFF"
+    // explicitly. Pre-fix this was a 0xFF sentinel that happened to fail
+    // `eq_256`; explicit error means a future PKCS#1 refactor cannot turn
+    // "reject all" into "accept all".
+    let recovered = pkcs1::rsa2048_modexp(&sig_buf, &modulus)?;
     if !pkcs1::eq_256(&recovered, &expected_em) {
         return Err(E::BadSignature);
     }
@@ -285,9 +330,25 @@ pub fn recompute_oidc_nonce(eph_pk: &[u8; 32], not_after_unix_ts: u64, nonce_ran
 
 // ── small helpers ──────────────────────────────────────────────
 
+/// M5 audit fix (2026-05-16): constant-flow allowlist membership. No early
+/// return on a hit and no early return inside the per-element compare, so
+/// neither the matched index nor the position of the first differing byte
+/// leaks via timing.
 #[inline]
-fn contains_exact(set: &[&[u8]], v: &[u8]) -> bool {
-    set.iter().any(|&e| e == v)
+fn contains_exact_ct(set: &[&[u8]], v: &[u8]) -> bool {
+    let mut found: u8 = 0;
+    for e in set {
+        let len_eq: u8 = if e.len() == v.len() { 1 } else { 0 };
+        let mut diff: u8 = 0;
+        let n = e.len().min(v.len());
+        for i in 0..n {
+            diff |= e[i] ^ v[i];
+        }
+        // 1 iff (len_eq == 1) AND (diff == 0).
+        let diff_zero = (((diff as u16).wrapping_sub(1) >> 8) as u8) & 1;
+        found |= len_eq & diff_zero;
+    }
+    found == 1
 }
 
 /// Constant-time slice equality (assumes equal lengths — caller MUST check

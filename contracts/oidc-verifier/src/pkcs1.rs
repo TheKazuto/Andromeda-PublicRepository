@@ -40,12 +40,19 @@ pub fn build_em_sha256(h: &[u8; 32]) -> [u8; RSA_BYTES] {
 
 /// `a == b` over all 256 bytes, accumulating differences (no data-dependent
 /// branch, no early return).
+///
+/// M4 audit fix (2026-05-16): the final equality is now branchless. The XOR
+/// accumulation was already constant-time, but the trailing `diff == 0` was a
+/// compiler-visible branch on a secret-tainted byte. Result: a 0/1 bool
+/// derived via `(diff.wrapping_sub(1) >> 8) & 1` — purely arithmetic.
 pub fn eq_256(a: &[u8; RSA_BYTES], b: &[u8; RSA_BYTES]) -> bool {
-    let mut diff = 0u8;
+    let mut diff: u8 = 0;
     for i in 0..RSA_BYTES {
         diff |= a[i] ^ b[i];
     }
-    diff == 0
+    // 0 ⇒ true (1), anything else ⇒ false (0). Underflow on 0 wraps to 0xFF…;
+    // shifting the top bit of the u16 result into bit 0 yields exactly that.
+    (((diff as u16).wrapping_sub(1) >> 8) as u8) & 1 == 1
 }
 
 /// `a < b` for two equal-length big-endian byte strings (used to reject a
@@ -86,10 +93,13 @@ pub fn lt_be(a: &[u8], b: &[u8]) -> bool {
 //
 // SBF code paths are gated on the `oidc-rsa` cargo feature. When OFF (e.g.
 // when targeting a Solana cluster where the `sol_big_mod_exp` feature gate
-// is not yet active), `rsa2048_modexp` returns a sentinel buffer of all
-// `0xFF` bytes — the canonical EMSA-PKCS1-v1_5 encoded message starts with
-// `0x00 0x01`, so the constant-time `eq_256` comparison will never match,
-// making every RSA verify reject. Login Social via OIDC is unavailable
+// is not yet active), `rsa2048_modexp` now returns an explicit error
+// (`OidcVerifyError::BadSignature`) rather than a 0xFF sentinel buffer —
+// L4 audit fix (2026-05-16). The previous sentinel design was "rejects all
+// inputs, by accident, because the PKCS#1 padding check downstream
+// happens to fail." A future refactor that changes the PKCS#1 layout
+// (e.g. PSS) would silently turn into "accepts all inputs." Explicit
+// `Err` removes that footgun. Login Social via OIDC remains unavailable
 // until the syscall lights up and the program is redeployed with the
 // feature on.
 
@@ -110,7 +120,13 @@ extern "C" {
 }
 
 /// `recovered = base^65537 mod modulus`, all big-endian, all exactly 256 bytes.
-pub fn rsa2048_modexp(base: &[u8; RSA_BYTES], modulus: &[u8; RSA_BYTES]) -> [u8; RSA_BYTES] {
+///
+/// Returns `Err(OidcVerifyError::BadSignature)` when built with `oidc-rsa` off
+/// on Solana — see L4 audit fix above.
+pub fn rsa2048_modexp(
+    base: &[u8; RSA_BYTES],
+    modulus: &[u8; RSA_BYTES],
+) -> Result<[u8; RSA_BYTES], crate::OidcVerifyError> {
     let mut result = [0u8; RSA_BYTES];
     #[cfg(all(target_os = "solana", feature = "oidc-rsa"))]
     {
@@ -129,16 +145,9 @@ pub fn rsa2048_modexp(base: &[u8; RSA_BYTES], modulus: &[u8; RSA_BYTES]) -> [u8;
     }
     #[cfg(all(target_os = "solana", not(feature = "oidc-rsa")))]
     {
-        // Stub: every byte is 0xFF, so the EMSA-PKCS1-v1_5 expected block
-        // (which starts with 0x00 0x01) never matches. RSA verification
-        // always rejects — Login Social via OIDC is unavailable until the
-        // program is rebuilt with `oidc-rsa` on. `base` / `modulus` are
-        // marked as deliberately unused.
-        let _ = base;
-        let _ = modulus;
-        for slot in result.iter_mut() {
-            *slot = 0xFF;
-        }
+        // L4 audit fix (2026-05-16): explicit error instead of sentinel.
+        let _ = (base, modulus, result);
+        return Err(crate::OidcVerifyError::BadSignature);
     }
     #[cfg(not(target_os = "solana"))]
     {
@@ -153,5 +162,5 @@ pub fn rsa2048_modexp(base: &[u8; RSA_BYTES], modulus: &[u8; RSA_BYTES]) -> [u8;
         let n = r.len().min(RSA_BYTES);
         result[RSA_BYTES - n..].copy_from_slice(&r[r.len() - n..]);
     }
-    result
+    Ok(result)
 }

@@ -399,6 +399,11 @@ pub fn parse_claims(payload_json: &[u8]) -> Result<JwtClaims<'_>, OidcVerifyErro
                 if key_bs {
                     return Err(E_CLAIMS);
                 }
+                // M2 audit fix (2026-05-16): skip whitespace before the array
+                // sniff so a payload like `"aud" : [...]` is rejected here
+                // explicitly (E_CLAIMS) instead of falling through to a less
+                // specific `take_string` failure path.
+                s.skip_ws();
                 // MVP: only a string `aud`. An array (or object) `aud` is out of scope.
                 if s.peek() == Some(b'[') {
                     return Err(E_CLAIMS);
