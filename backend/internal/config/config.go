@@ -44,8 +44,8 @@ type Config struct {
 	// it both defences degrade to per-replica memory and a multi-replica
 	// deploy can be brute-forced or replay-attacked. In development the
 	// service still boots with an empty URL and warns.
-	RedisURL           string
-	RateLimitFailOpen  bool
+	RedisURL          string
+	RateLimitFailOpen bool
 	// Trusted reverse proxies whose X-Forwarded-For we honor. Empty (the
 	// default) means the auth limiter uses the direct peer IP — safe
 	// behind Railway + Cloudflare, where the platform already injects
@@ -102,9 +102,9 @@ func Load() *Config {
 		SMTPPassword:        getenv("SMTP_PASSWORD", ""),
 		SMTPFrom:            getenv("SMTP_FROM", ""),
 
-		RedisURL:               getenv("REDIS_URL", ""),
-		RateLimitFailOpen:      strings.EqualFold(getenv("RATE_LIMIT_FAIL_OPEN", ""), "true"),
-		TrustedProxies:         splitCSV(getenv("TRUSTED_PROXIES", "")),
+		RedisURL:          getenv("REDIS_URL", ""),
+		RateLimitFailOpen: strings.EqualFold(getenv("RATE_LIMIT_FAIL_OPEN", ""), "true"),
+		TrustedProxies:    splitCSV(getenv("TRUSTED_PROXIES", "")),
 
 		AdminJWTSecret:         getenv("ADMIN_JWT_SECRET", ""),
 		AdminToken:             getenv("ADMIN_TOKEN", ""),
@@ -179,15 +179,6 @@ func Load() *Config {
 func getenv(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
-	}
-	return fallback
-}
-
-func getenvInt(key string, fallback int) int {
-	if v := os.Getenv(key); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			return n
-		}
 	}
 	return fallback
 }
