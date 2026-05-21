@@ -136,6 +136,7 @@ pub const OP_ADD_FHE_GATED: &[u8] = b"add-rule-fhe-gated";
 pub const OP_ADD_SESSION_KEY: &[u8] = b"add-rule-session-key";
 pub const OP_ADD_RECOVERY: &[u8] = b"add-rule-recovery";
 pub const OP_UPDATE_ALLOWLIST: &[u8] = b"update-rule-allowlist";
+pub const OP_ORACLE_ADD_FEED: &[u8] = b"oracle-add-feed";
 pub const OP_UPDATE_RECOVERY: &[u8] = b"update-rule-recovery";
 pub const OP_UPDATE_FHE_AUTH: &[u8] = b"update-rule-fhe-authorities";
 pub const OP_REMOVE_RULE: &[u8] = b"remove-rule";
@@ -701,7 +702,18 @@ pub const MAX_FHE_AUTHORITIES: usize = 4;
 // Both lists are `&[]` placeholders in devnet builds. Adding the
 // `mainnet` cargo feature enforces non-empty content via a `const assert!`
 // at compile time so deploys cannot accidentally ship a permissive list.
-pub const ALLOWED_ORACLE_OWNERS: &[Address] = &[];
+/// The Andromeda Pyth adapter program
+/// (`A6xjw8jkJTFjpjHCRSFxVt1d1KbBZdh3XBNYvTfLZxP2`). It owns every `FeedCache`
+/// PDA a `KIND_ORACLE` rule may reference, normalising Pyth `PriceUpdateV2`
+/// into the canonical 64-byte view. Do NOT add the Pyth receiver itself
+/// (`rec5EKMG…`) — its `PriceUpdateV2` layout ≠ the canonical view, so the
+/// dispatch would read corrupt price/conf/publish_time offsets.
+pub const PYTH_ADAPTER_PROGRAM_ID: Address = Address::new_from_array([
+    135, 64, 28, 176, 14, 200, 192, 16, 202, 65, 97, 239, 13, 84, 132, 89, 56, 19, 27, 2, 163, 5,
+    112, 210, 201, 183, 192, 117, 23, 36, 210, 169,
+]);
+
+pub const ALLOWED_ORACLE_OWNERS: &[Address] = &[PYTH_ADAPTER_PROGRAM_ID];
 pub const ALLOWED_FHE_AUTHORITIES: &[Address] = &[];
 
 #[cfg(feature = "mainnet")]
@@ -3645,6 +3657,175 @@ mod policy_engine_program {
         Ok(())
     }
 
+    /// Disc 122 — `update_rule_oracle_add_feed` (F5c).
+    ///
+    /// Appends one Pyth feed to an existing `KIND_ORACLE` rule:
+    ///   `feed_account` — the adapter `FeedCache` PDA (`[b"feed_cache", feed_id]`)
+    ///   `feed_owner`   — the Pyth adapter program id (must be in
+    ///                    `ALLOWED_ORACLE_OWNERS`, mirrors the H1 dispatch check)
+    ///   `min_q64`/`max_q64` — canonical 1e8 price band (`min <= max`).
+    ///
+    /// Owner-signed `OP_ORACLE_ADD_FEED` challenge; structurally identical to
+    /// disc 120 (allowlist add-destination). Idempotent on `feed_account`. The
+    /// `add_rule_oracle` (disc 13) creates the rule with `feeds_count = 0`; a
+    /// rule with zero feeds enforces nothing, so this is the instruction that
+    /// makes a `KIND_ORACLE` rule actually gate signing.
+    #[instruction(discriminator = 122)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_rule_oracle_add_feed(
+        ctx: Ctx<UpdateRuleOracle>,
+        _init_authority_hash: Address,
+        expected_nonce: u64,
+        _rule_index: u8,
+        feed_account: [u8; 32],
+        feed_owner: [u8; 32],
+        min_q64: i64,
+        max_q64: i64,
+    ) -> Result<(), ProgramError> {
+        let current_ts: i64 = ctx.accounts.clock.unix_timestamp.into();
+        let engine_addr = *ctx.accounts.engine.address();
+        let dwallet_addr = *ctx.accounts.dwallet_account.address();
+        let owner_slot = ctx.accounts.engine.owner_slot;
+        let on_chain_nonce: u64 = ctx.accounts.engine.next_admin_nonce.into();
+
+        // Validate rule header is consistent with engine's RuleEntry snapshot.
+        let header_kind = ctx.accounts.rule_pda.kind;
+        let header_index = ctx.accounts.rule_pda.index;
+        let header_enabled = ctx.accounts.rule_pda.enabled;
+        let header_gen: u32 = ctx.accounts.rule_pda.generation.into();
+        require!(header_kind == KIND_ORACLE, PolicyEngineError::InvalidRuleKind);
+        require!(header_enabled == 1, PolicyEngineError::RuleDisabled);
+        let entry = read_rule_entry(&ctx.accounts.engine.rules_flat, header_index as usize);
+        require!(
+            entry.kind == header_kind && entry.generation == header_gen,
+            PolicyEngineError::InvalidRuleHeader
+        );
+
+        // Band sanity — an inverted band would reject every price (footgun).
+        require!(min_q64 <= max_q64, PolicyEngineError::OracleOutOfBand);
+
+        // H1 defense-in-depth: only platform adapter owners may back a feed.
+        // Mirrors the dispatch-time `is_oracle_owner_allowed` check so a feed
+        // that would always fail at signing time cannot even be registered.
+        require!(
+            is_oracle_owner_allowed(&feed_owner),
+            PolicyEngineError::OracleOwnerMismatch
+        );
+
+        let count: u8 = ctx.accounts.rule_pda.feeds_count;
+        require!(
+            (count as usize) < MAX_ORACLE_FEEDS,
+            PolicyEngineError::TooManyRules
+        );
+
+        // Idempotent: if feed_account already present, succeed without bumping.
+        for i in 0..(count as usize) {
+            let off = i * ORACLE_FEED_BYTES;
+            if ctx.accounts.rule_pda.feeds_flat[off..off + 32] == feed_account {
+                return Ok(());
+            }
+        }
+
+        let mut human_buf = [0u8; MAX_HUMAN_MESSAGE_BYTES];
+        let human_len = human_message::oracle_add_feed_message(
+            &mut human_buf,
+            &feed_account,
+            &feed_owner,
+            min_q64,
+            max_q64,
+            &engine_addr,
+            &dwallet_addr,
+        )
+        .map_err(PolicyEngineError::from)?;
+        let human = &human_buf[..human_len];
+
+        let new_gen = header_gen.saturating_add(1);
+        let gen_le = new_gen.to_le_bytes();
+        let min_le = min_q64.to_le_bytes();
+        let max_le = max_q64.to_le_bytes();
+        let challenge = admin_challenge(
+            OP_ORACLE_ADD_FEED,
+            human,
+            &engine_addr,
+            &dwallet_addr,
+            KIND_ORACLE,
+            header_index,
+            new_gen,
+            on_chain_nonce,
+            &[0u8; 32], // recomputed config_hash carried via extras for visibility.
+            &owner_slot,
+            &[&feed_account, &feed_owner, &min_le, &max_le, &gen_le],
+        );
+
+        check_sysvar_addr(ctx.accounts.instructions_sysvar.address())?;
+        let sysvar_view = ctx.accounts.instructions_sysvar.to_account_view();
+        let sysvar_data_ref = sysvar_view
+            .try_borrow()
+            .map_err(|_| PolicyEngineError::AuthFailed)?;
+        let new_nonce = verify_owner_admin(
+            expected_nonce,
+            on_chain_nonce,
+            &owner_slot,
+            &challenge,
+            &sysvar_data_ref,
+        )
+        .map_err(PolicyEngineError::from)?;
+        drop(sysvar_data_ref);
+
+        // Append feed.
+        let off = (count as usize) * ORACLE_FEED_BYTES;
+        ctx.accounts.rule_pda.feeds_flat[off..off + 32].copy_from_slice(&feed_account);
+        ctx.accounts.rule_pda.feeds_flat[off + 32..off + 64].copy_from_slice(&feed_owner);
+        ctx.accounts.rule_pda.feeds_flat[off + 64..off + 72].copy_from_slice(&min_le);
+        ctx.accounts.rule_pda.feeds_flat[off + 72..off + 80].copy_from_slice(&max_le);
+        ctx.accounts.rule_pda.feeds_count = count + 1;
+        ctx.accounts.rule_pda.generation = new_gen.into();
+
+        // Recompute config_hash to mirror the new state.
+        let applies_b = [ctx.accounts.rule_pda.config_applies_to];
+        let new_count = [count + 1];
+        let fresh_b = [ctx.accounts.rule_pda.freshness_seconds_div16];
+        let conf_b = [ctx.accounts.rule_pda.min_confidence_bps_div4];
+        let new_hash = hashv(&[
+            b"oracle-config-v1",
+            &applies_b,
+            &new_count,
+            &fresh_b,
+            &conf_b,
+            &ctx.accounts.rule_pda.feeds_flat,
+        ]);
+        ctx.accounts.rule_pda.config_hash = new_hash;
+
+        // Mirror into RuleEntry.
+        let mut entry = entry;
+        entry.generation = new_gen;
+        entry.config_hash = new_hash;
+        write_rule_entry(
+            &mut ctx.accounts.engine.rules_flat,
+            header_index as usize,
+            &entry,
+        );
+        ctx.accounts.engine.next_admin_nonce = new_nonce.into();
+        let cur_egen: u32 = ctx.accounts.engine.rules_generation.into();
+        ctx.accounts.engine.rules_generation = cur_egen
+            .checked_add(1)
+            .ok_or(PolicyEngineError::TooManyRules)?
+            .into();
+
+        ctx.accounts.program.emit_event(
+            &RuleUpdated {
+                engine: engine_addr,
+                ts: current_ts,
+                kind: KIND_ORACLE as u64,
+                rule_index: header_index as u64,
+                generation: new_gen as u64,
+            },
+            &ctx.accounts.event_authority,
+            EventAuthority::BUMP,
+        )?;
+        Ok(())
+    }
+
     /// Disc 126 — `update_rule_fhe_gated_authorities` (C2 audit fix).
     ///
     /// Replaces the FHE authority list of a `KIND_FHE_GATED` rule in one
@@ -6379,6 +6560,33 @@ pub struct UpdateRuleFheGated {
         rule_index
     ))]
     pub rule_pda: Account<FheGatedRule>,
+
+    #[account(mut)]
+    pub payer: Signer,
+
+    pub instructions_sysvar: UncheckedAccount,
+    pub clock: Sysvar<Clock>,
+    pub system_program: Program<SystemProgram>,
+    pub event_authority: EventAuthority,
+    pub program: Program<PolicyEngineProgram>,
+}
+
+#[derive(Accounts)]
+#[instruction(init_authority_hash: Address, _expected_nonce: u64, rule_index: u8)]
+pub struct UpdateRuleOracle {
+    pub dwallet_account: UncheckedAccount,
+
+    #[account(mut, address = PolicyEngine::seeds(
+        dwallet_account.address(),
+        &init_authority_hash
+    ))]
+    pub engine: Account<PolicyEngine>,
+
+    #[account(mut, address = OracleRule::seeds(
+        engine.address(),
+        rule_index
+    ))]
+    pub rule_pda: Account<OracleRule>,
 
     #[account(mut)]
     pub payer: Signer,
