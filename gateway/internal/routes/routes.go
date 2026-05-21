@@ -224,6 +224,19 @@ var All = []Route{
 	{Method: "POST", Path: "/v1/policy/passkey/use/challenge", Upstream: UpstreamLocal, Local: true, Key: "policy.engine.passkey.use.challenge", RateClass: RateClassRead},
 	{Method: "POST", Path: "/v1/policy/passkey/use/submit", Upstream: UpstreamLocal, Local: true, Key: "policy.engine.passkey.use.submit", Idempotent: true, RequiresIdempotencyKey: true, RateClass: RateClassTx, TimeoutSeconds: 60},
 	{Method: "POST", Path: "/v1/policy/passkey/session/close", Upstream: UpstreamLocal, Local: true, Key: "policy.engine.passkey.close", Idempotent: true, RequiresIdempotencyKey: true, RateClass: RateClassTx},
+
+	// --- Oracle price triggers (local; F7.5 managed Pyth keeper) --------------
+	// `Local: true`, so registerProxyRoute() skips them; the oraclemonitor
+	// service mounts the handlers under the same paths (internal/oraclemonitor
+	// MountRoutes), gated by the tenant API key + ScopeWrite. Catalogue entries
+	// exist so pricing, OpenAPI 3.1 and the MCP tool registry see the
+	// price-trigger surface like any other route. Arming a trigger schedules a
+	// gas-sponsored request_signature when the price band holds; idempotency is
+	// mandatory on arm/cancel so a client retry can't double-arm.
+	{Method: "POST", Path: "/v1/oracle/triggers", Upstream: UpstreamLocal, Local: true, Key: "oracle.triggers.arm", Idempotent: true, RequiresIdempotencyKey: true, RateClass: RateClassTx},
+	{Method: "GET", Path: "/v1/oracle/triggers", Upstream: UpstreamLocal, Local: true, Key: "oracle.triggers.list", RateClass: RateClassRead},
+	{Method: "GET", Path: "/v1/oracle/triggers/{id}", Upstream: UpstreamLocal, Local: true, Key: "oracle.triggers.get", RateClass: RateClassRead},
+	{Method: "DELETE", Path: "/v1/oracle/triggers/{id}", Upstream: UpstreamLocal, Local: true, Key: "oracle.triggers.cancel", Idempotent: true, RequiresIdempotencyKey: true, RateClass: RateClassTx},
 }
 
 // EffectiveRateClass returns r.RateClass with a default of "tx" when
