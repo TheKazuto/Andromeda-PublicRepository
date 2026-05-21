@@ -10,7 +10,7 @@
   <p>
     <img src="https://img.shields.io/badge/license-Apache--2.0%20OR%20MIT-blue.svg" alt="License" />
     <img src="https://img.shields.io/badge/status-devnet%20pre--alpha-orange.svg" alt="Status" />
-    <img src="https://img.shields.io/badge/Solana%20programs-3-9945ff.svg" alt="Solana programs" />
+    <img src="https://img.shields.io/badge/Solana%20programs-4-9945ff.svg" alt="Solana programs" />
     <img src="https://img.shields.io/badge/MCP-tools%20auto--generated-7c3aed.svg" alt="MCP" />
     <img src="https://img.shields.io/badge/OpenAPI-3.1-6BA539.svg" alt="OpenAPI" />
   </p>
@@ -37,7 +37,7 @@ Andromeda removes all of that. You call an HTTPS endpoint. We run the engines, t
 
 ### Built on Ika + Encrypt
 
-Andromeda doesn't reimplement the cryptography; it wraps it. Ika provides the 2PC-MPC dWallets; Encrypt provides the FHE evaluation; Andromeda provides everything around them: 3 audited Solana programs (the PolicyEngine v3 unifies all rule kinds in one program, plus the `jwk-registry` and `oidc-verifier` libraries that back Login Social), gas sponsorship, MCP, HMAC-signed webhooks, an externally verifiable ed25519 audit log, and OpenAPI 3.1. The hard cryptographic guarantees come from those networks; the developer experience comes from us.
+Andromeda doesn't reimplement the cryptography; it wraps it. Ika provides the 2PC-MPC dWallets; Encrypt provides the FHE evaluation; Andromeda provides everything around them: 4 Solana programs (the PolicyEngine v3 unifies all rule kinds in one program, plus the `jwk-registry` and `oidc-verifier` that back Login Social, and the `pyth-adapter` that bridges Pyth price feeds into the oracle rule), gas sponsorship, MCP, HMAC-signed webhooks, an externally verifiable ed25519 audit log, and OpenAPI 3.1. The hard cryptographic guarantees come from those networks; the developer experience comes from us.
 
 Reference docs: [Ika](https://docs.ika.xyz/) · [Encrypt](https://docs.encrypt.xyz/).
 
@@ -98,6 +98,7 @@ Capabilities beyond the core Ika and Encrypt primitives: the surrounding product
 
 ### On-chain awareness + future-sign
 - **Webhook-driven Future-Sign.** Arm a trigger (oracle / slot / event / external webhook), Andromeda fires the signature when the condition matches.
+- **Oracle price triggers (managed).** Arm a stop-loss / take-profit and Andromeda watches the live Pyth price, firing the pre-built `request_signature` when the band holds, gas-sponsored, with no SOL and no bot to run. The on-chain `KIND_ORACLE` rule re-checks the real price, so the monitor can never sign outside the band. Backed by the `pyth-adapter` program; feed freshness is sponsored (refresh-on-sign).
 - **IDL-aware Solana listener.** Websocket subscription that parses the 6 canonical Andromeda events and 4 Anchor self-CPI events from Ika, fanning out to per-tenant webhooks.
 - **HMAC-signed webhook system.** Replay-protected (5-minute window), retries with backoff, dead-letter queue.
 
@@ -149,9 +150,9 @@ Capabilities beyond the core Ika and Encrypt primitives: the surrounding product
 
      ┌────────────────────────────────────────────────────┐
      │  Solana devnet: PolicyEngine v3 + jwk-registry +   │
-     │  oidc-verifier. Hold dWallet authority, validate   │
-     │  every signature via runtime precompiles (zero     │
-     │  attestor).                                        │
+     │  oidc-verifier + pyth-adapter (oracle). Hold       │
+     │  dWallet authority; every signature is checked via │
+     │  runtime precompiles (zero attestor).              │
      └────────────────────────────────────────────────────┘
                           ▲
                           │ propose_jwk (authority)
@@ -165,7 +166,7 @@ Capabilities beyond the core Ika and Encrypt primitives: the surrounding product
      Stripe + SMTP (backend service)  |   Cloudflare Pages (dashboard)
 ```
 
-The product surface is composed of **6 services** plus **3 on-chain programs**.
+The product surface is composed of **6 services** plus **4 on-chain programs**.
 
 | Service | Stack | Role |
 |---------|-------|------|
@@ -321,6 +322,7 @@ All artefacts live on Solana **devnet** during pre-alpha.
 | policy-engine | ARfJadMTH8mvAWprE8oMoRGNamKVDX9GV3URvudYyXgL | The unified policy / recovery / signing engine. Holds dWallet authority. Composable rule slots: `KIND_ALLOWLIST`, `KIND_VELOCITY`, `KIND_TIME_LOCK`, `KIND_ORACLE`, `KIND_PASSKEY`, `KIND_FHE_GATED`, `KIND_SESSION_KEY`, `KIND_RECOVERY` (primary + M-of-N quorum + cooldown + daily limit). |
 | jwk-registry | 8xL2mrQ2amDpinQMHJPaEELbgEXWRVGn4PQ7kzDm7vNM | On-chain trust root for OIDC RSA-2048 keys (Google/Apple). Login Social. |
 | oidc-verifier | _(library)_ | On-chain RSA-2048 verification of provider `id_token`s. Reads the `jwk-registry`. Gated on the Solana `sol_big_mod_exp` syscall. |
+| pyth-adapter | A6xjw8jkJTFjpjHCRSFxVt1d1KbBZdh3XBNYvTfLZxP2 | Normalises Pyth price feeds into the canonical view the `KIND_ORACLE` rule reads. Powers price circuit breakers + managed price triggers. |
 
 ### Omniboard: retail showcase (in development)
 
