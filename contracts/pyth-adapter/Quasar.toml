@@ -1,0 +1,8 @@
+[program]
+name = "andromeda_pyth_adapter"
+
+[toolchain]
+type = "solana"
+
+[deploy]
+cluster = "devnet"
