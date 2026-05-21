@@ -29,9 +29,8 @@ const MaxHumanMessageBytes = 768
 const ClearSigningVersionPolicy = "policy-clear-v1"
 
 var (
-	errNonAscii        = errors.New("clear-signing message contains non-ASCII byte")
-	errBufferTooSmall  = errors.New("clear-signing message exceeds MaxHumanMessageBytes")
-	errInvalidSlotByte = errors.New("clear-signing member slot has invalid scheme byte")
+	errNonAscii       = errors.New("clear-signing message contains non-ASCII byte")
+	errBufferTooSmall = errors.New("clear-signing message exceeds MaxHumanMessageBytes")
 )
 
 // ClearSigning is the structured envelope returned alongside every
@@ -75,7 +74,6 @@ func (w *msgWriter) writeStr(s string) error {
 	return w.writeBytes([]byte(s))
 }
 
-func (w *msgWriter) writeU8Dec(v uint8) error  { return w.writeStr(strconv.FormatUint(uint64(v), 10)) }
 func (w *msgWriter) writeU16Dec(v uint16) error { return w.writeStr(strconv.FormatUint(uint64(v), 10)) }
 func (w *msgWriter) writeU32Dec(v uint32) error { return w.writeStr(strconv.FormatUint(uint64(v), 10)) }
 func (w *msgWriter) writeU64Dec(v uint64) error { return w.writeStr(strconv.FormatUint(v, 10)) }
@@ -97,24 +95,6 @@ func (w *msgWriter) writeHexLower(b []byte) error {
 func (w *msgWriter) writeBase58_32(addr [32]byte) error {
 	pk := solana.PublicKeyFromBytes(addr[:])
 	return w.writeStr(pk.String())
-}
-
-func (w *msgWriter) writeMemberSlot(slot [MemberSlotLen]byte) error {
-	scheme := slot[0]
-	idLen, err := IDLenForScheme(scheme)
-	if err != nil {
-		return errInvalidSlotByte
-	}
-	if err := w.writeStr("scheme:"); err != nil {
-		return err
-	}
-	if err := w.writeU8Dec(scheme); err != nil {
-		return err
-	}
-	if err := w.writeStr(";id:"); err != nil {
-		return err
-	}
-	return w.writeHexLower(slot[1 : 1+idLen])
 }
 
 // timeLockModeLabel mirrors `andromeda_auth::human_message::time_lock_mode_label`.

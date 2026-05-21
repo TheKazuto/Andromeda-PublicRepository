@@ -39,11 +39,6 @@ func withRoute(r *http.Request, rt *routedRequest) *http.Request {
 	return r.WithContext(context.WithValue(r.Context(), ctxKeyRoute, rt))
 }
 
-func routeFrom(r *http.Request) *routedRequest {
-	v, _ := r.Context().Value(ctxKeyRoute).(*routedRequest)
-	return v
-}
-
 func withCost(r *http.Request, cost int) *http.Request {
 	return r.WithContext(context.WithValue(r.Context(), ctxKeyCost, cost))
 }

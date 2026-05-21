@@ -52,13 +52,11 @@ func baseAdminFields(dwallet, policy solana.PublicKey, expectedNonce uint64) map
 // ── allowlist-destinations ─────────────────────────────────────
 
 var (
-	allowlistDomain                = []byte("andromeda::allowlist-destinations::v2")
-	allowlistDomainInitV1          = []byte("andromeda::allowlist-destinations::v1") //nolint:unused // exported for symmetry / future ref
-	allowlistDomainRequestSigV1    = []byte("andromeda::allowlist-destinations::v1") //nolint:unused
-	allowlistOpAddDestination      = []byte("add-destination")
-	allowlistOpRemoveDestination   = []byte("remove-destination")
-	allowlistOpPause               = []byte("pause")
-	allowlistOpResume              = []byte("resume")
+	allowlistDomain              = []byte("andromeda::allowlist-destinations::v2")
+	allowlistOpAddDestination    = []byte("add-destination")
+	allowlistOpRemoveDestination = []byte("remove-destination")
+	allowlistOpPause             = []byte("pause")
+	allowlistOpResume            = []byte("resume")
 )
 
 func AllowlistAddDestinationChallenge(dwallet, policy solana.PublicKey, destination [32]byte, nonce uint64, ownerSlot [MemberSlotLen]byte) ([32]byte, string, ClearSigning, error) {
@@ -120,12 +118,10 @@ func AllowlistResumeChallenge(dwallet, policy solana.PublicKey, nonce uint64, ow
 // ── velocity-guard ─────────────────────────────────────────────
 
 var (
-	velocityDomain              = []byte("andromeda::velocity-guard::v2")
-	velocityDomainInitV1        = []byte("andromeda::velocity-guard::v1") //nolint:unused
-	velocityDomainRequestSigV1  = []byte("andromeda::velocity-guard::v1") //nolint:unused
-	velocityOpUpdateWindow      = []byte("update-window")
-	velocityOpPause             = []byte("pause")
-	velocityOpResume            = []byte("resume")
+	velocityDomain         = []byte("andromeda::velocity-guard::v2")
+	velocityOpUpdateWindow = []byte("update-window")
+	velocityOpPause        = []byte("pause")
+	velocityOpResume       = []byte("resume")
 )
 
 func VelocityUpdateWindowChallenge(dwallet, policy solana.PublicKey, maxSigsPerWindow uint32, windowSlots uint64, nonce uint64, ownerSlot [MemberSlotLen]byte) ([32]byte, string, ClearSigning, error) {
@@ -173,12 +169,10 @@ func VelocityResumeChallenge(dwallet, policy solana.PublicKey, nonce uint64, own
 // ── time-lock ──────────────────────────────────────────────────
 
 var (
-	timeLockDomain             = []byte("andromeda::time-lock::v2")
-	timeLockDomainInitV1       = []byte("andromeda::time-lock::v1") //nolint:unused
-	timeLockDomainRequestSigV1 = []byte("andromeda::time-lock::v1") //nolint:unused
-	timeLockOpUpdateWindow     = []byte("update-window")
-	timeLockOpPause            = []byte("pause")
-	timeLockOpResume           = []byte("resume")
+	timeLockDomain         = []byte("andromeda::time-lock::v2")
+	timeLockOpUpdateWindow = []byte("update-window")
+	timeLockOpPause        = []byte("pause")
+	timeLockOpResume       = []byte("resume")
 )
 
 func TimeLockUpdateWindowChallenge(dwallet, policy solana.PublicKey, mode uint8, startSlot, endSlot, recurringPeriodSlots uint64, nonce uint64, ownerSlot [MemberSlotLen]byte) ([32]byte, string, ClearSigning, error) {
@@ -229,12 +223,10 @@ func TimeLockResumeChallenge(dwallet, policy solana.PublicKey, nonce uint64, own
 // ── oracle-conditional ─────────────────────────────────────────
 
 var (
-	oracleDomain             = []byte("andromeda::oracle-conditional::v2")
-	oracleDomainInitV1       = []byte("andromeda::oracle-conditional::v1") //nolint:unused
-	oracleDomainRequestSigV1 = []byte("andromeda::oracle-conditional::v1") //nolint:unused
-	oracleOpUpdateBounds     = []byte("update-bounds")
-	oracleOpPause            = []byte("pause")
-	oracleOpResume           = []byte("resume")
+	oracleDomain         = []byte("andromeda::oracle-conditional::v2")
+	oracleOpUpdateBounds = []byte("update-bounds")
+	oracleOpPause        = []byte("pause")
+	oracleOpResume       = []byte("resume")
 )
 
 func OracleUpdateBoundsChallenge(dwallet, policy solana.PublicKey, minPrice, maxPrice int64, maxAgeSlots uint64, maxConfidenceBps uint16, nonce uint64, ownerSlot [MemberSlotLen]byte) ([32]byte, string, ClearSigning, error) {
@@ -285,14 +277,12 @@ func OracleResumeChallenge(dwallet, policy solana.PublicKey, nonce uint64, owner
 // ── passkey-step-up ────────────────────────────────────────────
 
 var (
-	passkeyDomain             = []byte("andromeda::passkey-step-up::v2")
-	passkeyDomainInitV1       = []byte("andromeda::passkey-step-up::v1") //nolint:unused
-	passkeyDomainStepUpV1     = []byte("andromeda::passkey-step-up::v1")
-	passkeyDomainRequestSigV1 = []byte("andromeda::passkey-step-up::v1") //nolint:unused
-	passkeyOpUpdatePolicy     = []byte("update-policy")
-	passkeyOpPause            = []byte("pause")
-	passkeyOpResume           = []byte("resume")
-	passkeyOpStepUp           = []byte("step-up")
+	passkeyDomain         = []byte("andromeda::passkey-step-up::v2")
+	passkeyDomainStepUpV1 = []byte("andromeda::passkey-step-up::v1")
+	passkeyOpUpdatePolicy = []byte("update-policy")
+	passkeyOpPause        = []byte("pause")
+	passkeyOpResume       = []byte("resume")
+	passkeyOpStepUp       = []byte("step-up")
 )
 
 func PasskeyUpdatePolicyChallenge(dwallet, policy solana.PublicKey, thresholdAmount uint64, passkeyPubkey [33]byte, nonce uint64, ownerSlot [MemberSlotLen]byte) ([32]byte, string, ClearSigning, error) {
@@ -360,7 +350,6 @@ func PasskeyStepUpChallenge(dwallet solana.PublicKey, messageDigest [32]byte, tx
 var (
 	sessionKeysDomain                 = []byte("andromeda::session-keys::v2")
 	sessionKeysDomainInitV1           = []byte("andromeda::session-keys::v1")
-	sessionKeysDomainRequestSigV1     = []byte("andromeda::session-keys::v1") //nolint:unused
 	sessionKeysOpCreateSession        = []byte("create-session")
 	sessionKeysOpRevokeSession        = []byte("revoke-session")
 	sessionKeysOpAddAllowedProgram    = []byte("add-allowed-program")
@@ -447,13 +436,11 @@ func SessionKeysCloseSessionChallenge(dwallet, policy, recipient solana.PublicKe
 // ── fhe-gated ──────────────────────────────────────────────────
 
 var (
-	fheGatedDomain             = []byte("andromeda::fhe-gated::v2")
-	fheGatedDomainInitV1       = []byte("andromeda::fhe-gated::v1") //nolint:unused
-	fheGatedDomainRequestSigV1 = []byte("andromeda::fhe-gated::v1") //nolint:unused
-	fheGatedDomainDecision     = []byte("andromeda::fhe-gated::decision::v1")
-	fheGatedOpRotate           = []byte("rotate-authority")
-	fheGatedOpPause            = []byte("pause")
-	fheGatedOpResume           = []byte("resume")
+	fheGatedDomain         = []byte("andromeda::fhe-gated::v2")
+	fheGatedDomainDecision = []byte("andromeda::fhe-gated::decision::v1")
+	fheGatedOpRotate       = []byte("rotate-authority")
+	fheGatedOpPause        = []byte("pause")
+	fheGatedOpResume       = []byte("resume")
 )
 
 func FHEGatedRotateAuthorityChallenge(dwallet, policy, newFheAuthority solana.PublicKey, nonce uint64, ownerSlot [MemberSlotLen]byte) ([32]byte, string, ClearSigning, error) {

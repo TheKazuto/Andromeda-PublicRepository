@@ -95,17 +95,6 @@ func (r *Recorder) WithObserver(o Observer) *Recorder {
 	return r
 }
 
-// signerBackend returns a short label for the active Signer implementation,
-// used as a Prometheus label. Keeps cardinality bounded to {env,vault}.
-func (r *Recorder) signerBackend() string {
-	switch r.signer.(type) {
-	case *VaultTransitSigner:
-		return "vault"
-	default:
-		return "env"
-	}
-}
-
 func (r *Recorder) tenantLock(apiKeyID string) *sync.Mutex {
 	v, _ := r.chainLocks.LoadOrStore(apiKeyID, &sync.Mutex{})
 	return v.(*sync.Mutex)
