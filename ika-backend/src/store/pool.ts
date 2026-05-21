@@ -53,14 +53,21 @@ export function initPool(
   // `connect` once per client lifetime (not per Acquire), so this is
   // amortised across the pool.
   pool.on('connect', (client) => {
-    const setters: Array<Promise<unknown>> = []
+    const statements: string[] = []
     if (Number.isFinite(stmtTimeoutMs) && stmtTimeoutMs > 0) {
-      setters.push(client.query(`SET statement_timeout = ${Math.floor(stmtTimeoutMs)}`))
+      statements.push(`SET statement_timeout = ${Math.floor(stmtTimeoutMs)}`)
     }
     if (Number.isFinite(idleTxTimeoutMs) && idleTxTimeoutMs > 0) {
-      setters.push(client.query(`SET idle_in_transaction_session_timeout = ${Math.floor(idleTxTimeoutMs)}`))
+      statements.push(`SET idle_in_transaction_session_timeout = ${Math.floor(idleTxTimeoutMs)}`)
     }
-    Promise.all(setters).catch((err) => {
+    if (statements.length === 0) return
+    // Single round-trip: combine the SETs into one simple-query message.
+    // Issuing them as two separate client.query() calls would queue the
+    // second while the first is still active, which triggers the pg@9
+    // deprecation warning ("client is already executing a query"). No
+    // params are passed, so pg uses the simple query protocol, which runs
+    // every `;`-separated statement in one go.
+    client.query(statements.join('; ')).catch((err) => {
       logger.warn({ err }, 'pg: failed to apply session timeouts')
     })
   })
