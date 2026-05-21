@@ -33,14 +33,15 @@ func fixturesDir(t *testing.T) string {
 }
 
 type fixtureFile struct {
-	SpecRef string `json:"spec_ref"`
-	Version string `json:"version"`
-	Status  string `json:"status"`
-	Input   map[string]any `json:"input"`
+	SpecRef  string         `json:"spec_ref"`
+	Version  string         `json:"version"`
+	Status   string         `json:"status"`
+	Input    map[string]any `json:"input"`
 	Expected struct {
-		PreimageHex   string `json:"preimage_hex"`
-		PreimageBytes int    `json:"preimage_bytes"`
-		ChallengeHex  string `json:"challenge_hex"`
+		PreimageHex               string `json:"preimage_hex"`
+		PreimageBytes             int    `json:"preimage_bytes"`
+		ChallengeHex              string `json:"challenge_hex"`
+		PostMutationConfigHashHex string `json:"post_mutation_config_hash_hex"`
 	} `json:"expected"`
 }
 
@@ -225,6 +226,131 @@ func TestAdminChallenge_AllowlistAddDestination_MatchesFixture(t *testing.T) {
 	h, _ := got.Hash()
 	if hex.EncodeToString(h[:]) != f.Expected.ChallengeHex {
 		t.Fatalf("challenge drift:\n  got:  %s\n  want: %s", hex.EncodeToString(h[:]), f.Expected.ChallengeHex)
+	}
+}
+
+func TestAdminChallenge_AddRuleOracle_MatchesFixture(t *testing.T) {
+	f := loadFixture(t, "challenges/admin/add-rule-oracle.json")
+	in := f.Input
+
+	engine := mustPubkey(t, in["engine_b58"].(string))
+	dwallet := mustPubkey(t, in["dwallet_b58"].(string))
+	ruleIndex := u8(in["rule_index"])
+	ruleGen := u32(in["rule_generation"])
+	expectedNonce := u64(in["expected_nonce"])
+	appliesTo := u8(in["applies_to"])
+	freshnessDiv16 := u8(in["freshness_seconds_div16"])
+	minConfDiv4 := u8(in["min_confidence_bps_div4"])
+	configHash := decodeHex32(t, in["config_hash_hex"].(string))
+	ownerSlot := decodeHex34(t, in["owner_slot_hex"].(string))
+	human := []byte(in["human_message_utf8"].(string))
+
+	// Sanity: the Go OracleConfigHash (empty feeds) must match the fixture.
+	emptyFeeds := make([]byte, MaxOracleFeeds*OracleFeedBytes)
+	gotCfg, err := OracleConfigHash(appliesTo, 0, freshnessDiv16, minConfDiv4, emptyFeeds)
+	if err != nil {
+		t.Fatalf("oracle config hash: %v", err)
+	}
+	if gotCfg != configHash {
+		t.Fatalf("oracle config_hash drift:\n  got:  %x\n  want: %x", gotCfg, configHash)
+	}
+
+	var genLE [4]byte
+	binary.LittleEndian.PutUint32(genLE[:], ruleGen)
+
+	got := &AdminChallengeInput{
+		OpTag:          OpAddOracle,
+		HumanMessage:   human,
+		Engine:         engine,
+		DWallet:        dwallet,
+		RuleKind:       uint8(KindOracle),
+		RuleIndex:      ruleIndex,
+		RuleGeneration: ruleGen,
+		ExpectedNonce:  expectedNonce,
+		ConfigHash:     configHash,
+		OwnerSlot:      ownerSlot,
+		Extras:         [][]byte{{appliesTo}, {freshnessDiv16}, {minConfDiv4}, genLE[:]},
+	}
+	pre, err := got.Preimage()
+	if err != nil {
+		t.Fatalf("preimage: %v", err)
+	}
+	if hex.EncodeToString(pre) != f.Expected.PreimageHex {
+		t.Fatalf("preimage drift:\n  got:  %s\n  want: %s", hex.EncodeToString(pre), f.Expected.PreimageHex)
+	}
+	h, _ := got.Hash()
+	if hex.EncodeToString(h[:]) != f.Expected.ChallengeHex {
+		t.Fatalf("challenge drift:\n  got:  %s\n  want: %s", hex.EncodeToString(h[:]), f.Expected.ChallengeHex)
+	}
+}
+
+func TestAdminChallenge_OracleAddFeed_MatchesFixture(t *testing.T) {
+	f := loadFixture(t, "challenges/admin/oracle-add-feed.json")
+	in := f.Input
+
+	engine := mustPubkey(t, in["engine_b58"].(string))
+	dwallet := mustPubkey(t, in["dwallet_b58"].(string))
+	ruleIndex := u8(in["rule_index"])
+	ruleGen := u32(in["rule_generation"])
+	expectedNonce := u64(in["expected_nonce"])
+	feedAccount := mustPubkey(t, in["feed_account_b58"].(string))
+	feedOwner := mustPubkey(t, in["feed_owner_b58"].(string))
+	minQ64 := int64(in["min_q64"].(float64))
+	maxQ64 := int64(in["max_q64"].(float64))
+	configHash := decodeHex32(t, in["config_hash_hex"].(string))
+	ownerSlot := decodeHex34(t, in["owner_slot_hex"].(string))
+
+	human := HumanMessageOracleAddFeed(feedAccount, feedOwner, minQ64, maxQ64, engine, dwallet)
+	if string(human) != in["human_message_utf8"].(string) {
+		t.Fatalf("human_message drift:\n  got:  %s\n  want: %s", string(human), in["human_message_utf8"].(string))
+	}
+
+	var genLE [4]byte
+	binary.LittleEndian.PutUint32(genLE[:], ruleGen)
+	minLE, maxLE := int64LE(minQ64), int64LE(maxQ64)
+	fa, fo := feedAccount.Bytes(), feedOwner.Bytes()
+
+	got := &AdminChallengeInput{
+		OpTag:          OpOracleAddFeed,
+		HumanMessage:   human,
+		Engine:         engine,
+		DWallet:        dwallet,
+		RuleKind:       uint8(KindOracle),
+		RuleIndex:      ruleIndex,
+		RuleGeneration: ruleGen,
+		ExpectedNonce:  expectedNonce,
+		ConfigHash:     configHash,
+		OwnerSlot:      ownerSlot,
+		Extras:         [][]byte{fa, fo, minLE[:], maxLE[:], genLE[:]},
+	}
+	pre, err := got.Preimage()
+	if err != nil {
+		t.Fatalf("preimage: %v", err)
+	}
+	if hex.EncodeToString(pre) != f.Expected.PreimageHex {
+		t.Fatalf("preimage drift:\n  got:  %s\n  want: %s", hex.EncodeToString(pre), f.Expected.PreimageHex)
+	}
+	h, _ := got.Hash()
+	if hex.EncodeToString(h[:]) != f.Expected.ChallengeHex {
+		t.Fatalf("challenge drift:\n  got:  %s\n  want: %s", hex.EncodeToString(h[:]), f.Expected.ChallengeHex)
+	}
+
+	// Cross-check the post-mutation config_hash (1 feed) against the fixture.
+	postWant := f.Expected.PostMutationConfigHashHex
+	if postWant != "" {
+		feedsFlat := make([]byte, MaxOracleFeeds*OracleFeedBytes)
+		copy(feedsFlat[0:32], fa)
+		copy(feedsFlat[32:64], fo)
+		copy(feedsFlat[64:72], minLE[:])
+		copy(feedsFlat[72:80], maxLE[:])
+		gotPost, err := OracleConfigHash(1, 1, 4, 2, feedsFlat)
+		if err != nil {
+			t.Fatalf("post config hash: %v", err)
+		}
+		if hex.EncodeToString(gotPost[:]) != postWant {
+			t.Fatalf("post_mutation config_hash drift:\n  got:  %s\n  want: %s",
+				hex.EncodeToString(gotPost[:]), postWant)
+		}
 	}
 }
 

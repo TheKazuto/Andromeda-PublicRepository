@@ -148,6 +148,12 @@ type RequestSignatureParams struct {
 	CallerProgram       solana.PublicKey
 	DWalletProgram      solana.PublicKey
 	RulePDAs            []solana.PublicKey // ordered by active slot, ascending.
+	// RuleAux carries the auxiliary read-only accounts that the dispatch
+	// consumes immediately AFTER each sub-PDA, indexed parallel to RulePDAs.
+	// For KIND_ORACLE: `RuleAux[i]` = one FeedCache PDA per feed, in
+	// `feeds_flat` order. For kinds with no aux (Allowlist/Velocity/TimeLock/
+	// FheGated) leave it nil/empty. Passkey would carry 2 aux per credential.
+	RuleAux             [][]solana.PublicKey
 	InitAuthorityHash   [32]byte
 	MessageDigest       [32]byte
 	MetadataDigest      [32]byte
@@ -200,8 +206,19 @@ func RequestSignature(p RequestSignatureParams) (solana.Instruction, error) {
 	// readonly accounts following each slot that needs them (Oracle: 1 aux
 	// per feed; Passkey: 2 aux — auth_data + cdj; FheGated: none). Callers
 	// stitch them into `RulePDAs` in the correct order.
-	for _, pda := range p.RulePDAs {
+	// Per active slot: the sub-PDA (writable, so mutating kinds can write back)
+	// immediately followed by that slot's auxiliary read-only accounts. This
+	// interleaving mirrors the on-chain dispatch, which pulls the sub-PDA from
+	// remaining_accounts and then, for KIND_ORACLE, one aux (FeedCache) per
+	// feed before advancing to the next slot. Verified byte-for-byte against
+	// the SBF dispatch (sub-PDA `new(rule_pda)` + feed `new_readonly`).
+	for i, pda := range p.RulePDAs {
 		accounts = append(accounts, &solana.AccountMeta{PublicKey: pda, IsSigner: false, IsWritable: true})
+		if i < len(p.RuleAux) {
+			for _, aux := range p.RuleAux[i] {
+				accounts = append(accounts, &solana.AccountMeta{PublicKey: aux, IsSigner: false, IsWritable: false})
+			}
+		}
 	}
 	return solana.NewInstruction(p.ProgramID, accounts, data), nil
 }

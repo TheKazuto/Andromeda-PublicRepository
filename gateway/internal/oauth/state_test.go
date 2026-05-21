@@ -43,9 +43,11 @@ func TestSignVerifyRoundTrip(t *testing.T) {
 func TestVerifyState_TamperedPayload(t *testing.T) {
 	now := time.Now()
 	signed, _ := SignState([]byte(testSecret), sampleClaims(now.Unix()))
-	dot := strings.IndexByte(signed, '.')
-	// Flip one character of the payload — signature won't match.
-	tampered := signed[:dot-1] + "X" + signed[dot:]
+	// Flip the first payload char. VerifyState computes the HMAC over the
+	// payload STRING, so any change invalidates it. flipChar always returns a
+	// different char, so the tamper is never a no-op (the old `"X"` could
+	// collide with the original char and pass).
+	tampered := flipChar(signed[0]) + signed[1:]
 	if _, err := VerifyState([]byte(testSecret), tampered, now); err != ErrInvalidState {
 		t.Fatalf("expected ErrInvalidState, got %v", err)
 	}
@@ -54,8 +56,15 @@ func TestVerifyState_TamperedPayload(t *testing.T) {
 func TestVerifyState_TamperedSignature(t *testing.T) {
 	now := time.Now()
 	signed, _ := SignState([]byte(testSecret), sampleClaims(now.Unix()))
-	// Flip the last char of the signature.
-	tampered := signed[:len(signed)-1] + flipChar(signed[len(signed)-1])
+	// Flip the FIRST signature char, not the last. The signature is
+	// base64url-decoded before the constant-time compare, and base64 decoding
+	// ignores the trailing don't-care bits of the LAST char — so flipping the
+	// last char can decode to identical bytes (a no-op that made this test
+	// flaky). The first char always carries significant bits of the first
+	// signature byte, so flipping it always changes the decoded signature.
+	dot := strings.IndexByte(signed, '.')
+	sigStart := dot + 1
+	tampered := signed[:sigStart] + flipChar(signed[sigStart]) + signed[sigStart+1:]
 	if _, err := VerifyState([]byte(testSecret), tampered, now); err != ErrInvalidState {
 		t.Fatalf("expected ErrInvalidState, got %v", err)
 	}

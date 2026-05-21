@@ -47,11 +47,11 @@ func TestAddRuleTimeLock_RejectsInvalidMode(t *testing.T) {
 func TestAddRuleOracle_Layout(t *testing.T) {
 	pid := mustPub(t, "ARfJadMTH8mvAWprE8oMoRGNamKVDX9GV3URvudYyXgL")
 	ix, err := AddRuleOracle(AddRuleOracleParams{
-		ProgramID: pid,
-		Engine:    mustPub(t, "9MaRaGinB3P9EDkD5kLzsfM4PPuMDGXQPYzEz7pUtiU4"),
-		DWallet:   mustPub(t, "4aNkFccW7p2nZDC72wMqFxoKvJMVJQ28Pm7WcpqS9d14"),
-		Payer:     mustPub(t, "11111111111111111111111111111112"),
-		AppliesTo: AppliesNormal,
+		ProgramID:             pid,
+		Engine:                mustPub(t, "9MaRaGinB3P9EDkD5kLzsfM4PPuMDGXQPYzEz7pUtiU4"),
+		DWallet:               mustPub(t, "4aNkFccW7p2nZDC72wMqFxoKvJMVJQ28Pm7WcpqS9d14"),
+		Payer:                 mustPub(t, "11111111111111111111111111111112"),
+		AppliesTo:             AppliesNormal,
 		FreshnessSecondsDiv16: 4,
 		MinConfidenceBpsDiv4:  2,
 	})
@@ -93,11 +93,11 @@ func TestAddRulePasskey_Layout(t *testing.T) {
 func TestAddRuleFheGated_Layout(t *testing.T) {
 	pid := mustPub(t, "ARfJadMTH8mvAWprE8oMoRGNamKVDX9GV3URvudYyXgL")
 	ix, err := AddRuleFheGated(AddRuleFheGatedParams{
-		ProgramID: pid,
-		Engine:    mustPub(t, "9MaRaGinB3P9EDkD5kLzsfM4PPuMDGXQPYzEz7pUtiU4"),
-		DWallet:   mustPub(t, "4aNkFccW7p2nZDC72wMqFxoKvJMVJQ28Pm7WcpqS9d14"),
-		Payer:     mustPub(t, "11111111111111111111111111111112"),
-		AppliesTo: AppliesNormal,
+		ProgramID:             pid,
+		Engine:                mustPub(t, "9MaRaGinB3P9EDkD5kLzsfM4PPuMDGXQPYzEz7pUtiU4"),
+		DWallet:               mustPub(t, "4aNkFccW7p2nZDC72wMqFxoKvJMVJQ28Pm7WcpqS9d14"),
+		Payer:                 mustPub(t, "11111111111111111111111111111112"),
+		AppliesTo:             AppliesNormal,
 		FreshnessSecondsDiv16: 8,
 	})
 	if err != nil {

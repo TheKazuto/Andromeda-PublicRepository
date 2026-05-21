@@ -10,18 +10,28 @@ import (
 
 // Discriminators for F4-F7.
 const (
-	DiscAddRuleTimeLock                 uint8 = 12
-	DiscAddRuleOracle                   uint8 = 13
-	DiscAddRulePasskey                  uint8 = 14
-	DiscAddRuleFheGated                 uint8 = 15
+	DiscAddRuleTimeLock uint8 = 12
+	DiscAddRuleOracle   uint8 = 13
+	DiscAddRulePasskey  uint8 = 14
+	DiscAddRuleFheGated uint8 = 15
+	// F5c: appends one Pyth feed to a KIND_ORACLE rule (which add_rule_oracle
+	// creates with feeds_count=0). Without this a KIND_ORACLE rule enforces
+	// nothing — this is the ix that makes oracle policies actually gate signing.
+	DiscUpdateRuleOracleAddFeed uint8 = 122
 	// C2 audit fix (2026-05-16): populates `KIND_FHE_GATED.authorities_flat`
 	// after add_rule_fhe_gated (which initialises count=0). Without this,
 	// any KIND_FHE_GATED dispatch fails fast with InvalidRuleHeader.
-	DiscUpdateRuleFheGatedAuthorities   uint8 = 126
+	DiscUpdateRuleFheGatedAuthorities uint8 = 126
 )
 
 // MaxFheAuthorities mirrors `MAX_FHE_AUTHORITIES` in lib.rs.
 const MaxFheAuthorities = 4
+
+// Oracle feed layout (mirror of lib.rs `ORACLE_FEED_BYTES` / `MAX_ORACLE_FEEDS`).
+const (
+	OracleFeedBytes = 80
+	MaxOracleFeeds  = 4
+)
 
 // ── F4 — TimeLock ──────────────────────────────────────────────────────────
 
@@ -102,14 +112,14 @@ func TimeLockConfigHash(appliesTo, mode uint8, unlockTs int64, delaySeconds uint
 // ── F5 — Oracle ────────────────────────────────────────────────────────────
 
 type AddRuleOracleParams struct {
-	ProgramID            solana.PublicKey
-	Engine               solana.PublicKey
-	DWallet              solana.PublicKey
-	Payer                solana.PublicKey
-	InitAuthorityHash    [32]byte
-	ExpectedNonce        uint64
-	RuleIndex            uint8
-	AppliesTo            uint8
+	ProgramID             solana.PublicKey
+	Engine                solana.PublicKey
+	DWallet               solana.PublicKey
+	Payer                 solana.PublicKey
+	InitAuthorityHash     [32]byte
+	ExpectedNonce         uint64
+	RuleIndex             uint8
+	AppliesTo             uint8
 	FreshnessSecondsDiv16 uint8
 	MinConfidenceBpsDiv4  uint8
 }
@@ -139,6 +149,65 @@ func AddRuleOracle(p AddRuleOracleParams) (solana.Instruction, error) {
 		{PublicKey: SysvarInstructions, IsSigner: false, IsWritable: false},
 		{PublicKey: SysvarClock, IsSigner: false, IsWritable: false},
 		{PublicKey: SysvarRent, IsSigner: false, IsWritable: false},
+		{PublicKey: SystemProgramID, IsSigner: false, IsWritable: false},
+		{PublicKey: eventAuth, IsSigner: false, IsWritable: false},
+		{PublicKey: p.ProgramID, IsSigner: false, IsWritable: false},
+	}, data), nil
+}
+
+// ── F5c — Oracle add feed (disc 122) ───────────────────────────────────────
+
+type UpdateRuleOracleAddFeedParams struct {
+	ProgramID         solana.PublicKey
+	Engine            solana.PublicKey
+	DWallet           solana.PublicKey
+	Payer             solana.PublicKey
+	InitAuthorityHash [32]byte
+	ExpectedNonce     uint64
+	RuleIndex         uint8
+	// FeedAccount is the adapter FeedCache PDA (`[b"feed_cache", feed_id]`).
+	FeedAccount [32]byte
+	// FeedOwner is the Pyth adapter program id; must be in ALLOWED_ORACLE_OWNERS.
+	FeedOwner [32]byte
+	// Canonical 1e8 price band (min <= max).
+	MinQ64 int64
+	MaxQ64 int64
+}
+
+func UpdateRuleOracleAddFeed(p UpdateRuleOracleAddFeedParams) (solana.Instruction, error) {
+	if p.MinQ64 > p.MaxQ64 {
+		return nil, fmt.Errorf("policy: oracle band min_q64 (%d) > max_q64 (%d)", p.MinQ64, p.MaxQ64)
+	}
+	rulePDA, _, err := RulePDA(p.ProgramID, p.Engine, KindOracle, p.RuleIndex)
+	if err != nil {
+		return nil, err
+	}
+	eventAuth, _, err := EventAuthorityPDA(p.ProgramID)
+	if err != nil {
+		return nil, err
+	}
+	data := make([]byte, 0, 1+32+8+1+32+32+8+8)
+	data = append(data, DiscUpdateRuleOracleAddFeed)
+	data = append(data, p.InitAuthorityHash[:]...)
+	var b [8]byte
+	binary.LittleEndian.PutUint64(b[:], p.ExpectedNonce)
+	data = append(data, b[:]...)
+	data = append(data, p.RuleIndex)
+	data = append(data, p.FeedAccount[:]...)
+	data = append(data, p.FeedOwner[:]...)
+	binary.LittleEndian.PutUint64(b[:], uint64(p.MinQ64))
+	data = append(data, b[:]...)
+	binary.LittleEndian.PutUint64(b[:], uint64(p.MaxQ64))
+	data = append(data, b[:]...)
+
+	// Update path mirrors UpdateRuleAllowlist accounts (no rent — no init).
+	return solana.NewInstruction(p.ProgramID, solana.AccountMetaSlice{
+		{PublicKey: p.DWallet, IsSigner: false, IsWritable: false},
+		{PublicKey: p.Engine, IsSigner: false, IsWritable: true},
+		{PublicKey: rulePDA, IsSigner: false, IsWritable: true},
+		{PublicKey: p.Payer, IsSigner: true, IsWritable: true},
+		{PublicKey: SysvarInstructions, IsSigner: false, IsWritable: false},
+		{PublicKey: SysvarClock, IsSigner: false, IsWritable: false},
 		{PublicKey: SystemProgramID, IsSigner: false, IsWritable: false},
 		{PublicKey: eventAuth, IsSigner: false, IsWritable: false},
 		{PublicKey: p.ProgramID, IsSigner: false, IsWritable: false},
@@ -246,8 +315,8 @@ type UpdateRuleFheGatedAuthoritiesParams struct {
 	RuleIndex         uint8
 	// NewAuthorities is the full canonical 128-byte slot (4 × 32). Unused
 	// trailing slots MUST be zero — `NewCount` declares how many are live.
-	NewCount          uint8
-	NewAuthorities    [MaxFheAuthorities * 32]byte
+	NewCount       uint8
+	NewAuthorities [MaxFheAuthorities * 32]byte
 }
 
 func UpdateRuleFheGatedAuthorities(p UpdateRuleFheGatedAuthoritiesParams) (solana.Instruction, error) {

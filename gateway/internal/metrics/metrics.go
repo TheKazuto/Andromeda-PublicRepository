@@ -69,23 +69,23 @@ type Metrics struct {
 	WebhookRateLimitedTotal prometheus.Counter
 
 	// Webhook backlog — sampled every 15s by the metrics scraper.
-	WebhookInFlightCount        prometheus.Gauge
-	WebhookPendingCount         prometheus.Gauge
-	WebhookOldestPendingSeconds prometheus.Gauge
+	WebhookInFlightCount         prometheus.Gauge
+	WebhookPendingCount          prometheus.Gauge
+	WebhookOldestPendingSeconds  prometheus.Gauge
 	WebhookOldestInFlightSeconds prometheus.Gauge
 
 	// Postgres pgxpool — sampled every 15s by the metrics scraper.
 	// Mirrors pgxpool.Stat() so dashboards can alert on acquire wait /
 	// pool saturation per the robustness plan F0/F1 tasks.
-	DBPoolAcquired           prometheus.Gauge
-	DBPoolIdle               prometheus.Gauge
-	DBPoolTotal              prometheus.Gauge
-	DBPoolMax                prometheus.Gauge
-	DBPoolNewConnsTotal      prometheus.Gauge // monotonic counter sourced from pgxpool; expose as gauge of "current value"
-	DBPoolAcquireCount       prometheus.Gauge
-	DBPoolEmptyAcquireTotal  prometheus.Gauge
+	DBPoolAcquired             prometheus.Gauge
+	DBPoolIdle                 prometheus.Gauge
+	DBPoolTotal                prometheus.Gauge
+	DBPoolMax                  prometheus.Gauge
+	DBPoolNewConnsTotal        prometheus.Gauge // monotonic counter sourced from pgxpool; expose as gauge of "current value"
+	DBPoolAcquireCount         prometheus.Gauge
+	DBPoolEmptyAcquireTotal    prometheus.Gauge
 	DBPoolCanceledAcquireTotal prometheus.Gauge
-	DBPoolAcquireWaitSeconds prometheus.Gauge // total wait time so far, in seconds (cumulative)
+	DBPoolAcquireWaitSeconds   prometheus.Gauge // total wait time so far, in seconds (cumulative)
 
 	// Redis — per-operation latency histogram + error counter. Op label
 	// is the high-level operation name (`ratelimit_eval`, `idempotency_get`,
@@ -97,12 +97,12 @@ type Metrics struct {
 	// Audit signer — latency per signature + failure counter. Backend
 	// label distinguishes `env` (in-memory ed25519) from `vault` (Vault
 	// Transit HTTP round-trip).
-	AuditSignerLatency *prometheus.HistogramVec // labels: backend
-	AuditAppendLatency prometheus.Histogram     // end-to-end Recorder.Append wall time
-	AuditFailuresTotal *prometheus.CounterVec   // labels: stage (sign|append|update|commit)
-	AuditDegraded      prometheus.Gauge         // 0 = healthy, 1 = signer unavailable / fallback active
-	AuditOutboxDepth   prometheus.Gauge         // rows with signature IS NULL waiting to be signed
-	AuditOutboxOldestSeconds prometheus.Gauge   // age in seconds of the oldest pending signature
+	AuditSignerLatency       *prometheus.HistogramVec // labels: backend
+	AuditAppendLatency       prometheus.Histogram     // end-to-end Recorder.Append wall time
+	AuditFailuresTotal       *prometheus.CounterVec   // labels: stage (sign|append|update|commit)
+	AuditDegraded            prometheus.Gauge         // 0 = healthy, 1 = signer unavailable / fallback active
+	AuditOutboxDepth         prometheus.Gauge         // rows with signature IS NULL waiting to be signed
+	AuditOutboxOldestSeconds prometheus.Gauge         // age in seconds of the oldest pending signature
 
 	// Audit snapshot worker — daily R2/S3 dump for DR.
 	AuditSnapshotRowsTotal       prometheus.Counter
@@ -113,9 +113,17 @@ type Metrics struct {
 	// Gas sponsor — latency for sign-and-send (single fee payer for now;
 	// P0.5 introduces a pool with per-key labels). Result label is
 	// `submitted` / `simulation_failed` / `rpc_error` / `rejected`.
-	GasSponsorLatency  *prometheus.HistogramVec // labels: result
-	GasSponsorRequests *prometheus.CounterVec   // labels: result
+	GasSponsorLatency      *prometheus.HistogramVec // labels: result
+	GasSponsorRequests     *prometheus.CounterVec   // labels: result
 	GasSponsorDuplicateSig prometheus.Counter
+
+	// Oracle price-trigger monitor (F7.5) + oracle feed relay. Bounded labels
+	// only (no per-feed/per-tenant) to keep series count flat.
+	OracleTriggerFiresTotal   *prometheus.CounterVec // labels: result (fired|failed)
+	OracleTriggerExpiredTotal prometheus.Counter
+	OracleMonitorErrorsTotal  *prometheus.CounterVec // labels: stage (tick|hermes|claim|reap)
+	OracleFeedRefreshTotal    *prometheus.CounterVec // labels: result (success|skipped|stale|error)
+	OracleArmedTriggers       prometheus.Gauge       // armed price triggers (sampled every 15s)
 }
 
 // New builds and registers every collector. Returns the Metrics bundle
@@ -396,6 +404,40 @@ func New() (*Metrics, http.Handler) {
 		Namespace: "gateway", Subsystem: "gas_sponsor", Name: "requests_total",
 		Help: "Gas sponsor send attempts by outcome (submitted|simulation_failed|rpc_error|rejected).",
 	}, []string{"result"})
+	m.OracleTriggerFiresTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "gateway",
+			Subsystem: "oracle_monitor",
+			Name:      "trigger_fires_total",
+			Help:      "Price-trigger fire attempts by result (fired = request_signature landed; failed = fire errored).",
+		}, []string{"result"})
+	m.OracleTriggerExpiredTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "gateway",
+		Subsystem: "oracle_monitor",
+		Name:      "triggers_expired_total",
+		Help:      "Armed price triggers reaped at expiry without ever firing.",
+	})
+	m.OracleMonitorErrorsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "gateway",
+			Subsystem: "oracle_monitor",
+			Name:      "errors_total",
+			Help:      "Monitor loop errors by stage (tick|hermes|claim|reap).",
+		}, []string{"stage"})
+	m.OracleFeedRefreshTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "gateway",
+			Subsystem: "oracle_relay",
+			Name:      "feed_refresh_total",
+			Help:      "FeedCache refresh outcomes by result (success|skipped|stale|error).",
+		}, []string{"result"})
+	m.OracleArmedTriggers = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "gateway",
+		Subsystem: "oracle_monitor",
+		Name:      "armed_triggers",
+		Help:      "Price triggers currently armed (sampled every 15s by the metrics scraper).",
+	})
+
 	m.GasSponsorDuplicateSig = prometheus.NewCounter(prometheus.CounterOpts{
 		Namespace: "gateway", Subsystem: "gas_sponsor", Name: "duplicate_signature_total",
 		Help: "Cumulative count of Solana sendTransaction calls that returned duplicate-signature.",
@@ -449,6 +491,11 @@ func New() (*Metrics, http.Handler) {
 		m.GasSponsorLatency,
 		m.GasSponsorRequests,
 		m.GasSponsorDuplicateSig,
+		m.OracleTriggerFiresTotal,
+		m.OracleTriggerExpiredTotal,
+		m.OracleMonitorErrorsTotal,
+		m.OracleFeedRefreshTotal,
+		m.OracleArmedTriggers,
 	)
 
 	handler := promhttp.HandlerFor(reg, promhttp.HandlerOpts{
@@ -600,6 +647,50 @@ func (m *Metrics) SetSnapshotLastSuccessUnix(unix int64) {
 		return
 	}
 	m.AuditSnapshotLastSuccessUnix.Set(float64(unix))
+}
+
+// RecordOracleTriggerFire implements oraclemonitor.Metrics — result is
+// "fired" or "failed".
+func (m *Metrics) RecordOracleTriggerFire(result string) {
+	if m == nil || m.OracleTriggerFiresTotal == nil {
+		return
+	}
+	m.OracleTriggerFiresTotal.WithLabelValues(result).Inc()
+}
+
+// RecordOracleTriggerExpired implements oraclemonitor.Metrics.
+func (m *Metrics) RecordOracleTriggerExpired(n int) {
+	if m == nil || m.OracleTriggerExpiredTotal == nil || n <= 0 {
+		return
+	}
+	m.OracleTriggerExpiredTotal.Add(float64(n))
+}
+
+// RecordOracleMonitorError implements oraclemonitor.Metrics — stage is one of
+// tick|hermes|claim|reap.
+func (m *Metrics) RecordOracleMonitorError(stage string) {
+	if m == nil || m.OracleMonitorErrorsTotal == nil {
+		return
+	}
+	m.OracleMonitorErrorsTotal.WithLabelValues(stage).Inc()
+}
+
+// RecordOracleFeedRefresh implements oraclerelay.Metrics — result is one of
+// success|skipped|stale|error.
+func (m *Metrics) RecordOracleFeedRefresh(result string) {
+	if m == nil || m.OracleFeedRefreshTotal == nil {
+		return
+	}
+	m.OracleFeedRefreshTotal.WithLabelValues(result).Inc()
+}
+
+// SetOracleArmedTriggers updates the armed-price-triggers gauge. Sampled by the
+// metrics scraper.
+func (m *Metrics) SetOracleArmedTriggers(n int) {
+	if m == nil || m.OracleArmedTriggers == nil {
+		return
+	}
+	m.OracleArmedTriggers.Set(float64(n))
 }
 
 // StatusClass converts an HTTP status into a coarse class label

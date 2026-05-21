@@ -17,9 +17,13 @@ import (
 // Service wires the PolicyEngine v3 REST surface.
 //
 // F2.6  entrega os `/challenge` endpoints (computa o challenge canônico que
-//       o owner assina off-chain).
+//
+//	o owner assina off-chain).
+//
 // F2.6b entrega os `/submit` endpoints exceto `request-signature/submit`
-//       (depende de MessageApproval PDA + CPI authority bump — F2.6c).
+//
+//	(depende de MessageApproval PDA + CPI authority bump — F2.6c).
+//
 // F10 hardening adiciona o wiring opcional de `AuditRecorder` para
 // registrar cada submit bem-sucedido na cadeia ed25519 do tenant.
 type Service struct {
@@ -41,6 +45,28 @@ type Service struct {
 	// response — the on-chain tx already landed.
 	auditAppender AuditAppender
 	resolveAPIKey func(*http.Request) (string, error)
+
+	// oracleRefresher (optional) prepends a refresh_feed to the gas-sponsored
+	// request_signature for each sponsored FeedCache the tx reads, so the price
+	// is fresh at signing time. Wired in main with the Pyth adapter program id.
+	oracleRefresher OracleRefresher
+}
+
+// OracleRefresher builds refresh_feed instructions to prepend to a
+// gas-sponsored request_signature so the FeedCache read by the tx is fresh at
+// signing time. Implemented by `oraclerelay.Refresher` and wired in main; it
+// filters the given FeedCache PDAs to the sponsored catalog (unknown caches are
+// skipped). Declared here to avoid importing oraclerelay (no import cycle).
+type OracleRefresher interface {
+	RefreshIxs(ctx context.Context, feedCaches []solana.PublicKey) ([]solana.Instruction, error)
+}
+
+// WithOracleRefresher wires refresh-on-sign for the gas-sponsored
+// request_signature path. Optional; without it, signing relies on the managed
+// crank / permissionless refresh for freshness.
+func (s *Service) WithOracleRefresher(r OracleRefresher) *Service {
+	s.oracleRefresher = r
+	return s
 }
 
 // AuditAppender is the minimal contract policy.Service needs from the
@@ -142,6 +168,9 @@ func (s *Service) MountRoutes(r chi.Router) {
 
 	r.Post("/v1/policy/request-signature/challenge", s.requestSignatureChallenge)
 	r.Post("/v1/policy/request-signature/submit", s.requestSignatureSubmit)
+	// On-demand (client-pays): returns the request_signature instruction for
+	// client-side tx assembly (post_update + refresh_feed + this ix). No send.
+	r.Post("/v1/policy/request-signature/build", s.requestSignatureBuild)
 
 	// F11b-Phase1 — recover_as_primary (disc 80). Primary owner signs the
 	// canonical challenge off-chain; gateway lands [precompile + main ix].
@@ -207,10 +236,10 @@ func mustHex32(s string) ([32]byte, error) {
 // ─── /v1/policy/init/challenge ──────────────────────────────────────────────
 
 type initChallengeRequest struct {
-	DwalletAddress       string         `json:"dwallet_address" validate:"required,solana_pubkey"`
-	InitAuthoritySlot    memberSlotJSON `json:"init_authority_slot" validate:"required"`
-	OwnerSlot            memberSlotJSON `json:"owner_slot" validate:"required"`
-	DefaultRecoveryHash  string         `json:"default_recovery_hash,omitempty" validate:"omitempty,hex_len=32"`
+	DwalletAddress      string         `json:"dwallet_address" validate:"required,solana_pubkey"`
+	InitAuthoritySlot   memberSlotJSON `json:"init_authority_slot" validate:"required"`
+	OwnerSlot           memberSlotJSON `json:"owner_slot" validate:"required"`
+	DefaultRecoveryHash string         `json:"default_recovery_hash,omitempty" validate:"omitempty,hex_len=32"`
 }
 
 type initChallengeResponse struct {
@@ -284,6 +313,11 @@ type addRuleRequest struct {
 	RuleGeneration    uint32         `json:"rule_generation"`
 	ExpectedNonce     uint64         `json:"expected_nonce"`
 	AppliesTo         uint8          `json:"applies_to" validate:"required,min=1,max=7"`
+	// Oracle-only (rule_kind=4). Both are the on-chain divided forms:
+	// freshness_seconds = value × 16; max_confidence_bps = value × 4
+	// (0 disables the confidence check). Ignored for other kinds.
+	FreshnessSecondsDiv16 uint8 `json:"freshness_seconds_div16,omitempty"`
+	MinConfidenceBpsDiv4  uint8 `json:"min_confidence_bps_div4,omitempty"`
 }
 
 type addRuleChallengeResponse struct {
@@ -302,12 +336,18 @@ func (s *Service) addRuleChallenge(w http.ResponseWriter, r *http.Request) {
 	if !httpx.BindAndValidate(w, r, &req, 4<<10) {
 		return
 	}
-	if RuleKind(req.RuleKind) != KindAllowlist {
+	switch RuleKind(req.RuleKind) {
+	case KindAllowlist:
+		s.addRuleAllowlistChallenge(w, req)
+	case KindOracle:
+		s.addRuleOracleChallenge(w, req)
+	default:
 		httpx.WriteError(w, http.StatusNotImplemented, "kind_not_supported_yet",
-			"F2.6 supports rule_kind=1 (Allowlist) only — other kinds land in F3..F9")
-		return
+			"rule_kind must be 1 (Allowlist) or 4 (Oracle)")
 	}
+}
 
+func (s *Service) addRuleAllowlistChallenge(w http.ResponseWriter, req addRuleRequest) {
 	dwallet, _ := solana.PublicKeyFromBase58(req.DwalletAddress)
 	initHash, _ := mustHex32(req.InitAuthorityHash)
 	ownerSlot, err := req.OwnerSlot.decode()
@@ -372,6 +412,74 @@ func (s *Service) addRuleChallenge(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// addRuleOracleChallenge builds the disc 13 (add_rule_oracle) admin challenge.
+// The on-chain handler reuses the allowlist-pause human message and seeds an
+// empty feed list (feeds_count=0); feeds are appended later via disc 122.
+func (s *Service) addRuleOracleChallenge(w http.ResponseWriter, req addRuleRequest) {
+	dwallet, _ := solana.PublicKeyFromBase58(req.DwalletAddress)
+	initHash, _ := mustHex32(req.InitAuthorityHash)
+	ownerSlot, err := req.OwnerSlot.decode()
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, "invalid_field", "owner_slot: "+err.Error())
+		return
+	}
+	engine, _, err := EnginePDA(s.ProgramID, dwallet, initHash)
+	if err != nil {
+		httpx.WriteError(w, http.StatusInternalServerError, "pda_derivation_failed", err.Error())
+		return
+	}
+	rulePDA, _, err := RulePDA(s.ProgramID, engine, KindOracle, req.RuleIndex)
+	if err != nil {
+		httpx.WriteError(w, http.StatusInternalServerError, "pda_derivation_failed", err.Error())
+		return
+	}
+
+	emptyFeeds := make([]byte, MaxOracleFeeds*OracleFeedBytes)
+	configHash, err := OracleConfigHash(req.AppliesTo, 0, req.FreshnessSecondsDiv16, req.MinConfidenceBpsDiv4, emptyFeeds)
+	if err != nil {
+		httpx.WriteError(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+
+	human := HumanMessageAllowlistPause(engine, dwallet)
+	gen := req.RuleGeneration
+	if gen == 0 {
+		gen = 1 // first add bumps generation 0 → 1
+	}
+	var genLE [4]byte
+	binaryLittleEndianPutUint32Local(genLE[:], gen)
+
+	ch := &AdminChallengeInput{
+		OpTag:          OpAddOracle,
+		HumanMessage:   human,
+		Engine:         engine,
+		DWallet:        dwallet,
+		RuleKind:       uint8(KindOracle),
+		RuleIndex:      req.RuleIndex,
+		RuleGeneration: gen,
+		ExpectedNonce:  req.ExpectedNonce,
+		ConfigHash:     configHash,
+		OwnerSlot:      ownerSlot,
+		Extras:         [][]byte{{req.AppliesTo}, {req.FreshnessSecondsDiv16}, {req.MinConfidenceBpsDiv4}, genLE[:]},
+	}
+	preimage, err := ch.Preimage()
+	if err != nil {
+		httpx.WriteError(w, http.StatusInternalServerError, "encode_failed", err.Error())
+		return
+	}
+	h, _ := ch.Hash()
+	httpx.WriteJSON(w, http.StatusOK, addRuleChallengeResponse{
+		ProgramID:     s.ProgramID.String(),
+		EngineAddress: engine.String(),
+		RulePDA:       rulePDA.String(),
+		OpTag:         string(OpAddOracle),
+		HumanMessage:  string(human),
+		ConfigHashHex: hex.EncodeToString(configHash[:]),
+		PreimageHex:   hex.EncodeToString(preimage),
+		ChallengeHex:  hex.EncodeToString(h[:]),
+	})
+}
+
 // ─── /v1/policy/rules/{ruleIndex}/items/add/challenge ───────────────────────
 
 type itemsAddRequest struct {
@@ -381,7 +489,15 @@ type itemsAddRequest struct {
 	RuleKind          uint8          `json:"rule_kind" validate:"required,min=1,max=8"`
 	RuleGeneration    uint32         `json:"rule_generation" validate:"required,min=1"`
 	ExpectedNonce     uint64         `json:"expected_nonce"`
-	DestinationHex    string         `json:"destination_hex" validate:"required,hex_len=32"`
+	// Allowlist item (rule_kind=1).
+	DestinationHex string `json:"destination_hex,omitempty" validate:"omitempty,hex_len=32"`
+	// Oracle feed (rule_kind=4). FeedAccount is the adapter FeedCache PDA;
+	// FeedOwner is the Pyth adapter program id (must be allowlisted on-chain).
+	// MinQ64/MaxQ64 are the canonical 1e8 price band (min <= max).
+	FeedAccount string `json:"feed_account,omitempty" validate:"omitempty,solana_pubkey"`
+	FeedOwner   string `json:"feed_owner,omitempty" validate:"omitempty,solana_pubkey"`
+	MinQ64      int64  `json:"min_q64,omitempty"`
+	MaxQ64      int64  `json:"max_q64,omitempty"`
 }
 
 type itemsAddChallengeResponse struct {
@@ -407,12 +523,22 @@ func (s *Service) itemsAddChallenge(w http.ResponseWriter, r *http.Request) {
 	if !httpx.BindAndValidate(w, r, &req, 4<<10) {
 		return
 	}
-	if RuleKind(req.RuleKind) != KindAllowlist {
+	switch RuleKind(req.RuleKind) {
+	case KindAllowlist:
+		s.itemsAddAllowlistChallenge(w, req, uint8(ruleIndex))
+	case KindOracle:
+		s.itemsAddOracleChallenge(w, req, uint8(ruleIndex))
+	default:
 		httpx.WriteError(w, http.StatusNotImplemented, "kind_not_supported_yet",
-			"F2.6 supports rule_kind=1 (Allowlist) only — other kinds land in F3..F9")
+			"rule_kind must be 1 (Allowlist) or 4 (Oracle)")
+	}
+}
+
+func (s *Service) itemsAddAllowlistChallenge(w http.ResponseWriter, req itemsAddRequest, ruleIndex uint8) {
+	if req.DestinationHex == "" {
+		httpx.WriteError(w, http.StatusBadRequest, "invalid_field", "destination_hex is required for rule_kind=1")
 		return
 	}
-
 	dwallet, _ := solana.PublicKeyFromBase58(req.DwalletAddress)
 	initHash, _ := mustHex32(req.InitAuthorityHash)
 	ownerSlot, err := req.OwnerSlot.decode()
@@ -427,7 +553,7 @@ func (s *Service) itemsAddChallenge(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusInternalServerError, "pda_derivation_failed", err.Error())
 		return
 	}
-	rulePDA, _, err := RulePDA(s.ProgramID, engine, KindAllowlist, uint8(ruleIndex))
+	rulePDA, _, err := RulePDA(s.ProgramID, engine, KindAllowlist, ruleIndex)
 	if err != nil {
 		httpx.WriteError(w, http.StatusInternalServerError, "pda_derivation_failed", err.Error())
 		return
@@ -443,7 +569,7 @@ func (s *Service) itemsAddChallenge(w http.ResponseWriter, r *http.Request) {
 		Engine:         engine,
 		DWallet:        dwallet,
 		RuleKind:       uint8(KindAllowlist),
-		RuleIndex:      uint8(ruleIndex),
+		RuleIndex:      ruleIndex,
 		RuleGeneration: req.RuleGeneration,
 		ExpectedNonce:  req.ExpectedNonce,
 		ConfigHash:     [32]byte{}, // matches the placeholder in lib.rs disc 120
@@ -465,6 +591,99 @@ func (s *Service) itemsAddChallenge(w http.ResponseWriter, r *http.Request) {
 		PreimageHex:   hex.EncodeToString(preimage),
 		ChallengeHex:  hex.EncodeToString(h[:]),
 	})
+}
+
+// itemsAddOracleChallenge builds the disc 122 (update_rule_oracle_add_feed)
+// admin challenge. rule_generation must be the post-update value (current+1).
+func (s *Service) itemsAddOracleChallenge(w http.ResponseWriter, req itemsAddRequest, ruleIndex uint8) {
+	feedAccount, feedOwner, ok := decodeOracleFeed(w, req.FeedAccount, req.FeedOwner, req.MinQ64, req.MaxQ64)
+	if !ok {
+		return
+	}
+	dwallet, _ := solana.PublicKeyFromBase58(req.DwalletAddress)
+	initHash, _ := mustHex32(req.InitAuthorityHash)
+	ownerSlot, err := req.OwnerSlot.decode()
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, "invalid_field", "owner_slot: "+err.Error())
+		return
+	}
+	engine, _, err := EnginePDA(s.ProgramID, dwallet, initHash)
+	if err != nil {
+		httpx.WriteError(w, http.StatusInternalServerError, "pda_derivation_failed", err.Error())
+		return
+	}
+	rulePDA, _, err := RulePDA(s.ProgramID, engine, KindOracle, ruleIndex)
+	if err != nil {
+		httpx.WriteError(w, http.StatusInternalServerError, "pda_derivation_failed", err.Error())
+		return
+	}
+
+	human := HumanMessageOracleAddFeed(feedAccount, feedOwner, req.MinQ64, req.MaxQ64, engine, dwallet)
+	var genLE [4]byte
+	binaryLittleEndianPutUint32Local(genLE[:], req.RuleGeneration)
+	minLE, maxLE := int64LE(req.MinQ64), int64LE(req.MaxQ64)
+	fa, fo := feedAccount.Bytes(), feedOwner.Bytes()
+
+	ch := &AdminChallengeInput{
+		OpTag:          OpOracleAddFeed,
+		HumanMessage:   human,
+		Engine:         engine,
+		DWallet:        dwallet,
+		RuleKind:       uint8(KindOracle),
+		RuleIndex:      ruleIndex,
+		RuleGeneration: req.RuleGeneration,
+		ExpectedNonce:  req.ExpectedNonce,
+		ConfigHash:     [32]byte{}, // placeholder per lib.rs disc 122
+		OwnerSlot:      ownerSlot,
+		Extras:         [][]byte{fa, fo, minLE[:], maxLE[:], genLE[:]},
+	}
+	preimage, err := ch.Preimage()
+	if err != nil {
+		httpx.WriteError(w, http.StatusInternalServerError, "encode_failed", err.Error())
+		return
+	}
+	h, _ := ch.Hash()
+	httpx.WriteJSON(w, http.StatusOK, itemsAddChallengeResponse{
+		ProgramID:     s.ProgramID.String(),
+		EngineAddress: engine.String(),
+		RulePDA:       rulePDA.String(),
+		OpTag:         string(OpOracleAddFeed),
+		HumanMessage:  string(human),
+		PreimageHex:   hex.EncodeToString(preimage),
+		ChallengeHex:  hex.EncodeToString(h[:]),
+	})
+}
+
+// decodeOracleFeed validates + decodes the oracle feed fields shared by the
+// items/add oracle challenge and submit handlers. Writes the HTTP error and
+// returns ok=false on any invalid field.
+func decodeOracleFeed(w http.ResponseWriter, feedAccountStr, feedOwnerStr string, minQ64, maxQ64 int64) (feedAccount, feedOwner solana.PublicKey, ok bool) {
+	if feedAccountStr == "" || feedOwnerStr == "" {
+		httpx.WriteError(w, http.StatusBadRequest, "invalid_field",
+			"feed_account and feed_owner are required for rule_kind=4")
+		return feedAccount, feedOwner, false
+	}
+	if minQ64 > maxQ64 {
+		httpx.WriteError(w, http.StatusBadRequest, "invalid_field", "min_q64 must be <= max_q64")
+		return feedAccount, feedOwner, false
+	}
+	feedAccount, err := solana.PublicKeyFromBase58(feedAccountStr)
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, "invalid_field", "feed_account must be base58")
+		return feedAccount, feedOwner, false
+	}
+	feedOwner, err = solana.PublicKeyFromBase58(feedOwnerStr)
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, "invalid_field", "feed_owner must be base58")
+		return feedAccount, feedOwner, false
+	}
+	return feedAccount, feedOwner, true
+}
+
+func int64LE(v int64) [8]byte {
+	var b [8]byte
+	binaryLittleEndianPutUint64Local(b[:], uint64(v))
+	return b
 }
 
 // ─── /v1/policy/request-signature/challenge ─────────────────────────────────
@@ -555,4 +774,15 @@ func binaryLittleEndianPutUint32Local(dst []byte, v uint32) {
 	dst[1] = byte(v >> 8)
 	dst[2] = byte(v >> 16)
 	dst[3] = byte(v >> 24)
+}
+
+func binaryLittleEndianPutUint64Local(dst []byte, v uint64) {
+	dst[0] = byte(v)
+	dst[1] = byte(v >> 8)
+	dst[2] = byte(v >> 16)
+	dst[3] = byte(v >> 24)
+	dst[4] = byte(v >> 32)
+	dst[5] = byte(v >> 40)
+	dst[6] = byte(v >> 48)
+	dst[7] = byte(v >> 56)
 }

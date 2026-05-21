@@ -44,6 +44,8 @@ const (
 	SolanaListenerLockID    int64 = 0x416E64726F6701
 	FutureSignWatcherLockID int64 = 0x416E64726F6702
 	AuditSnapshotLockID     int64 = 0x416E64726F6703
+	OracleRelayLockID       int64 = 0x416E64726F6704
+	OracleMonitorLockID     int64 = 0x416E64726F6705
 )
 
 // Runner runs Func only when this process owns the advisory lock for Name.
