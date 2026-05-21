@@ -43,6 +43,8 @@ gateway/
 │   ├── webhooks/           # CRUD + dispatcher worker (HMAC + retries)
 │   ├── policy/             # PolicyEngine v3 service (Go side): challenges, codecs, PDA derivation, request_signature builders, recover_as_primary + quorum_session_* + passkey_session_* handlers
 │   ├── futuresign/         # Trigger watcher (oracle/slot/event/external)
+│   ├── oraclerelay/        # Pyth adapter: FeedCache bootstrap + refresh-on-sign + /v1/oracle/* admin + Hermes catalog (crank off by default)
+│   ├── oraclemonitor/      # Managed price-trigger keeper: arms → fires request_signature when a band holds
 │   ├── audit/              # Per-tenant ed25519 hash chain (env or Vault Transit signer)
 │   ├── netsafety/          # SSRF guard for outbound URLs
 │   ├── mcp/                # MCP JSON-RPC + SSE server
@@ -67,10 +69,11 @@ gateway/
 | GET | `/health` | Liveness |
 | GET | `/health/ready` | Readiness (DB + Redis + upstream + DLQ) |
 | GET | `/openapi.json` | OpenAPI 3.1 spec |
-| GET | `/capabilities` | Public feature matrix — includes `features.futureSignWatcher`, `features.redisBackedIdempotency`, and `features.rateLimitMode` (`"disabled"` / `"fail_open"` / `"fail_closed"`) so clients can tell which gateway-native features are actually operational, not just wired |
+| GET | `/capabilities` | Public feature matrix — includes `features.futureSignWatcher`, `features.oracleMonitor` (price-trigger keeper running), `features.redisBackedIdempotency`, and `features.rateLimitMode` (`"disabled"` / `"fail_open"` / `"fail_closed"`) so clients can tell which gateway-native features are actually operational, not just wired |
 | GET | `/v1/pricing` | Token cost per route |
 | POST | `/v1/pricing/estimate` | Estimate cost for a workload |
 | GET | `/metrics` | Prometheus, `X-Admin-Token`-gated |
+| GET·POST·DELETE | `/v1/oracle/catalog`, `/v1/oracle/feeds`, `/v1/oracle/feeds/{id}/{refresh,pause,resume}` | Pyth feed management — `X-Admin-Token`-gated (feeds are global shared infra: a tenant key must never register/pause platform feeds). |
 
 ## Authenticated endpoints (`X-Api-Key`)
 
@@ -110,6 +113,7 @@ production, `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, `Per
 | **Webhooks** | CRUD + retry | admin | gateway |
 | **Audit log** | `GET audit/log`, `GET audit/log/export`, `GET audit/log/verify`, `GET audit/log/{seq}/proof` — per-tenant signed hash-chain (read + export + verify + Merkle proof). The `verify` response also carries the tenant's ed25519 `publicKeyB64` so external replayers can re-check signatures. | admin | gateway |
 | **Future-sign triggers** | oracle / slot / event / external watchers | admin | gateway |
+| **Oracle price triggers** | `oracle/triggers` (arm / list / get / cancel) — managed Pyth price-trigger keeper: fires a pre-built `request_signature` when the price band holds. Fan-out via webhooks (`oracle_trigger.fired` / `.expired`). | write | gateway |
 
 Full machine-readable catalogue of the proxied routes in `internal/routes/routes.go`; everything
 (including the gateway-native endpoints above) is in `/openapi.json`.
@@ -237,6 +241,8 @@ Consumption order (atomic): `credits → monthly → overage`. Refund on upstrea
 | `audit-snapshot-worker` | 24h | Daily NDJSON.gz dump of `audit_log` to R2/S3 for DR. | `AUDIT_SNAPSHOT_ENABLED=true` + S3 creds | leader-elected |
 | `solana-listener` | continuous | `logsSubscribe` → CanonicalEvent fanout to tenants | `SOLANA_RPC_URL` set + ≥1 program id | leader-elected |
 | `future-sign-watcher` | 5s (slot/time) · 30s (external) | Fire future-sign triggers (oracle/slot/event/external) → ika engine | `IKA_UPSTREAM_URL` + `INTERNAL_API_KEY` set | leader-elected |
+| `oracle-monitor` | `ORACLE_MONITOR_TICK_SECONDS` (default 10s) | Read live Pyth prices (Hermes) and fire pre-built `request_signature` when a price band holds; reaps stuck `firing` to terminal `failed` (no double-sign) | policy-engine + gas sponsor + `SOLANA_RPC_URL` set | leader-elected |
+| `oracle-relay` | bootstrap one-shot; periodic crank only if `PYTH_ADAPTER_CRANK_ENABLED=true` | Bootstrap FeedCache PDAs + serve `/v1/oracle/*` admin routes. Periodic refresh crank retired by default (F7.5) — refresh-on-sign + `oracle-monitor` keep feeds fresh at signing time | `PYTH_ADAPTER_PROGRAM_ID` + `PYTH_ADAPTER_AUTHORITY_KEY` + `SOLANA_RPC_URL` set | leader-elected |
 | `metrics-scraper` | 15s | Sample runtime gauges (pool, breaker, audit outbox, webhook backlog) | metrics enabled | safe (per-replica) |
 
 Leader election uses Postgres advisory locks (`pg_try_advisory_lock`) on a dedicated pool connection
@@ -320,6 +326,39 @@ blocks on Vault, and a Vault outage shows up as a growing `gateway_audit_outbox_
 
 Worker tunables (env, optional): `AUDIT_SIGNER_BATCH=100`, `AUDIT_SIGNER_TICK_MS=500`,
 `AUDIT_SIGNER_DEGRADED_AGE_SEC=30` (flip `gateway_audit_degraded=1` above this).
+
+### Oracle (Pyth adapter + price triggers)
+| Var | Default | Notes |
+|-----|---------|-------|
+| `PYTH_ADAPTER_PROGRAM_ID` | empty | Deployed `pyth-adapter` program id (devnet `A6xjw8jkJTFjpjHCRSFxVt1d1KbBZdh3XBNYvTfLZxP2`). Enables refresh-on-sign + the `/v1/oracle/*` admin surface + the Hermes catalog. |
+| `PYTH_ADAPTER_AUTHORITY_KEY` | empty | 64-byte solana-keygen JSON array for the adapter authority — signs the one-shot FeedCache bootstrap (init) + the kill-switch (pause/transfer). NOT needed for refresh-on-sign (the gas sponsor pays; refresh is permissionless). |
+| `PYTH_ADAPTER_CLUSTER` | `devnet` | Cluster label for feed rows + the price-trigger registry. |
+| `PYTH_ADAPTER_FEEDS` | empty | JSON array of feeds to bootstrap, e.g. `[{"label":"SOL/USD","feedIdHex":"ef0d8b6f…","pythAccount":"7UVimffx…","pythAccountKind":"price_feed"}]`. Feeds can also be registered at runtime via `POST /v1/oracle/feeds`. |
+| `PYTH_HERMES_URL` | `https://hermes.pyth.network` | Pyth Hermes endpoint — used by `GET /v1/oracle/catalog` and by the price-trigger monitor's live-price reads. |
+| `PYTH_ADAPTER_CRANK_ENABLED` | `false` | Periodic refresh crank. **Retired by default (F7.5)** — refresh-on-sign + the monitor keep feeds fresh on demand. Set `true` only if a feed must stay warm for reads outside a signing tx. Bootstrap + admin routes run regardless. |
+| `ORACLE_MONITOR_TICK_SECONDS` | `10` | How often the managed price-trigger monitor scans armed triggers + reads Hermes. The monitor runs only when the policy-engine + gas sponsor (`ANDROMEDA_GAS_SPONSOR_KEYPAIR`) + `SOLANA_RPC_URL` are all configured. |
+
+The price-trigger monitor (`/v1/oracle/triggers`) and refresh-on-sign reuse the PolicyEngine signing wiring (`ANDROMEDA_POLICY_ENGINE_PROGRAM_ID`, `ANDROMEDA_GAS_SPONSOR_KEYPAIR`, `SOLANA_RPC_URL`); the gas sponsor pays both the refresh and the fired `request_signature`, so a dev needs no SOL.
+
+### Oracle price-trigger metrics & alerts (F7.5/F7.6)
+
+The managed monitor + feed relay export (bounded labels, no per-feed/per-tenant cardinality):
+
+| Metric | Type | Meaning |
+|--------|------|---------|
+| `gateway_oracle_monitor_trigger_fires_total{result}` | counter | fires by `result` (`fired` = `request_signature` landed, `failed` = fire errored) |
+| `gateway_oracle_monitor_triggers_expired_total` | counter | armed triggers reaped at expiry without firing |
+| `gateway_oracle_monitor_errors_total{stage}` | counter | loop errors by `stage` (`tick`/`hermes`/`claim`/`reap`) |
+| `gateway_oracle_monitor_armed_triggers` | gauge | armed triggers (sampled every 15s) |
+| `gateway_oracle_relay_feed_refresh_total{result}` | counter | FeedCache refresh outcomes (`success`/`skipped`/`stale`/`error`) |
+
+Recommended alerts (PromQL):
+
+- **Fire failure rate** — `rate(gateway_oracle_monitor_trigger_fires_total{result="failed"}[10m]) / clamp_min(rate(gateway_oracle_monitor_trigger_fires_total[10m]), 1e-9) > 0.1` for 10 min → page (triggers failing to land; a stop-loss may not be executing).
+- **Hermes outage** — `increase(gateway_oracle_monitor_errors_total{stage="hermes"}[5m]) > 0` sustained → warning (no live prices ⇒ no fires; HA the monitor / check Hermes).
+- **Monitor stalled** — the `oracle-monitor` worker is leader-elected; if the leader dies, armed triggers stop firing. Alert on absence of `gateway_oracle_monitor_armed_triggers` samples (scrape gap) or on a stuck non-zero `armed_triggers` with zero fires during known price moves.
+
+Per-feed gauges (`feed_age_seconds{feed}`, `feed_price{feed}`) and a latency histogram are deferred (F7.6) — they need per-feed sampling against on-chain `FeedCache` state.
 
 ### Audit snapshot to R2/S3 (opt-in, DR defence-in-depth)
 | Var | Default | Notes |

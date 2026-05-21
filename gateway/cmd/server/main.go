@@ -27,6 +27,8 @@ import (
 	gwmetrics "github.com/shinkalabs/andromeda-gateway/internal/metrics"
 	"github.com/shinkalabs/andromeda-gateway/internal/netsafety"
 	"github.com/shinkalabs/andromeda-gateway/internal/observability"
+	"github.com/shinkalabs/andromeda-gateway/internal/oraclemonitor"
+	"github.com/shinkalabs/andromeda-gateway/internal/oraclerelay"
 	"github.com/shinkalabs/andromeda-gateway/internal/policy"
 	"github.com/shinkalabs/andromeda-gateway/internal/pricing"
 	"github.com/shinkalabs/andromeda-gateway/internal/ratelimit"
@@ -320,29 +322,146 @@ func main() {
 		logger.Info("policy-engine v3 disabled — set ANDROMEDA_POLICY_ENGINE_PROGRAM_ID to enable")
 	}
 
+	// --- Refresh-on-sign (optional) ---
+	// When the Pyth adapter program id is configured, the gas-sponsored
+	// request_signature prepends a refresh_feed for each sponsored FeedCache it
+	// reads, so the price is fresh at the signing moment. Uses the policy gas
+	// sponsor as fee payer; refresh_feed is permissionless, so no authority key
+	// is needed. Independent of the managed crank below (either/both can run).
+	if policyV3Svc != nil && cfg.PythAdapterProgramID != "" {
+		adapterPID, err := solana.PublicKeyFromBase58(cfg.PythAdapterProgramID)
+		if err != nil {
+			logger.Error("refresh-on-sign: invalid PYTH_ADAPTER_PROGRAM_ID", "err", err)
+			os.Exit(1)
+		}
+		refresher, err := oraclerelay.NewRefresher(adapterPID, cfg.PythAdapterCluster, oraclerelay.NewStore(db.Pool()))
+		if err != nil {
+			logger.Error("refresh-on-sign: refresher init failed", "err", err)
+			os.Exit(1)
+		}
+		policyV3Svc.WithOracleRefresher(refresher)
+		logger.Info("policy-engine v3 refresh-on-sign enabled", "adapter", adapterPID.String())
+	}
+
+	// --- Pyth adapter oracle relay (optional, leader-elected crank) ---
+	// Refreshes the on-chain FeedCache PDAs so policy-engine KIND_ORACLE rules
+	// see fresh prices. Needs the adapter program id + authority key + RPC.
+	// The Service is also handed to the HTTP server for the `/v1/oracle/*`
+	// admin routes; the crank loop itself runs only on the elected leader.
+	var oracleRelaySvc *oraclerelay.Service
+	if cfg.PythAdapterProgramID != "" && cfg.PythAdapterAuthorityKey != "" && cfg.SolanaRPCURL != "" {
+		adapterPID, err := solana.PublicKeyFromBase58(cfg.PythAdapterProgramID)
+		if err != nil {
+			logger.Error("pyth adapter: invalid PYTH_ADAPTER_PROGRAM_ID", "err", err)
+			os.Exit(1)
+		}
+		relayRPC := rpc.New(cfg.SolanaRPCURL)
+		relaySigner, err := gasponsor.New(cfg.PythAdapterAuthorityKey, relayRPC)
+		if err != nil {
+			logger.Error("pyth adapter: authority key init failed", "err", err)
+			os.Exit(1)
+		}
+		var seeds []oraclerelay.FeedSeed
+		if cfg.PythAdapterFeedsJSON != "" {
+			if err := json.Unmarshal([]byte(cfg.PythAdapterFeedsJSON), &seeds); err != nil {
+				logger.Error("pyth adapter: invalid PYTH_ADAPTER_FEEDS json", "err", err)
+				os.Exit(1)
+			}
+		}
+		relaySvc, err := oraclerelay.NewService(oraclerelay.Options{
+			ProgramID:    adapterPID,
+			Cluster:      cfg.PythAdapterCluster,
+			Tick:         cfg.PythAdapterTick,
+			Seeds:        seeds,
+			RPC:          relayRPC,
+			Signer:       relaySigner,
+			Store:        oraclerelay.NewStore(db.Pool()),
+			HermesURL:    cfg.PythHermesURL,
+			Logger:       logger,
+			CrankEnabled: cfg.PythAdapterCrankEnabled,
+			Metrics:      metrics,
+		})
+		if err != nil {
+			logger.Error("pyth adapter: oracle relay init failed", "err", err)
+			os.Exit(1)
+		}
+		oracleRelaySvc = relaySvc
+		spawn("oracle-relay-leader", (&leader.Runner{
+			Pool:   db.Pool(),
+			Name:   "oracle-relay",
+			LockID: leader.OracleRelayLockID,
+			Func:   func(ctx context.Context) { relaySvc.Start(ctx) },
+			Logger: logger,
+		}).Start)
+		logger.Info("pyth adapter oracle relay running (leader-elected)",
+			"program_id", adapterPID.String(), "cluster", cfg.PythAdapterCluster,
+			"authority", relaySigner.PublicKey().String(), "feeds", len(seeds),
+			"crank_enabled", cfg.PythAdapterCrankEnabled)
+	} else {
+		logger.Info("pyth adapter oracle relay disabled — set PYTH_ADAPTER_PROGRAM_ID, PYTH_ADAPTER_AUTHORITY_KEY and SOLANA_RPC_URL to enable")
+	}
+
+	// --- Oracle price-trigger monitor (F7.5, leader-elected managed keeper) ---
+	// Reads live Pyth prices from Hermes (off-chain, free) and fires the
+	// pre-built request_signature (gas-sponsored, refresh-on-sign) when a
+	// trigger's band holds. The on-chain dispatch re-validates the real price,
+	// so the monitor is an untrusted trigger — it can never forge a signature.
+	// Needs the policy service as the firer (with a gas sponsor + RPC). The
+	// store is always created so /v1/oracle/triggers is mounted; only the
+	// watcher is gated (capabilities reports oracleMonitor only when running).
+	omStore := oraclemonitor.NewStore(db.Pool())
+	omRunning := false
+	if policyV3Svc != nil && cfg.GasSponsorKeypairJSON != "" && cfg.SolanaRPCURL != "" {
+		omWatcher := oraclemonitor.NewWatcher(oraclemonitor.WatcherOptions{
+			Store:     omStore,
+			Prices:    oraclemonitor.NewHermesClient(cfg.PythHermesURL),
+			Firer:     policyV3Svc,
+			Publisher: whPublisher,
+			Metrics:   metrics,
+			Cluster:   cfg.PythAdapterCluster,
+			Tick:      cfg.OracleMonitorTick,
+			Logger:    logger,
+		})
+		spawn("oracle-monitor-leader", (&leader.Runner{
+			Pool:   db.Pool(),
+			Name:   "oracle-monitor",
+			LockID: leader.OracleMonitorLockID,
+			Func:   func(ctx context.Context) { omWatcher.Start(ctx) },
+			Logger: logger,
+		}).Start)
+		omRunning = true
+		logger.Info("oracle price-trigger monitor running (leader-elected)",
+			"cluster", cfg.PythAdapterCluster, "hermes", cfg.PythHermesURL, "tick", cfg.OracleMonitorTick)
+	} else {
+		logger.Info("oracle price-trigger monitor disabled — needs policy-engine + ANDROMEDA_GAS_SPONSOR_KEYPAIR + SOLANA_RPC_URL")
+	}
+
 	// Billing migrated to backend (M1 of architecture split). Gateway
 	// no longer boots a Stripe service or overage worker — those live
 	// in `backend/cmd/server`.
 
 	// --- HTTP server ---
 	srv := api.NewServer(api.Deps{
-		Config:              cfg,
-		Store:               db,
-		Limiter:             limiter,
-		Pricer:              pricer,
-		Usage:               recorder,
-		Upstreams:           ups,
-		Redis:               rdb,
-		Audit:               auditRec,
-		WebhookStore:        whStore,
-		PolicyV3Service:     policyV3Svc,
-		PolicySubscriptions: policySubsStore,
+		Config:                   cfg,
+		Store:                    db,
+		Limiter:                  limiter,
+		Pricer:                   pricer,
+		Usage:                    recorder,
+		Upstreams:                ups,
+		Redis:                    rdb,
+		Audit:                    auditRec,
+		WebhookStore:             whStore,
+		PolicyV3Service:          policyV3Svc,
+		PolicySubscriptions:      policySubsStore,
+		OracleRelay:              oracleRelaySvc,
+		OracleMonitorStore:       omStore,
+		OracleMonitorRunning:     omRunning,
 		FutureSignStore:          fsStore,
 		FutureSignWatcherRunning: fsWatcherRunning,
 		Metrics:                  metrics,
-		MetricsHandler:      metricsHandler,
-		URLGuard:            urlGuard,
-		Logger:              logger,
+		MetricsHandler:           metricsHandler,
+		URLGuard:                 urlGuard,
+		Logger:                   logger,
 	})
 
 	// Background scraper that pushes runtime gauges (usage buffer +
@@ -352,13 +471,20 @@ func main() {
 	spawn("metrics-scraper", func(ctx context.Context) {
 		t := time.NewTicker(15 * time.Second)
 		defer t.Stop()
-		updateGauges(ctx, metrics, recorder, ups, whStore, db)
+		sample := func() {
+			updateGauges(ctx, metrics, recorder, ups, whStore, db)
+			// Armed price triggers (F7.5 monitor observability).
+			if n, err := omStore.CountArmed(ctx, cfg.PythAdapterCluster); err == nil {
+				metrics.SetOracleArmedTriggers(n)
+			}
+		}
+		sample()
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				updateGauges(ctx, metrics, recorder, ups, whStore, db)
+				sample()
 			}
 		}
 	})
