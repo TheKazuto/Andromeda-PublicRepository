@@ -35,6 +35,10 @@ type featureFlags struct {
 	// Having the store alone is not enough — without the watcher, armed
 	// triggers never fire.
 	FutureSign bool `json:"futureSign"`
+	// `oracleMonitor` is ONLY true when the leader-elected price-trigger watcher
+	// is running (store wired AND watcher started); otherwise armed price
+	// triggers never fire.
+	OracleMonitor bool `json:"oracleMonitor"`
 	// `rateLimit` and `idempotency` are true only when Redis is configured;
 	// without Redis the middleware is a no-op. See `rateLimitMode` and
 	// `redisBackedIdempotency` below for the operational nuance the client
@@ -114,6 +118,7 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, _ *http.Request) {
 			Webhooks:               s.webhookStore != nil,
 			Policies:               s.policyV3Service != nil,
 			FutureSign:             s.futureSignStore != nil && watcherRunning,
+			OracleMonitor:          s.oracleMonitorStore != nil && s.oracleMonitorRunning,
 			RateLimit:              redisConfigured,
 			Idempotency:            redisConfigured,
 			FutureSignWatcher:      watcherRunning,

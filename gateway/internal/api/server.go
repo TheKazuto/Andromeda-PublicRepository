@@ -22,6 +22,8 @@ import (
 	"github.com/shinkalabs/andromeda-gateway/internal/mcp"
 	gwmetrics "github.com/shinkalabs/andromeda-gateway/internal/metrics"
 	"github.com/shinkalabs/andromeda-gateway/internal/netsafety"
+	"github.com/shinkalabs/andromeda-gateway/internal/oraclemonitor"
+	"github.com/shinkalabs/andromeda-gateway/internal/oraclerelay"
 	"github.com/shinkalabs/andromeda-gateway/internal/policy"
 	"github.com/shinkalabs/andromeda-gateway/internal/pricing"
 	"github.com/shinkalabs/andromeda-gateway/internal/ratelimit"
@@ -34,24 +36,27 @@ import (
 
 // Server bundles the dependencies the HTTP layer needs.
 type Server struct {
-	cfg              *config.Config
-	store            store.Store
-	limiter          ratelimit.Limiter
-	pricer           *pricing.Pricer
-	usage            *usage.Recorder
-	upstreams        *upstream.Registry
-	logger           *slog.Logger
-	idempotencyChain func(http.Handler) http.Handler
-	auditRecorder    *audit.Recorder
-	auditReader      *audit.Reader
-	webhookStore     *webhooks.Store
-	policyV3Service  *policy.Service
+	cfg                      *config.Config
+	store                    store.Store
+	limiter                  ratelimit.Limiter
+	pricer                   *pricing.Pricer
+	usage                    *usage.Recorder
+	upstreams                *upstream.Registry
+	logger                   *slog.Logger
+	idempotencyChain         func(http.Handler) http.Handler
+	auditRecorder            *audit.Recorder
+	auditReader              *audit.Reader
+	webhookStore             *webhooks.Store
+	policyV3Service          *policy.Service
+	oracleRelay              *oraclerelay.Service
+	oracleMonitorStore       *oraclemonitor.Store
+	oracleMonitorRunning     bool
 	futureSignStore          *futuresign.Store
 	futureSignWatcherRunning bool
 	mcpTools                 *mcp.ToolRegistry
-	metrics          *gwmetrics.Metrics
-	metricsHandler   http.Handler
-	urlGuard         *netsafety.Validator
+	metrics                  *gwmetrics.Metrics
+	metricsHandler           http.Handler
+	urlGuard                 *netsafety.Validator
 	// rdb is the shared *redis.Client (nil when REDIS_URL is empty). The
 	// OAuth broker requires it; other features no-op without it.
 	rdb *redis.Client
@@ -73,14 +78,21 @@ type Deps struct {
 	WebhookStore        *webhooks.Store
 	PolicyV3Service     *policy.Service
 	PolicySubscriptions *policy.SubscriptionsStore
-	FutureSignStore     *futuresign.Store
+	OracleRelay         *oraclerelay.Service
+	// OracleMonitorStore backs the tenant-facing /v1/oracle/triggers routes.
+	OracleMonitorStore *oraclemonitor.Store
+	// OracleMonitorRunning signals the leader-elected price-trigger watcher is
+	// running. Capabilities only reports `oracleMonitor: true` when BOTH the
+	// store is wired AND this flag is set (otherwise armed triggers never fire).
+	OracleMonitorRunning bool
+	FutureSignStore      *futuresign.Store
 	// FutureSignWatcherRunning signals that the in-process watcher goroutines
 	// (slot_time + external_webhook loops) have been started. Capabilities
 	// only reports `futureSign: true` when BOTH the store is wired AND this
 	// flag is set — otherwise armed triggers would sit forever.
 	FutureSignWatcherRunning bool
 	Metrics                  *gwmetrics.Metrics
-	MetricsHandler      http.Handler
+	MetricsHandler           http.Handler
 	// URLGuard is the SSRF validator used for tenant-supplied webhook /
 	// future-sign callback URLs. nil → a ModeProduction guard.
 	URLGuard *netsafety.Validator
@@ -146,25 +158,28 @@ func NewServer(d Deps) *Server {
 	}
 
 	return &Server{
-		cfg:              d.Config,
-		store:            d.Store,
-		limiter:          d.Limiter,
-		pricer:           d.Pricer,
-		usage:            d.Usage,
-		upstreams:        d.Upstreams,
-		logger:           d.Logger,
-		idempotencyChain: idem,
-		auditRecorder:    d.Audit,
-		auditReader:      reader,
-		webhookStore:     d.WebhookStore,
-		policyV3Service:  d.PolicyV3Service,
+		cfg:                      d.Config,
+		store:                    d.Store,
+		limiter:                  d.Limiter,
+		pricer:                   d.Pricer,
+		usage:                    d.Usage,
+		upstreams:                d.Upstreams,
+		logger:                   d.Logger,
+		idempotencyChain:         idem,
+		auditRecorder:            d.Audit,
+		auditReader:              reader,
+		webhookStore:             d.WebhookStore,
+		policyV3Service:          d.PolicyV3Service,
+		oracleRelay:              d.OracleRelay,
+		oracleMonitorStore:       d.OracleMonitorStore,
+		oracleMonitorRunning:     d.OracleMonitorRunning,
 		futureSignStore:          d.FutureSignStore,
 		futureSignWatcherRunning: d.FutureSignWatcherRunning,
 		mcpTools:                 tools,
-		metrics:          d.Metrics,
-		metricsHandler:   d.MetricsHandler,
-		urlGuard:         urlGuard,
-		rdb:              d.Redis,
+		metrics:                  d.Metrics,
+		metricsHandler:           d.MetricsHandler,
+		urlGuard:                 urlGuard,
+		rdb:                      d.Redis,
 	}
 }
 
@@ -325,6 +340,51 @@ func (s *Server) Router() http.Handler {
 				fsOpts.Audit = &futureSignAuditBridge{rec: s.auditRecorder}
 			}
 			futuresign.MountRoutes(sub, fsOpts)
+		})
+	}
+
+	// ----- Oracle price triggers (F7.5 managed monitor, per-tenant) -----
+	// A dev arms a price trigger; the leader-elected watcher fires the pre-built
+	// request_signature when the band holds. A trigger is a scheduled
+	// request_signature, so it is gated like the signing surface: ScopeWrite +
+	// subscription + rate limit + idempotency + quota.
+	if s.oracleMonitorStore != nil {
+		r.Group(func(sub chi.Router) {
+			sub.Use(s.requireAPIKey)
+			sub.Use(s.requireScope(auth.ScopeWrite))
+			sub.Use(s.requireSubscription)
+			sub.Use(s.applyRateLimitFor(routes.RateClassTx))
+			sub.Use(s.idempotencyChain)
+			sub.Use(s.chargeQuota("gateway.oracle-triggers.admin"))
+			omOpts := oraclemonitor.RouteOptions{
+				Store:     s.oracleMonitorStore,
+				ResolveID: resolveAPIKeyID,
+				Cluster:   s.cfg.PythAdapterCluster,
+			}
+			// The policy service is the firer; passing it also enables
+			// authoritative arm-time validation of the request_signature payload.
+			if s.policyV3Service != nil {
+				omOpts.Firer = s.policyV3Service
+			}
+			if s.auditRecorder != nil {
+				omOpts.Audit = &oracleMonitorAuditBridge{rec: s.auditRecorder}
+			}
+			oraclemonitor.MountRoutes(sub, omOpts)
+		})
+	}
+
+	// ----- Pyth oracle relay admin (operator-gated) -----
+	// Oracle feeds are GLOBAL shared infrastructure: every tenant's KIND_ORACLE
+	// rule reads them. Management is therefore gated by the gateway operator
+	// token (X-Admin-Token, same gate as /metrics), NOT a per-tenant API-key
+	// admin scope — a tenant admin key must never be able to pause/delete or
+	// register platform-wide price feeds. The on-chain ops are idempotent by
+	// design (Upsert ON CONFLICT, init data_len guard, publish_time gate), so no
+	// idempotency middleware is needed here.
+	if s.oracleRelay != nil {
+		r.Group(func(sub chi.Router) {
+			sub.Use(s.requireAdmin)
+			oraclerelay.MountRoutes(sub, oraclerelay.RouteOptions{Service: s.oracleRelay})
 		})
 	}
 

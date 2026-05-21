@@ -82,6 +82,25 @@ type Config struct {
 	// Devnet: ARfJadMTH8mvAWprE8oMoRGNamKVDX9GV3URvudYyXgL (deployed 2026-05-15).
 	PolicyEngineProgramID string
 
+	// Pyth adapter (oracle relay). The leader-elected crank refreshes the
+	// on-chain FeedCache PDAs. Enabled only when ProgramID + AuthorityKey +
+	// SolanaRPCURL are all set. AuthorityKey is a 64-byte solana-keygen JSON
+	// array (the adapter `authority` — signs + pays refresh/init txs).
+	PythAdapterProgramID    string
+	PythAdapterAuthorityKey string
+	PythAdapterCluster      string
+	PythAdapterTick         time.Duration
+	PythAdapterFeedsJSON    string
+	PythHermesURL           string
+	// PythAdapterCrankEnabled turns the periodic refresh crank on. Default OFF
+	// (F7.5): refresh-on-sign + the managed price-trigger monitor keep feeds
+	// fresh at signing time, so the continuous crank is retired. The one-shot
+	// bootstrap (creating FeedCache PDAs) + admin routes still run regardless.
+	PythAdapterCrankEnabled bool
+	// OracleMonitorTick is how often the managed price-trigger watcher (F7.5)
+	// scans armed triggers and reads Hermes.
+	OracleMonitorTick time.Duration
+
 	// Base URL for SDK artifacts published by the build-sdk GitHub Action
 	// (e.g. https://github.com/shinkalabs/andromeda/releases/download).
 	// /v1/policies/{address}/sdk concatenates `<base>/<tag>/<template>-ts-client.tgz`.
@@ -141,7 +160,7 @@ type OAuthBrokerConfig struct {
 
 	// GoogleEnabled toggles the Google provider. When true, the two
 	// GoogleClient{ID,Secret} fields are required.
-	GoogleEnabled bool
+	GoogleEnabled      bool
 	GoogleClientID     string
 	GoogleClientSecret string
 
@@ -173,13 +192,13 @@ func Load() *Config {
 		TrustedProxyCIDRs:      splitCSV(getenv("TRUSTED_PROXY_CIDRS", "")),
 		DefaultRequestCost:     getenvInt("DEFAULT_REQUEST_COST", 1),
 		PricingRefreshSeconds:  time.Duration(getenvInt("PRICING_REFRESH_SECONDS", 60)) * time.Second,
-		AuditSnapshotEnabled:    getenvBool("AUDIT_SNAPSHOT_ENABLED", false),
-		AuditSnapshotEndpoint:   strings.TrimRight(getenv("AUDIT_SNAPSHOT_S3_ENDPOINT", ""), "/"),
-		AuditSnapshotBucket:     getenv("AUDIT_SNAPSHOT_S3_BUCKET", ""),
-		AuditSnapshotRegion:     getenv("AUDIT_SNAPSHOT_S3_REGION", "auto"),
-		AuditSnapshotAccessKey:  getenv("AUDIT_SNAPSHOT_S3_ACCESS_KEY_ID", ""),
-		AuditSnapshotSecretKey:  getenv("AUDIT_SNAPSHOT_S3_SECRET_ACCESS_KEY", ""),
-		AuditSnapshotPrefix:     getenv("AUDIT_SNAPSHOT_S3_PREFIX", "audit/"),
+		AuditSnapshotEnabled:   getenvBool("AUDIT_SNAPSHOT_ENABLED", false),
+		AuditSnapshotEndpoint:  strings.TrimRight(getenv("AUDIT_SNAPSHOT_S3_ENDPOINT", ""), "/"),
+		AuditSnapshotBucket:    getenv("AUDIT_SNAPSHOT_S3_BUCKET", ""),
+		AuditSnapshotRegion:    getenv("AUDIT_SNAPSHOT_S3_REGION", "auto"),
+		AuditSnapshotAccessKey: getenv("AUDIT_SNAPSHOT_S3_ACCESS_KEY_ID", ""),
+		AuditSnapshotSecretKey: getenv("AUDIT_SNAPSHOT_S3_SECRET_ACCESS_KEY", ""),
+		AuditSnapshotPrefix:    getenv("AUDIT_SNAPSHOT_S3_PREFIX", "audit/"),
 		AuditSignerKind:        strings.ToLower(getenv("ANDROMEDA_AUDIT_SIGNER", "env")),
 		AuditPrivateKeyB64:     getenv("ANDROMEDA_AUDIT_PRIVATE_KEY", ""),
 		AuditVaultAddr:         getenv("ANDROMEDA_AUDIT_VAULT_ADDR", ""),
@@ -192,9 +211,19 @@ func Load() *Config {
 		IkaCoordinatorAddress:  getenv("IKA_COORDINATOR_ADDRESS", ""),
 		GasSponsorKeypairJSON:  getenv("ANDROMEDA_GAS_SPONSOR_KEYPAIR", ""),
 		PolicyEngineProgramID:  getenv("ANDROMEDA_POLICY_ENGINE_PROGRAM_ID", ""),
-		SDKBaseURL:             strings.TrimRight(getenv("ANDROMEDA_SDK_BASE_URL", ""), "/"),
-		SDKVersionTag:          getenv("ANDROMEDA_SDK_VERSION_TAG", "sdk-v0.1.0"),
-		DashboardBaseURL:       strings.TrimRight(getenv("ANDROMEDA_DASHBOARD_BASE_URL", ""), "/"),
+
+		PythAdapterProgramID:    getenv("PYTH_ADAPTER_PROGRAM_ID", ""),
+		PythAdapterAuthorityKey: getenv("PYTH_ADAPTER_AUTHORITY_KEY", ""),
+		PythAdapterCluster:      getenv("PYTH_ADAPTER_CLUSTER", "devnet"),
+		PythAdapterTick:         time.Duration(getenvInt("PYTH_ADAPTER_TICK_SECONDS", 30)) * time.Second,
+		PythAdapterFeedsJSON:    getenv("PYTH_ADAPTER_FEEDS", ""),
+		PythHermesURL:           strings.TrimRight(getenv("PYTH_HERMES_URL", "https://hermes.pyth.network"), "/"),
+		PythAdapterCrankEnabled: getenvBool("PYTH_ADAPTER_CRANK_ENABLED", false),
+		OracleMonitorTick:       time.Duration(getenvInt("ORACLE_MONITOR_TICK_SECONDS", 10)) * time.Second,
+
+		SDKBaseURL:       strings.TrimRight(getenv("ANDROMEDA_SDK_BASE_URL", ""), "/"),
+		SDKVersionTag:    getenv("ANDROMEDA_SDK_VERSION_TAG", "sdk-v0.1.0"),
+		DashboardBaseURL: strings.TrimRight(getenv("ANDROMEDA_DASHBOARD_BASE_URL", ""), "/"),
 		OAuthBroker: OAuthBrokerConfig{
 			Enabled:            getenvBool("OAUTH_BROKER_ENABLED", false),
 			BaseURL:            strings.TrimRight(getenv("OAUTH_BROKER_BASE_URL", ""), "/"),

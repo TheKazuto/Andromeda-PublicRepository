@@ -10,6 +10,7 @@ import (
 
 	"github.com/shinkalabs/andromeda-gateway/internal/audit"
 	"github.com/shinkalabs/andromeda-gateway/internal/futuresign"
+	"github.com/shinkalabs/andromeda-gateway/internal/oraclemonitor"
 	"github.com/shinkalabs/andromeda-gateway/internal/policy"
 	"github.com/shinkalabs/andromeda-gateway/internal/webhooks"
 )
@@ -23,6 +24,21 @@ import (
 type futureSignAuditBridge struct{ rec *audit.Recorder }
 
 func (b *futureSignAuditBridge) Append(ctx context.Context, ev futuresign.AuditEvent) error {
+	_, err := b.rec.Append(ctx, audit.Event{
+		APIKeyID:     ev.APIKeyID,
+		EventType:    ev.EventType,
+		ResourceType: ev.ResourceType,
+		ResourceID:   ev.ResourceID,
+		Actor:        ev.Actor,
+		Payload:      ev.Payload,
+	})
+	return err
+}
+
+// oracleMonitorAuditBridge adapts audit.Recorder to oraclemonitor.AuditAppender.
+type oracleMonitorAuditBridge struct{ rec *audit.Recorder }
+
+func (b *oracleMonitorAuditBridge) Append(ctx context.Context, ev oraclemonitor.AuditEvent) error {
 	_, err := b.rec.Append(ctx, audit.Event{
 		APIKeyID:     ev.APIKeyID,
 		EventType:    ev.EventType,
