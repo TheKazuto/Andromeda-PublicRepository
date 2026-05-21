@@ -370,10 +370,6 @@ function solToLamports(sol: number): bigint {
   return BigInt(Math.ceil(sol * LAMPORTS_PER_SOL))
 }
 
-async function getGasSponsorBalanceLamports(): Promise<bigint> {
-  return getGasSponsorBalanceLamportsFor(getGasSponsorAddress())
-}
-
 async function getGasSponsorBalanceLamportsFor(address: Address): Promise<bigint> {
   const { value } = await getSolanaRpc().getBalance(address, { commitment: 'confirmed' }).send()
   return BigInt(value)
