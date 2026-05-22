@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { readFileSync, existsSync } from 'node:fs'
 import { join, resolve } from 'node:path'
+import { keccak_256 } from '@noble/hashes/sha3.js'
 import { prepareMessage } from './prepare.js'
 import { schemeDigest } from './digest.js'
 import { type MessageKind } from './preprocess.js'
@@ -57,8 +58,10 @@ describe('prepareMessage — semantics', () => {
     expect(prepareMessage('solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp', fromHex('00'), 'transaction')).toMatchObject({ curve: 'Curve25519', scheme: 5 })
   })
 
-  it('returns null digest for EdDSA chains (no simple pre-hash)', () => {
-    expect(prepareMessage('solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp', fromHex('deadbeef'), 'transaction').digestHex).toBeNull()
+  it('returns keccak256 digest for EdDSA chains (the MessageApproval key)', () => {
+    const out = prepareMessage('solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp', fromHex('deadbeef'), 'transaction')
+    expect(out.digestHex).not.toBeNull()
+    expect(out.digestHex).toBe(toHex(keccak_256(fromHex(out.preprocessedHex))))
   })
 
   it('throws on unsupported / malformed chains', () => {
@@ -75,8 +78,8 @@ describe('schemeDigest', () => {
     // double-sha256 == sha256(sha256)
     expect(schemeDigest(2, msg)).toEqual(schemeDigest(1, schemeDigest(1, msg)!))
   })
-  it('null for EdDSA / unknown schemes', () => {
-    expect(schemeDigest(5, msg)).toBeNull()
+  it('keccak256 for EdDSA (5); null for unknown schemes', () => {
+    expect(schemeDigest(5, msg)).toEqual(keccak_256(msg))
     expect(schemeDigest(99, msg)).toBeNull()
   })
 })

@@ -534,6 +534,10 @@ export interface RequestSignatureInput {
   cpiAuthorityBump: number
   destination: Uint8Array // 32 bytes
   rulesGenerationSeen: number
+  /** Update 3 (ABI V2): asset amount in base units. Default 0n. */
+  amount?: bigint
+  /** Update 3 (ABI V2): index in the KIND_SPENDING_USD allowlist. Default 0. */
+  assetIndex?: number
 }
 
 export async function buildRequestSignatureInstruction(
@@ -565,6 +569,9 @@ export async function buildRequestSignatureInstruction(
     new Uint8Array([input.messageApprovalBump, input.cpiAuthorityBump]),
     input.destination,
     gen,
+    // ABI V2 (Update 3): amount (u64 LE) + asset_index (u8).
+    u64LE(input.amount ?? 0n),
+    new Uint8Array([input.assetIndex ?? 0]),
   ])
 
   const accounts = [

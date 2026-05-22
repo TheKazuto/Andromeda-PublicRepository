@@ -35,6 +35,20 @@ function reply(bytes: Uint8Array): void {
 
 const SENDER = new Uint8Array(32).fill(7)
 
+// A valid DKG attestation (V1) — requestSign now parses its session_identifier
+// to look the dWallet key up, so tests must pass a real attestation, not zeros.
+const VALID_ATTESTATION = T.VersionedDWalletDataAttestation.serialize({
+  V1: {
+    session_identifier: z(32, 0x5a),
+    intended_chain_sender: Array.from(SENDER),
+    curve: { Curve25519: true },
+    public_key: z(32, 0x42),
+    public_output: [1, 2, 3],
+    is_imported_key: false,
+    sign_during_dkg_signature: null,
+  },
+}).toBytes()
+
 describe('engine/ika-client/request — high-level DKG / Presign / Sign', () => {
   beforeEach(() => {
     grpc.submitTransaction.mockReset()
@@ -94,13 +108,13 @@ describe('engine/ika-client/request — high-level DKG / Presign / Sign', () => 
       },
     }).toBytes()
     reply(attestationResponse(Array.from(psV1)))
-    const id = await requestPresign({ curve: 'Curve25519', senderPubkey: SENDER })
+    const id = await requestPresign({ curve: 'Curve25519', senderPubkey: SENDER, sessionIdentifier: new Uint8Array(32) })
     expect(Array.from(id)).toEqual([9, 9, 9])
   })
 
   it('requestPresign throws on an Error response', async () => {
     reply(errorResponse('presign nope'))
-    await expect(requestPresign({ curve: 'Curve25519', senderPubkey: SENDER })).rejects.toThrow('Presign rejected: presign nope')
+    await expect(requestPresign({ curve: 'Curve25519', senderPubkey: SENDER, sessionIdentifier: new Uint8Array(32) })).rejects.toThrow('Presign rejected: presign nope')
   })
 
   it('requestSign returns the raw signature on a Signature response', async () => {
@@ -110,7 +124,7 @@ describe('engine/ika-client/request — high-level DKG / Presign / Sign', () => 
       senderPubkey: SENDER,
       message: new Uint8Array([0xde, 0xad]),
       presignSessionId: new Uint8Array([5, 5]),
-      dwalletAttestationData: new Uint8Array(32),
+      dwalletAttestationData: VALID_ATTESTATION,
       dwalletNetworkSignature: new Uint8Array(64),
       dwalletNetworkPubkey: new Uint8Array(32),
       approvalTxSignature: new Uint8Array(64),
@@ -129,7 +143,7 @@ describe('engine/ika-client/request — high-level DKG / Presign / Sign', () => 
     await expect(
       requestSign({
         curve: 'Curve25519', senderPubkey: SENDER, message: new Uint8Array([1]),
-        presignSessionId: new Uint8Array([1]), dwalletAttestationData: new Uint8Array(0),
+        presignSessionId: new Uint8Array([1]), dwalletAttestationData: VALID_ATTESTATION,
         dwalletNetworkSignature: new Uint8Array(0), dwalletNetworkPubkey: new Uint8Array(0),
         approvalTxSignature: new Uint8Array(0), approvalSlot: 0n,
       }),
@@ -139,7 +153,7 @@ describe('engine/ika-client/request — high-level DKG / Presign / Sign', () => 
     await expect(
       requestSign({
         curve: 'Curve25519', senderPubkey: SENDER, message: new Uint8Array([1]),
-        presignSessionId: new Uint8Array([1]), dwalletAttestationData: new Uint8Array(0),
+        presignSessionId: new Uint8Array([1]), dwalletAttestationData: VALID_ATTESTATION,
         dwalletNetworkSignature: new Uint8Array(0), dwalletNetworkPubkey: new Uint8Array(0),
         approvalTxSignature: new Uint8Array(0), approvalSlot: 0n,
       }),

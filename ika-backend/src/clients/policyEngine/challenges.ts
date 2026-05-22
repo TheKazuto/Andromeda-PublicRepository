@@ -18,6 +18,8 @@ const addrEncoder = getAddressEncoder()
 export const DOMAIN_INIT_V1 = enc.encode('andromeda::policy-engine::init::v1')
 export const DOMAIN_V3 = enc.encode('andromeda::policy-engine::v3')
 export const DOMAIN_REQUEST_V1 = enc.encode('andromeda::policy-engine::request::v1')
+// Update 3: V2 binds amount + asset_index for KIND_SPENDING_USD.
+export const DOMAIN_REQUEST_V2 = enc.encode('andromeda::policy-engine::request::v2')
 export const DOMAIN_RECOVERY_V3 = enc.encode('andromeda::policy-engine::recovery::v3')
 
 // ── Op tags (ABI §6.3) ────────────────────────────────────────────────────
@@ -27,6 +29,8 @@ export const OP_INIT_WITH_RECOVERY = enc.encode('init-with-recovery')
 export const OP_ADD_ALLOWLIST = enc.encode('add-rule-allowlist')
 export const OP_ALLOWLIST_ADD_DEST = enc.encode('allowlist-add-destination')
 export const OP_ALLOWLIST_REMOVE_DEST = enc.encode('allowlist-remove-destination')
+export const OP_ADD_SPENDING_USD = enc.encode('add-rule-spending-usd')
+export const OP_SPENDING_USD_ADD_FEED = enc.encode('spending-usd-add-feed')
 export const OP_PAUSE = enc.encode('pause')
 export const OP_RESUME = enc.encode('resume')
 export const OP_REVOKE = enc.encode('revoke')
@@ -198,6 +202,10 @@ export interface RequestMetadataDigestInput {
   signatureScheme: number
   path: number // APPLIES_NORMAL / APPLIES_RECOVERY / APPLIES_SESSION
   rulesGeneration: number
+  /** Update 3 (ABI V2): asset amount in base units. Default 0n. */
+  amount?: bigint
+  /** Update 3 (ABI V2): index in the KIND_SPENDING_USD allowlist. Default 0. */
+  assetIndex?: number
 }
 
 export function requestMetadataDigestPreimage(input: RequestMetadataDigestInput): Uint8Array {
@@ -206,7 +214,7 @@ export function requestMetadataDigestPreimage(input: RequestMetadataDigestInput)
   if (input.userPubkey.length !== 32) throw new Error('userPubkey must be 32 bytes')
 
   return concat([
-    DOMAIN_REQUEST_V1,
+    DOMAIN_REQUEST_V2,
     enc.encode('request-signature'),
     new Uint8Array(addrEncoder.encode(input.engine)),
     new Uint8Array(addrEncoder.encode(input.dwallet)),
@@ -216,6 +224,8 @@ export function requestMetadataDigestPreimage(input: RequestMetadataDigestInput)
     u16LE(input.signatureScheme),
     new Uint8Array([input.path]),
     u32LE(input.rulesGeneration),
+    u64LE(input.amount ?? 0n),
+    new Uint8Array([input.assetIndex ?? 0]),
   ])
 }
 
@@ -242,10 +252,64 @@ export function allowlistConfigHash(
   )
 }
 
+// ── SpendingUsd config_hash (Update 3) ────────────────────────────────────
+
+export const SPENDING_USD_FEED_BYTES = 33
+export const MAX_SPENDING_USD_FEEDS = 16
+
+export function spendingUsdConfigHash(
+  appliesTo: number,
+  feedsCount: number,
+  freshnessSecondsDiv16: number,
+  maxConfidenceBpsDiv4: number,
+  maxPerTx: bigint,
+  maxPerDay: bigint,
+  maxPerWeek: bigint,
+  feedsFlat: Uint8Array,
+): Uint8Array {
+  if (feedsFlat.length !== MAX_SPENDING_USD_FEEDS * SPENDING_USD_FEED_BYTES)
+    throw new Error(
+      `feedsFlat must be ${MAX_SPENDING_USD_FEEDS * SPENDING_USD_FEED_BYTES} bytes, got ${feedsFlat.length}`,
+    )
+  return sha256Bytes(
+    concat([
+      enc.encode('spending-usd-config-v1'),
+      new Uint8Array([appliesTo, feedsCount, freshnessSecondsDiv16, maxConfidenceBpsDiv4]),
+      u64LE(maxPerTx),
+      u64LE(maxPerDay),
+      u64LE(maxPerWeek),
+      feedsFlat,
+    ]),
+  )
+}
+
 // ── Human-message renderers ───────────────────────────────────────────────
 //
 // Mirror of `contracts/auth/src/human_message.rs`. Any drift produces a
 // different challenge hash and rejects the signature.
+
+export function humanMessageSpendingUsdAdd(
+  maxPerTx: bigint,
+  maxPerDay: bigint,
+  maxPerWeek: bigint,
+  engine: Address,
+  dwallet: Address,
+): Uint8Array {
+  return enc.encode(
+    `Add USD spending limit policy ${engine} for dWallet ${dwallet} maxPerTx ${maxPerTx} maxPerDay ${maxPerDay} maxPerWeek ${maxPerWeek}`,
+  )
+}
+
+export function humanMessageSpendingUsdAddFeed(
+  feedCache: Address,
+  decimals: number,
+  engine: Address,
+  dwallet: Address,
+): Uint8Array {
+  return enc.encode(
+    `Add spending feed ${feedCache} decimals ${decimals} on USD spending policy ${engine} for dWallet ${dwallet}`,
+  )
+}
 
 export function humanMessageAllowlistAddDestination(
   dest: Uint8Array,

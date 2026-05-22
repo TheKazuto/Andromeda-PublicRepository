@@ -23,6 +23,9 @@ export const POLICY_ENGINE_INSTRUCTION_DISCRIMINATOR = {
   addRuleFheGated: 15,
   addRuleSessionKey: 16,
   addRuleRecovery: 17,
+  // Update 3 — USD spending limit (KIND_SPENDING_USD).
+  addRuleSpendingUsd: 18,
+  updateRuleSpendingUsdAddFeed: 19,
 
   removeRule: 50,
   pause: 60,
@@ -89,6 +92,7 @@ export const SEED_RULE_PASSKEY = enc.encode('rule_passkey')
 export const SEED_RULE_FHE_GATED = enc.encode('rule_fhe_gated')
 export const SEED_RULE_SESSION_KEY = enc.encode('rule_session_key')
 export const SEED_RULE_RECOVERY = enc.encode('rule_recovery')
+export const SEED_RULE_SPENDING_USD = enc.encode('rule_spending_usd')
 export const SEED_SESSION = enc.encode('session')
 export const SEED_QUORUM_SESSION = enc.encode('quorum_session')
 export const SEED_PASSKEY_SESSION = enc.encode('passkey_session')
@@ -106,6 +110,7 @@ export const KIND_PASSKEY = 5
 export const KIND_FHE_GATED = 6
 export const KIND_SESSION_KEY = 7
 export const KIND_RECOVERY = 8
+export const KIND_SPENDING_USD = 9 // Update 3 — USD spending limit
 
 export type RuleKind =
   | typeof KIND_EMPTY
@@ -117,6 +122,7 @@ export type RuleKind =
   | typeof KIND_FHE_GATED
   | typeof KIND_SESSION_KEY
   | typeof KIND_RECOVERY
+  | typeof KIND_SPENDING_USD
 
 export function seedForKind(kind: RuleKind): Uint8Array {
   switch (kind) {
@@ -136,6 +142,8 @@ export function seedForKind(kind: RuleKind): Uint8Array {
       return SEED_RULE_SESSION_KEY
     case KIND_RECOVERY:
       return SEED_RULE_RECOVERY
+    case KIND_SPENDING_USD:
+      return SEED_RULE_SPENDING_USD
     default:
       throw new Error(`policyEngine: kind ${kind} has no PDA seed`)
   }
@@ -212,4 +220,12 @@ export const POLICY_ENGINE_ERROR = {
   IKA_CPI_ACCOUNT_MISMATCH: 6070,
   IKA_CPI_FAILED: 6071,
   DELEGATION_NOT_CONFIRMED: 6080,
+  // Update 3 — USD spending limit (KIND_SPENDING_USD).
+  SPENDING_PER_TX_EXCEEDED: 6090,
+  SPENDING_DAILY_EXCEEDED: 6091,
+  SPENDING_WEEKLY_EXCEEDED: 6092,
+  SPENDING_PRICE_STALE: 6093,
+  SPENDING_CONFIDENCE_EXCEEDED: 6094,
+  SPENDING_ASSET_NOT_ALLOWED: 6095,
+  SPENDING_CONVERSION_OVERFLOW: 6096,
 } as const

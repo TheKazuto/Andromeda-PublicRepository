@@ -45,6 +45,7 @@ import {
   requestDkg,
   requestPresign,
   requestSign,
+  sessionIdentifierFromAttestation,
   deriveDwalletAddress,
   Curve,
   type CurveName,
@@ -390,6 +391,7 @@ export async function allocatePresign(opts: {
   const presignSessionId = await requestPresign({
     curve: curveNameFromId(meta.curve),
     senderPubkey: meta.signerPubkey,
+    sessionIdentifier: sessionIdentifierFromAttestation(meta.attestationData),
   })
   return { presignSessionId }
 }

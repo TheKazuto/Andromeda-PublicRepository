@@ -134,6 +134,21 @@ export async function resolveEpoch(senderPubkey: Uint8Array): Promise<bigint> {
   return value
 }
 
+// The Ika (mock) signer stores the DKG signing key under the DKG request's
+// `session_identifier`, which the network echoes back inside the attestation
+// (`VersionedDWalletDataAttestation.V1.session_identifier`). EVERY follow-up
+// (Presign, Sign) MUST send that same value as its `session_identifier_preimage`
+// so the network can look the key up — otherwise it answers "no key for dwallet".
+// Mirrors `chains/solana/examples/voting/e2e-rust` (uses `data.session_identifier`
+// for both Presign and Sign).
+export function sessionIdentifierFromAttestation(attestationData: Uint8Array): Uint8Array {
+  const payload = T.VersionedDWalletDataAttestation.parse(attestationData) as {
+    V1?: { session_identifier: number[] }
+  }
+  if (!payload.V1) throw new Error('attestation: unexpected payload variant (no V1)')
+  return new Uint8Array(payload.V1.session_identifier)
+}
+
 // ── Submit + decode ──────────────────────────────────────────────────────
 
 export type DecodedResponse =
@@ -268,12 +283,15 @@ export async function requestDkg(params: {
 export async function requestPresign(params: {
   curve: CurveName
   senderPubkey: Uint8Array
+  // The DKG session_identifier (from the attestation) — the mock keys the
+  // dWallet under it, so the presign must reference the same value.
+  sessionIdentifier: Uint8Array
 }): Promise<Uint8Array> {
   const { curve, senderPubkey } = params
   const epoch = await resolveEpoch(senderPubkey)
 
   const signedData = T.SignedRequestData.serialize({
-    session_identifier_preimage: Array.from(new Uint8Array(randomBytes(32))),
+    session_identifier_preimage: Array.from(params.sessionIdentifier),
     epoch,
     chain_id: { Solana: true },
     intended_chain_sender: Array.from(senderPubkey),
@@ -319,9 +337,13 @@ export async function requestSign(params: {
 }): Promise<Uint8Array> {
   const { curve, senderPubkey, message } = params
   const epoch = await resolveEpoch(senderPubkey)
+  // Key lookup: the network finds the dWallet's signing key under its DKG
+  // session_identifier (echoed in the attestation). Sending a fresh random
+  // preimage here makes the network answer "no key for dwallet".
+  const sessionIdentifier = sessionIdentifierFromAttestation(params.dwalletAttestationData)
 
   const signedData = T.SignedRequestData.serialize({
-    session_identifier_preimage: Array.from(new Uint8Array(randomBytes(32))),
+    session_identifier_preimage: Array.from(sessionIdentifier),
     epoch,
     chain_id: { Solana: true },
     intended_chain_sender: Array.from(senderPubkey),
