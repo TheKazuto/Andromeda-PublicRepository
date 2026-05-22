@@ -94,6 +94,7 @@ production, `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, `Per
 | Group | Routes (under `/v1`) | Scope | Source |
 |-------|----------------------|-------|--------|
 | **dWallet — high-level (MCP tools)** | `dwallet/create` (accepts `attachPolicyEngine: true`), `dwallet/transfer-ownership`, `dwallet/presign`, `dwallet/sign` (→ MCP `create_dwallet` / `transfer_ownership` / `presign` / `sign_message`) | write | proxied to ika-backend |
+| **dWallet — multi-chain (read-only)** | `GET dwallet/addresses/{dwalletAddress}` (every chain-native address for the dWallet's curve), `dwallet/prepare-message` (envelope + on-chain digest) (→ MCP `dwallet_addresses` / `prepare_message`) | read | proxied to ika-backend |
 | **dWallet — low-level** | `dwallet/dkg/{prepare,submit}`, `dwallet/{sign,presign,future-sign,future-sign/complete,re-encrypt-share,make-share-public}/submit`, `GET dwallet/presigns/{userPubkey}` | write / read | proxied to ika-backend |
 | **PolicyEngine v3 — read** | `GET policy/{dwallet}` — engine state (header, every active rule slot, members, destinations, nonces) | read | local |
 | **PolicyEngine v3 — admin** | `policy/init/{challenge,submit}`, `policy/rules/add/{challenge,submit}`, `policy/rules/{ruleIndex}/items/add/{challenge,submit}` — challenge → owner-signs → submit. Admin scope, Idempotency-Key MANDATORY on every submit. | admin | local |
@@ -416,6 +417,8 @@ Mounts `GET /v1/oauth/authorize`, `GET /v1/oauth/callback` and `POST /v1/oauth/t
 | `UPSTREAM_TIMEOUT_SECONDS` | `30` | Default upstream timeout (per-route overrides exist for heavy MPC ops — DKG, sign, quorum finalize: 90–120s). |
 | `GATEWAY_MAX_BODY_BYTES` | `10485760` | Global body cap (10 MiB). Per-route caps (1 MiB for signing/mutating) still apply at the handler. |
 | `TRUSTED_PROXY_CIDRS` | empty | CIDRs of reverse proxies whose `X-Forwarded-For` / `X-Real-IP` may be trusted for API-key IP allowlists. Empty = trust only the socket peer. **Required behind an edge proxy** (see *Required in production*); a malformed CIDR is fatal in production, a warning in dev. |
+| `IKA_PRESIGN_PREFETCH_ENABLED` | `false` | Async presign prefetch (Update 2 Part A): the signing challenge (`request-signature` / `recover-as-primary`) fires the presign in the background; the matching submit returns it as `presign_session_id_hex` for `/v1/dwallet/sign` to reuse. Single-use, tenant-scoped, short TTL — not a pool. Fully non-fatal (the `/sign` inline allocation is the fallback). Keep `false` in pre-alpha (mock signer = no latency to hide); flip on at Alpha. Needs `REDIS_URL` + the ika upstream. |
+| `IKA_PRESIGN_PREFETCH_TTL_SECONDS` | `120` | TTL of the ephemeral presign cache (align to challenge validity). |
 
 #### Postgres pool
 | Var | Default | Notes |
