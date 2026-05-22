@@ -16,6 +16,11 @@ const (
 	oracleFeedsFlatOff  = 105 // feeds_flat start
 	oracleFeedBytes     = 80  // [0..32] feed_account, [32..64] feed_owner, [64..80] band
 	maxOracleFeeds      = 4   // == MAX_ORACLE_FEEDS on-chain
+	// Update 3 — KIND_SPENDING_USD sub-PDA layout (mirror of SpendingUsdRule).
+	spendingFeedsCountOff = 98  // feeds_count u8
+	spendingFeedsFlatOff  = 161 // feeds_flat start
+	spendingFeedBytes     = 33  // [0..32] feed_cache_account, [32] decimals
+	maxSpendingFeeds      = 16  // == MAX_SPENDING_USD_FEEDS on-chain
 )
 
 // resolveTrailingAccounts reads the on-chain PolicyEngine + each active rule
@@ -30,7 +35,7 @@ const (
 // applies to PATH_NORMAL, this returns an error so the caller supplies the
 // accounts manually instead.
 func (s *Service) resolveTrailingAccounts(
-	ctx context.Context, engine solana.PublicKey,
+	ctx context.Context, engine solana.PublicKey, assetIndex uint8,
 ) (rulePDAs []solana.PublicKey, ruleAux [][]solana.PublicKey, err error) {
 	acct, err := s.RPCClient.GetAccountInfoWithOpts(ctx, engine, &rpc.GetAccountInfoOpts{
 		Commitment: rpc.CommitmentConfirmed,
@@ -68,6 +73,17 @@ func (s *Service) resolveTrailingAccounts(
 			// PATH_NORMAL; otherwise the sub-PDA alone is consumed.
 			if applies&AppliesNormal != 0 {
 				aux = feeds
+			}
+		case KindSpendingUsd:
+			// The dispatch consumes exactly ONE aux for a spending rule: the
+			// FeedCache of the moved asset (`asset_index`). Unlike oracle, the
+			// index is a per-request value, so we read feeds_flat[asset_index].
+			feed, applies, ferr := fetchSpendingFeedAccount(ctx, s.RPCClient, e.RulePDA, assetIndex)
+			if ferr != nil {
+				return nil, nil, fmt.Errorf("rule slot %d (spending): %w", i, ferr)
+			}
+			if applies&AppliesNormal != 0 {
+				aux = []solana.PublicKey{feed}
 			}
 		case KindPasskey:
 			applies, perr := fetchRuleAppliesTo(ctx, s.RPCClient, e.RulePDA)
@@ -119,6 +135,41 @@ func parseOracleFeeds(d []byte) ([]solana.PublicKey, uint8, error) {
 		feeds = append(feeds, pk)
 	}
 	return feeds, applies, nil
+}
+
+// fetchSpendingFeedAccount reads a KIND_SPENDING_USD sub-PDA and returns the
+// FeedCache account at `assetIndex` plus the rule's applies_to mask.
+func fetchSpendingFeedAccount(
+	ctx context.Context, c *rpc.Client, rulePDA solana.PublicKey, assetIndex uint8,
+) (solana.PublicKey, uint8, error) {
+	d, err := ruleSubPDAData(ctx, c, rulePDA)
+	if err != nil {
+		return solana.PublicKey{}, 0, err
+	}
+	return parseSpendingFeed(d, assetIndex)
+}
+
+// parseSpendingFeed extracts the feed_cache_account at `assetIndex` + the
+// applies_to mask from a spending sub-PDA's raw data. Pure (no RPC).
+func parseSpendingFeed(d []byte, assetIndex uint8) (solana.PublicKey, uint8, error) {
+	if len(d) <= spendingFeedsCountOff {
+		return solana.PublicKey{}, 0, fmt.Errorf("spending sub-PDA too short (%d)", len(d))
+	}
+	applies := d[ruleAppliesToOffset]
+	count := int(d[spendingFeedsCountOff])
+	if count > maxSpendingFeeds {
+		return solana.PublicKey{}, 0, fmt.Errorf("spending feeds_count %d exceeds max %d", count, maxSpendingFeeds)
+	}
+	if int(assetIndex) >= count {
+		return solana.PublicKey{}, 0, fmt.Errorf("asset_index %d out of range (feeds_count %d)", assetIndex, count)
+	}
+	base := spendingFeedsFlatOff + int(assetIndex)*spendingFeedBytes
+	if len(d) < base+32 {
+		return solana.PublicKey{}, 0, fmt.Errorf("spending sub-PDA truncated: need %d, have %d", base+32, len(d))
+	}
+	var pk solana.PublicKey
+	copy(pk[:], d[base:base+32])
+	return pk, applies, nil
 }
 
 func fetchRuleAppliesTo(ctx context.Context, c *rpc.Client, rulePDA solana.PublicKey) (uint8, error) {

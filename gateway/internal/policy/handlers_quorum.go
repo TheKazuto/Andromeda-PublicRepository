@@ -30,19 +30,19 @@ import (
 // ── shared inputs for quorum endpoints ───────────────────────────────────────
 
 type quorumCommonInputs struct {
-	DwalletAddress      string `json:"dwallet_address"        validate:"required,solana_pubkey"`
-	InitAuthorityHash   string `json:"init_authority_hash_hex" validate:"required,hex_len=32"`
-	MessageDigestHex    string `json:"message_digest_hex"     validate:"required,hex_len=32"`
-	MetadataDigestHex   string `json:"metadata_digest_hex"    validate:"required,hex_len=32"`
-	UserPubkeyHex       string `json:"user_pubkey_hex"        validate:"required,hex_len=32"`
-	DestinationHex      string `json:"destination_hex"        validate:"required,hex_len=32"`
-	SignatureScheme     uint16 `json:"signature_scheme"       validate:"max=6"`
-	Amount              uint64 `json:"amount"`
-	ExpiresAt           int64  `json:"expires_at"`
-	SessionNonce        uint64 `json:"session_nonce"`
-	RuleIndex           uint8  `json:"rule_index"             validate:"max=15"`
-	IkaCurve            uint16 `json:"ika_curve"              validate:"max=2"`
-	IkaDWalletPubkey    string `json:"ika_dwallet_pubkey_hex" validate:"required"`
+	DwalletAddress    string `json:"dwallet_address"        validate:"required,solana_pubkey"`
+	InitAuthorityHash string `json:"init_authority_hash_hex" validate:"required,hex_len=32"`
+	MessageDigestHex  string `json:"message_digest_hex"     validate:"required,hex_len=32"`
+	MetadataDigestHex string `json:"metadata_digest_hex"    validate:"required,hex_len=32"`
+	UserPubkeyHex     string `json:"user_pubkey_hex"        validate:"required,hex_len=32"`
+	DestinationHex    string `json:"destination_hex"        validate:"required,hex_len=32"`
+	SignatureScheme   uint16 `json:"signature_scheme"       validate:"max=6"`
+	Amount            uint64 `json:"amount"`
+	ExpiresAt         int64  `json:"expires_at"`
+	SessionNonce      uint64 `json:"session_nonce"`
+	RuleIndex         uint8  `json:"rule_index"             validate:"max=15"`
+	IkaCurve          uint16 `json:"ika_curve"              validate:"max=2"`
+	IkaDWalletPubkey  string `json:"ika_dwallet_pubkey_hex" validate:"required"`
 }
 
 type quorumDerived struct {
@@ -108,7 +108,7 @@ func (s *Service) deriveQuorum(in *quorumCommonInputs) (*quorumDerived, *httpErr
 		return nil, &httpError{http.StatusInternalServerError, "pda_derivation_failed", err.Error()}
 	}
 	msgApproval, msgApprovalBump, err := MessageApprovalPDA(
-		in.IkaCurve, ikaPK, in.SignatureScheme, msgDigest[:], metaDigest[:],
+		in.IkaCurve, ikaPK, in.SignatureScheme, msgDigest[:],
 	)
 	if err != nil {
 		return nil, &httpError{http.StatusInternalServerError, "pda_derivation_failed", err.Error()}
@@ -470,7 +470,7 @@ func (s *Service) quorumFinalize(w http.ResponseWriter, r *http.Request) {
 		ProgramID:         s.ProgramID,
 		Engine:            derived.engine,
 		DWallet:           derived.dwallet,
-		Coordinator:       derived.dwallet,
+		Coordinator:       IkaCoordinator(),
 		MessageApproval:   derived.msgApproval,
 		Payer:             s.GasSponsor.PublicKey(),
 		CPIAuthority:      derived.cpiAuthority,
@@ -577,12 +577,12 @@ func (s *Service) quorumClose(w http.ResponseWriter, r *http.Request) {
 // ─── unsigned-tx helper (shared with passkey close) ─────────────────────────
 
 type unsignedTxResponse struct {
-	UnsignedTxBase64    string         `json:"unsigned_tx_base64"`
-	Blockhash           string         `json:"blockhash"`
-	LastValidBlockHeight uint64        `json:"last_valid_block_height"`
-	FeePayer            string         `json:"fee_payer"`
-	Meta                map[string]any `json:"meta,omitempty"`
-	HowTo               string         `json:"how_to"`
+	UnsignedTxBase64     string         `json:"unsigned_tx_base64"`
+	Blockhash            string         `json:"blockhash"`
+	LastValidBlockHeight uint64         `json:"last_valid_block_height"`
+	FeePayer             string         `json:"fee_payer"`
+	Meta                 map[string]any `json:"meta,omitempty"`
+	HowTo                string         `json:"how_to"`
 }
 
 // buildUnsignedTx serialises a Solana transaction with `feePayer` as the
@@ -614,11 +614,11 @@ func (s *Service) buildUnsignedTx(
 		return nil, &httpError{http.StatusInternalServerError, "serialize_failed", err.Error()}
 	}
 	return &unsignedTxResponse{
-		UnsignedTxBase64:    base64.StdEncoding.EncodeToString(raw),
-		Blockhash:           bh.Value.Blockhash.String(),
+		UnsignedTxBase64:     base64.StdEncoding.EncodeToString(raw),
+		Blockhash:            bh.Value.Blockhash.String(),
 		LastValidBlockHeight: bh.Value.LastValidBlockHeight,
-		FeePayer:            feePayer.String(),
-		Meta:                meta,
+		FeePayer:             feePayer.String(),
+		Meta:                 meta,
 		HowTo: "Decode `unsigned_tx_base64`, populate the recipient's signature slot, " +
 			"and submit via Solana RPC `sendTransaction`. Tx must be submitted before " +
 			"`last_valid_block_height` is reached or it'll be rejected as expired.",

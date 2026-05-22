@@ -367,6 +367,8 @@ func TestRequestMetadataDigest_MatchesFixture(t *testing.T) {
 		SignatureScheme: uint16(u64(in["signature_scheme"])),
 		Path:            u8(in["path"]),
 		RulesGeneration: u32(in["rules_generation"]),
+		Amount:          u64(in["amount"]),
+		AssetIndex:      u8(in["asset_index"]),
 	}
 	pre := got.Preimage()
 	if hex.EncodeToString(pre) != f.Expected.PreimageHex {
@@ -375,5 +377,136 @@ func TestRequestMetadataDigest_MatchesFixture(t *testing.T) {
 	h := got.Hash()
 	if hex.EncodeToString(h[:]) != f.Expected.ChallengeHex {
 		t.Fatalf("challenge drift:\n  got:  %s\n  want: %s", hex.EncodeToString(h[:]), f.Expected.ChallengeHex)
+	}
+}
+
+func TestAdminChallenge_AddRuleSpendingUsd_MatchesFixture(t *testing.T) {
+	f := loadFixture(t, "challenges/admin/add-rule-spending-usd.json")
+	in := f.Input
+
+	engine := mustPubkey(t, in["engine_b58"].(string))
+	dwallet := mustPubkey(t, in["dwallet_b58"].(string))
+	ruleIndex := u8(in["rule_index"])
+	ruleGen := u32(in["rule_generation"])
+	expectedNonce := u64(in["expected_nonce"])
+	appliesTo := u8(in["applies_to"])
+	freshnessDiv16 := u8(in["freshness_seconds_div16"])
+	maxConfDiv4 := u8(in["max_confidence_bps_div4"])
+	maxPerTx := u64(in["max_per_tx_usd"])
+	maxPerDay := u64(in["max_per_day_usd"])
+	maxPerWeek := u64(in["max_per_week_usd"])
+	configHash := decodeHex32(t, in["config_hash_hex"].(string))
+	ownerSlot := decodeHex34(t, in["owner_slot_hex"].(string))
+
+	human := HumanMessageSpendingUsdAdd(maxPerTx, maxPerDay, maxPerWeek, engine, dwallet)
+	if string(human) != in["human_message_utf8"].(string) {
+		t.Fatalf("human_message drift:\n  got:  %s\n  want: %s", string(human), in["human_message_utf8"].(string))
+	}
+
+	// Sanity: Go SpendingUsdConfigHash (empty feeds) must match the fixture.
+	emptyFeeds := make([]byte, MaxSpendingUsdFeeds*SpendingUsdFeedBytes)
+	gotCfg, err := SpendingUsdConfigHash(appliesTo, 0, freshnessDiv16, maxConfDiv4, maxPerTx, maxPerDay, maxPerWeek, emptyFeeds)
+	if err != nil {
+		t.Fatalf("spending config hash: %v", err)
+	}
+	if gotCfg != configHash {
+		t.Fatalf("spending config_hash drift:\n  got:  %x\n  want: %x", gotCfg, configHash)
+	}
+
+	var genLE [4]byte
+	binary.LittleEndian.PutUint32(genLE[:], ruleGen)
+	var caps [24]byte
+	binary.LittleEndian.PutUint64(caps[0:8], maxPerTx)
+	binary.LittleEndian.PutUint64(caps[8:16], maxPerDay)
+	binary.LittleEndian.PutUint64(caps[16:24], maxPerWeek)
+
+	got := &AdminChallengeInput{
+		OpTag:          OpAddSpendingUsd,
+		HumanMessage:   human,
+		Engine:         engine,
+		DWallet:        dwallet,
+		RuleKind:       uint8(KindSpendingUsd),
+		RuleIndex:      ruleIndex,
+		RuleGeneration: ruleGen,
+		ExpectedNonce:  expectedNonce,
+		ConfigHash:     configHash,
+		OwnerSlot:      ownerSlot,
+		Extras:         [][]byte{{appliesTo}, {freshnessDiv16}, {maxConfDiv4}, caps[:], genLE[:]},
+	}
+	pre, err := got.Preimage()
+	if err != nil {
+		t.Fatalf("preimage: %v", err)
+	}
+	if hex.EncodeToString(pre) != f.Expected.PreimageHex {
+		t.Fatalf("preimage drift:\n  got:  %s\n  want: %s", hex.EncodeToString(pre), f.Expected.PreimageHex)
+	}
+	h, _ := got.Hash()
+	if hex.EncodeToString(h[:]) != f.Expected.ChallengeHex {
+		t.Fatalf("challenge drift:\n  got:  %s\n  want: %s", hex.EncodeToString(h[:]), f.Expected.ChallengeHex)
+	}
+}
+
+func TestAdminChallenge_SpendingUsdAddFeed_MatchesFixture(t *testing.T) {
+	f := loadFixture(t, "challenges/admin/spending-usd-add-feed.json")
+	in := f.Input
+
+	engine := mustPubkey(t, in["engine_b58"].(string))
+	dwallet := mustPubkey(t, in["dwallet_b58"].(string))
+	ruleIndex := u8(in["rule_index"])
+	ruleGen := u32(in["rule_generation"])
+	expectedNonce := u64(in["expected_nonce"])
+	feedCache := mustPubkey(t, in["feed_cache_account_b58"].(string))
+	decimals := u8(in["decimals"])
+	configHash := decodeHex32(t, in["config_hash_hex"].(string))
+	ownerSlot := decodeHex34(t, in["owner_slot_hex"].(string))
+
+	human := HumanMessageSpendingUsdAddFeed(feedCache, decimals, engine, dwallet)
+	if string(human) != in["human_message_utf8"].(string) {
+		t.Fatalf("human_message drift:\n  got:  %s\n  want: %s", string(human), in["human_message_utf8"].(string))
+	}
+
+	var genLE [4]byte
+	binary.LittleEndian.PutUint32(genLE[:], ruleGen)
+	fc := feedCache.Bytes()
+
+	got := &AdminChallengeInput{
+		OpTag:          OpSpendingUsdAddFeed,
+		HumanMessage:   human,
+		Engine:         engine,
+		DWallet:        dwallet,
+		RuleKind:       uint8(KindSpendingUsd),
+		RuleIndex:      ruleIndex,
+		RuleGeneration: ruleGen,
+		ExpectedNonce:  expectedNonce,
+		ConfigHash:     configHash,
+		OwnerSlot:      ownerSlot,
+		Extras:         [][]byte{fc, {decimals}, genLE[:]},
+	}
+	pre, err := got.Preimage()
+	if err != nil {
+		t.Fatalf("preimage: %v", err)
+	}
+	if hex.EncodeToString(pre) != f.Expected.PreimageHex {
+		t.Fatalf("preimage drift:\n  got:  %s\n  want: %s", hex.EncodeToString(pre), f.Expected.PreimageHex)
+	}
+	h, _ := got.Hash()
+	if hex.EncodeToString(h[:]) != f.Expected.ChallengeHex {
+		t.Fatalf("challenge drift:\n  got:  %s\n  want: %s", hex.EncodeToString(h[:]), f.Expected.ChallengeHex)
+	}
+
+	// Cross-check post-mutation config_hash (1 feed) against the fixture.
+	postWant := f.Expected.PostMutationConfigHashHex
+	if postWant != "" {
+		feedsFlat := make([]byte, MaxSpendingUsdFeeds*SpendingUsdFeedBytes)
+		copy(feedsFlat[0:32], fc)
+		feedsFlat[32] = decimals
+		gotPost, err := SpendingUsdConfigHash(1, 1, 255, 0, 50_00000000, 500_00000000, 2000_00000000, feedsFlat)
+		if err != nil {
+			t.Fatalf("post config hash: %v", err)
+		}
+		if hex.EncodeToString(gotPost[:]) != postWant {
+			t.Fatalf("post_mutation config_hash drift:\n  got:  %s\n  want: %s",
+				hex.EncodeToString(gotPost[:]), postWant)
+		}
 	}
 }

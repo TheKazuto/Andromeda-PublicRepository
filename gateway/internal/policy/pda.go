@@ -21,6 +21,7 @@ var (
 	SeedRuleFheGated    = []byte("rule_fhe_gated")
 	SeedRuleSessionKey  = []byte("rule_session_key")
 	SeedRuleRecovery    = []byte("rule_recovery")
+	SeedRuleSpendingUsd = []byte("rule_spending_usd")
 	SeedSession         = []byte("session")
 	SeedCPIAuthority    = []byte("__ika_cpi_authority")
 )
@@ -45,6 +46,7 @@ const (
 	KindFheGated    RuleKind = 6
 	KindSessionKey  RuleKind = 7
 	KindRecovery    RuleKind = 8
+	KindSpendingUsd RuleKind = 9 // Update 3 — USD spending limit
 )
 
 // AppliesTo bitmask (ADR PE-006).
@@ -75,6 +77,8 @@ func SeedForKind(kind RuleKind) ([]byte, error) {
 		return SeedRuleSessionKey, nil
 	case KindRecovery:
 		return SeedRuleRecovery, nil
+	case KindSpendingUsd:
+		return SeedRuleSpendingUsd, nil
 	default:
 		return nil, fmt.Errorf("policy: kind %d has no PDA seed", kind)
 	}
@@ -140,28 +144,47 @@ func SessionPDA(
 // `contracts/shared/src/lib.rs::IKA_DWALLET_PROGRAM_ID`).
 var IkaDwalletProgramID = solana.MustPublicKeyFromBase58("87W54kGYFQ1rgWqMeu4XTPHWXWmXSQCcjm8vCTfiq1oY")
 
+// IkaCoordinator returns the Ika DWalletCoordinator account that Ika's
+// `approve_message` CPI requires: PDA(["dwallet_coordinator"], IkaDwalletProgramID)
+// — a single global account (no per-dWallet seed), = V5giRyf1Rk9Lhn7sjq6LYnBv6TN8ZgSuRx654mPdYoA
+// on devnet (matches IKA_COORDINATOR_ADDRESS in gateway/.env.example).
+//
+// Passing the dWallet itself here (the old placeholder) made the dWallet
+// account appear twice in request_signature → Quasar AccountBorrowFailed.
+func IkaCoordinator() solana.PublicKey {
+	pk, _, err := solana.FindProgramAddress([][]byte{[]byte("dwallet_coordinator")}, IkaDwalletProgramID)
+	if err != nil {
+		// Unreachable for a fixed seed + program id; fall back to the known
+		// devnet coordinator so the builder never panics.
+		return solana.MustPublicKeyFromBase58("V5giRyf1Rk9Lhn7sjq6LYnBv6TN8ZgSuRx654mPdYoA")
+	}
+	return pk
+}
+
 // MessageApprovalPDA derives the Ika MessageApproval PDA that
 // `approve_message` writes to. Layout mirrors the legacy `policies` helper
 // and `ika-pre-alpha/docs/src/reference/accounts.md`:
 //
 //	seeds = ["dwallet", chunks_of(curve_u16_le || dwallet_pubkey),
-//	         "message_approval", scheme_u16_le, message_digest, [meta_digest]]
+//	         "message_approval", scheme_u16_le, message_digest]
 //
-// `metaDigest` is omitted when all 32 bytes are zero (no-metadata sentinel).
+// F9-SIGN: Andromeda signing never uses Ika *message* metadata — the on-chain
+// `request_signature` passes a zero `message_metadata_digest` to
+// `approve_message` (the policy challenge is bound separately, via the
+// request_metadata_digest validation). The Ika Sign step likewise submits empty
+// `message_metadata`, so the approval is always derived WITHOUT a metadata seed.
+// Binding a non-zero metadata here previously produced an address the Ika
+// network could not find at sign time ("MessageApproval PDA not found").
 func MessageApprovalPDA(
 	curve uint16,
 	dwalletPubkey []byte,
 	scheme uint16,
 	messageDigest []byte,
-	metaDigest []byte,
 ) (solana.PublicKey, uint8, error) {
 	const seedDwallet = "dwallet"
 	const seedMsgApproval = "message_approval"
 	if len(messageDigest) != 32 {
 		return solana.PublicKey{}, 0, fmt.Errorf("message_digest must be 32 bytes")
-	}
-	if len(metaDigest) != 32 {
-		return solana.PublicKey{}, 0, fmt.Errorf("meta_digest must be 32 bytes")
 	}
 	chunks := chunkDwalletSeedPayload(curve, dwalletPubkey)
 	seeds := [][]byte{[]byte(seedDwallet)}
@@ -170,9 +193,6 @@ func MessageApprovalPDA(
 	schemeBytes := []byte{byte(scheme), byte(scheme >> 8)}
 	seeds = append(seeds, schemeBytes)
 	seeds = append(seeds, messageDigest)
-	if !isAllZero(metaDigest) {
-		seeds = append(seeds, metaDigest)
-	}
 	return solana.FindProgramAddress(seeds, IkaDwalletProgramID)
 }
 
@@ -192,13 +212,4 @@ func chunkDwalletSeedPayload(curve uint16, pk []byte) [][]byte {
 		chunks = append(chunks, buf[i:end])
 	}
 	return chunks
-}
-
-func isAllZero(b []byte) bool {
-	for _, x := range b {
-		if x != 0 {
-			return false
-		}
-	}
-	return true
 }

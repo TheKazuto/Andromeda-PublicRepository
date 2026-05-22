@@ -323,16 +323,21 @@ type addRuleRequest struct {
 	DwalletAddress    string         `json:"dwallet_address" validate:"required,solana_pubkey"`
 	InitAuthorityHash string         `json:"init_authority_hash_hex" validate:"required,hex_len=32"`
 	OwnerSlot         memberSlotJSON `json:"owner_slot" validate:"required"`
-	RuleKind          uint8          `json:"rule_kind" validate:"required,min=1,max=8"`
+	RuleKind          uint8          `json:"rule_kind" validate:"required,min=1,max=9"`
 	RuleIndex         uint8          `json:"rule_index" validate:"max=15"`
 	RuleGeneration    uint32         `json:"rule_generation"`
 	ExpectedNonce     uint64         `json:"expected_nonce"`
 	AppliesTo         uint8          `json:"applies_to" validate:"required,min=1,max=7"`
-	// Oracle-only (rule_kind=4). Both are the on-chain divided forms:
-	// freshness_seconds = value × 16; max_confidence_bps = value × 4
+	// Oracle (rule_kind=4) + SpendingUsd (rule_kind=9). Both are the on-chain
+	// divided forms: freshness_seconds = value × 16; confidence_bps = value × 4
 	// (0 disables the confidence check). Ignored for other kinds.
 	FreshnessSecondsDiv16 uint8 `json:"freshness_seconds_div16,omitempty"`
 	MinConfidenceBpsDiv4  uint8 `json:"min_confidence_bps_div4,omitempty"`
+	// SpendingUsd-only (rule_kind=9). USD ceilings, canonical 1e8; 0 disables
+	// the corresponding window.
+	MaxPerTxUsd   uint64 `json:"max_per_tx_usd,omitempty"`
+	MaxPerDayUsd  uint64 `json:"max_per_day_usd,omitempty"`
+	MaxPerWeekUsd uint64 `json:"max_per_week_usd,omitempty"`
 }
 
 type addRuleChallengeResponse struct {
@@ -356,9 +361,11 @@ func (s *Service) addRuleChallenge(w http.ResponseWriter, r *http.Request) {
 		s.addRuleAllowlistChallenge(w, req)
 	case KindOracle:
 		s.addRuleOracleChallenge(w, req)
+	case KindSpendingUsd:
+		s.addRuleSpendingUsdChallenge(w, req)
 	default:
 		httpx.WriteError(w, http.StatusNotImplemented, "kind_not_supported_yet",
-			"rule_kind must be 1 (Allowlist) or 4 (Oracle)")
+			"rule_kind must be 1 (Allowlist), 4 (Oracle) or 9 (SpendingUsd)")
 	}
 }
 
@@ -501,7 +508,7 @@ type itemsAddRequest struct {
 	DwalletAddress    string         `json:"dwallet_address" validate:"required,solana_pubkey"`
 	InitAuthorityHash string         `json:"init_authority_hash_hex" validate:"required,hex_len=32"`
 	OwnerSlot         memberSlotJSON `json:"owner_slot" validate:"required"`
-	RuleKind          uint8          `json:"rule_kind" validate:"required,min=1,max=8"`
+	RuleKind          uint8          `json:"rule_kind" validate:"required,min=1,max=9"`
 	RuleGeneration    uint32         `json:"rule_generation" validate:"required,min=1"`
 	ExpectedNonce     uint64         `json:"expected_nonce"`
 	// Allowlist item (rule_kind=1).
@@ -513,6 +520,9 @@ type itemsAddRequest struct {
 	FeedOwner   string `json:"feed_owner,omitempty" validate:"omitempty,solana_pubkey"`
 	MinQ64      int64  `json:"min_q64,omitempty"`
 	MaxQ64      int64  `json:"max_q64,omitempty"`
+	// SpendingUsd feed (rule_kind=9). FeedAccount (reused above) is the Pyth
+	// adapter FeedCache PDA; Decimals is the asset's base-unit decimal count.
+	Decimals uint8 `json:"decimals,omitempty" validate:"max=24"`
 }
 
 type itemsAddChallengeResponse struct {
@@ -543,9 +553,11 @@ func (s *Service) itemsAddChallenge(w http.ResponseWriter, r *http.Request) {
 		s.itemsAddAllowlistChallenge(w, req, uint8(ruleIndex))
 	case KindOracle:
 		s.itemsAddOracleChallenge(w, req, uint8(ruleIndex))
+	case KindSpendingUsd:
+		s.itemsAddSpendingUsdChallenge(w, req, uint8(ruleIndex))
 	default:
 		httpx.WriteError(w, http.StatusNotImplemented, "kind_not_supported_yet",
-			"rule_kind must be 1 (Allowlist) or 4 (Oracle)")
+			"rule_kind must be 1 (Allowlist), 4 (Oracle) or 9 (SpendingUsd)")
 	}
 }
 
@@ -709,9 +721,13 @@ type requestSignatureChallengeRequest struct {
 	MessageDigestHex  string `json:"message_digest_hex" validate:"required,hex_len=32"`
 	DestinationHex    string `json:"destination_hex" validate:"required,hex_len=32"`
 	UserPubkeyHex     string `json:"user_pubkey_hex" validate:"required,hex_len=32"`
-	SignatureScheme   uint16 `json:"signature_scheme" validate:"max=4"`
+	SignatureScheme   uint16 `json:"signature_scheme" validate:"max=6"` // DWalletSignatureScheme 0..6 (5=EddsaSha512 Solana/Sui, 6=SchnorrkelMerlin)
 	Path              uint8  `json:"path" validate:"required,min=1,max=7"`
 	RulesGeneration   uint32 `json:"rules_generation"`
+	// Update 3 (ABI V2): asset amount (base units) + index in the active
+	// KIND_SPENDING_USD allowlist. Default 0/0 when no spending rule applies.
+	Amount     uint64 `json:"amount,omitempty"`
+	AssetIndex uint8  `json:"asset_index,omitempty" validate:"max=15"`
 }
 
 type requestSignatureChallengeResponse struct {
@@ -746,6 +762,8 @@ func (s *Service) requestSignatureChallenge(w http.ResponseWriter, r *http.Reque
 		SignatureScheme: req.SignatureScheme,
 		Path:            req.Path,
 		RulesGeneration: req.RulesGeneration,
+		Amount:          req.Amount,
+		AssetIndex:      req.AssetIndex,
 	}
 	pre := in.Preimage()
 	digest := in.Hash()

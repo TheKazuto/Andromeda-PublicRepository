@@ -11,10 +11,10 @@ import (
 
 // Discriminators (mirror of contracts/policy-engine/src/lib.rs).
 const (
-	DiscAddRuleAllowlist                       uint8 = 10
-	DiscRequestSignature                       uint8 = 1
-	DiscUpdateRuleAllowlistAddDestination      uint8 = 120
-	DiscUpdateRuleAllowlistRemoveDestination   uint8 = 121
+	DiscAddRuleAllowlist                     uint8 = 10
+	DiscRequestSignature                     uint8 = 1
+	DiscUpdateRuleAllowlistAddDestination    uint8 = 120
+	DiscUpdateRuleAllowlistRemoveDestination uint8 = 121
 )
 
 // SystemProgramID is the Solana system program (used for `init` accounts).
@@ -138,16 +138,16 @@ func UpdateRuleAllowlistAddDestination(p UpdateRuleAllowlistAddDestinationParams
 // Each PDA is attached as writable so kinds with mutable counters (Velocity,
 // SessionKey, Recovery) can write back via `data_ptr()`.
 type RequestSignatureParams struct {
-	ProgramID           solana.PublicKey
-	Engine              solana.PublicKey
-	DWallet             solana.PublicKey
-	Coordinator         solana.PublicKey
-	MessageApproval     solana.PublicKey
-	Payer               solana.PublicKey
-	CPIAuthority        solana.PublicKey
-	CallerProgram       solana.PublicKey
-	DWalletProgram      solana.PublicKey
-	RulePDAs            []solana.PublicKey // ordered by active slot, ascending.
+	ProgramID       solana.PublicKey
+	Engine          solana.PublicKey
+	DWallet         solana.PublicKey
+	Coordinator     solana.PublicKey
+	MessageApproval solana.PublicKey
+	Payer           solana.PublicKey
+	CPIAuthority    solana.PublicKey
+	CallerProgram   solana.PublicKey
+	DWalletProgram  solana.PublicKey
+	RulePDAs        []solana.PublicKey // ordered by active slot, ascending.
 	// RuleAux carries the auxiliary read-only accounts that the dispatch
 	// consumes immediately AFTER each sub-PDA, indexed parallel to RulePDAs.
 	// For KIND_ORACLE: `RuleAux[i]` = one FeedCache PDA per feed, in
@@ -163,6 +163,11 @@ type RequestSignatureParams struct {
 	CPIAuthorityBump    uint8
 	Destination         [32]byte
 	RulesGenerationSeen uint32
+	// Update 3 (ABI V2): asset amount (base units) + index in the active
+	// KIND_SPENDING_USD allowlist. Bound into the metadata_digest the caller
+	// signs. 0/0 when no spending rule is active.
+	Amount     uint64
+	AssetIndex uint8
 }
 
 func RequestSignature(p RequestSignatureParams) (solana.Instruction, error) {
@@ -185,6 +190,11 @@ func RequestSignature(p RequestSignatureParams) (solana.Instruction, error) {
 	var gen [4]byte
 	binary.LittleEndian.PutUint32(gen[:], p.RulesGenerationSeen)
 	data = append(data, gen[:]...)
+	// ABI V2 (Update 3): amount (u64 LE) + asset_index (u8).
+	var amt [8]byte
+	binary.LittleEndian.PutUint64(amt[:], p.Amount)
+	data = append(data, amt[:]...)
+	data = append(data, p.AssetIndex)
 
 	accounts := solana.AccountMetaSlice{
 		{PublicKey: p.DWallet, IsSigner: false, IsWritable: false},

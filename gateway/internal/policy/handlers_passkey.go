@@ -22,18 +22,18 @@ import (
 // ── shared inputs ────────────────────────────────────────────────────────────
 
 type passkeyCommonInputs struct {
-	DwalletAddress       string `json:"dwallet_address"          validate:"required,solana_pubkey"`
-	InitAuthorityHash    string `json:"init_authority_hash_hex"  validate:"required,hex_len=32"`
-	RuleIndex            uint8  `json:"rule_index"               validate:"max=15"`
-	PasskeySessionNonce  uint64 `json:"passkey_session_nonce"`
+	DwalletAddress      string `json:"dwallet_address"          validate:"required,solana_pubkey"`
+	InitAuthorityHash   string `json:"init_authority_hash_hex"  validate:"required,hex_len=32"`
+	RuleIndex           uint8  `json:"rule_index"               validate:"max=15"`
+	PasskeySessionNonce uint64 `json:"passkey_session_nonce"`
 }
 
 type passkeyDerived struct {
-	dwallet         solana.PublicKey
-	initHash        [32]byte
-	engine          solana.PublicKey
-	rulePDA         solana.PublicKey
-	sessionPDA      solana.PublicKey
+	dwallet    solana.PublicKey
+	initHash   [32]byte
+	engine     solana.PublicKey
+	rulePDA    solana.PublicKey
+	sessionPDA solana.PublicKey
 }
 
 func (s *Service) derivePasskey(in *passkeyCommonInputs) (*passkeyDerived, *httpError) {
@@ -147,9 +147,9 @@ func (s *Service) passkeyOpenChallenge(w http.ResponseWriter, r *http.Request) {
 type passkeyOpenSubmitRequest struct {
 	signedSubmitFields
 	passkeyOpenChallengeRequest
-	WebauthnAuthDataBase64        string `json:"webauthn_auth_data_base64"         validate:"required,base64"`
-	WebauthnClientDataJSONBase64  string `json:"webauthn_client_data_json_base64"  validate:"required,base64"`
-	ExpectedPasskeySessionNonce   uint64 `json:"expected_passkey_session_nonce"`
+	WebauthnAuthDataBase64       string `json:"webauthn_auth_data_base64"         validate:"required,base64"`
+	WebauthnClientDataJSONBase64 string `json:"webauthn_client_data_json_base64"  validate:"required,base64"`
+	ExpectedPasskeySessionNonce  uint64 `json:"expected_passkey_session_nonce"`
 }
 
 func (s *Service) passkeyOpenSubmit(w http.ResponseWriter, r *http.Request) {
@@ -265,18 +265,18 @@ type passkeyUseChallengeRequest struct {
 	// PrimarySlot is the WebAuthn slot bound to the session (scheme=3,
 	// credential pubkey). The challenge BINDS to this slot so the on-chain
 	// handler can re-verify the session was opened by the same credential.
-	PrimarySlot         memberSlotJSON `json:"primary_slot"           validate:"required"`
+	PrimarySlot memberSlotJSON `json:"primary_slot"           validate:"required"`
 	// EphPkHex is the ephemeral Ed25519 pubkey (32 bytes hex). The user's
 	// device signed the challenge with the matching secret key; the gateway
 	// uses this to build the Ed25519 precompile.
-	EphPkHex            string         `json:"eph_pk_hex"             validate:"required,hex_len=32"`
-	MessageDigestHex    string         `json:"message_digest_hex"     validate:"required,hex_len=32"`
-	MetadataDigestHex   string         `json:"metadata_digest_hex"    validate:"required,hex_len=32"`
-	UserPubkeyHex       string         `json:"user_pubkey_hex"        validate:"required,hex_len=32"`
-	SignatureScheme     uint16         `json:"signature_scheme"       validate:"max=6"`
-	UseNonce            uint64         `json:"use_nonce"`
-	IkaCurve            uint16         `json:"ika_curve"              validate:"max=2"`
-	IkaDWalletPubkey    string         `json:"ika_dwallet_pubkey_hex" validate:"required"`
+	EphPkHex          string `json:"eph_pk_hex"             validate:"required,hex_len=32"`
+	MessageDigestHex  string `json:"message_digest_hex"     validate:"required,hex_len=32"`
+	MetadataDigestHex string `json:"metadata_digest_hex"    validate:"required,hex_len=32"`
+	UserPubkeyHex     string `json:"user_pubkey_hex"        validate:"required,hex_len=32"`
+	SignatureScheme   uint16 `json:"signature_scheme"       validate:"max=6"`
+	UseNonce          uint64 `json:"use_nonce"`
+	IkaCurve          uint16 `json:"ika_curve"              validate:"max=2"`
+	IkaDWalletPubkey  string `json:"ika_dwallet_pubkey_hex" validate:"required"`
 }
 
 type passkeyUseChallengeResponse struct {
@@ -328,7 +328,7 @@ func (s *Service) passkeyUseChallenge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	msgApproval, msgApprovalBump, err := MessageApprovalPDA(
-		req.IkaCurve, ikaPK, req.SignatureScheme, msgDigest[:], metaDigest[:],
+		req.IkaCurve, ikaPK, req.SignatureScheme, msgDigest[:],
 	)
 	if err != nil {
 		httpx.WriteError(w, http.StatusInternalServerError, "pda_derivation_failed", err.Error())
@@ -421,7 +421,7 @@ func (s *Service) passkeyUseSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	msgApproval, msgApprovalBump, err := MessageApprovalPDA(
-		req.IkaCurve, ikaPK, req.SignatureScheme, msgDigest[:], metaDigest[:],
+		req.IkaCurve, ikaPK, req.SignatureScheme, msgDigest[:],
 	)
 	if err != nil {
 		httpx.WriteError(w, http.StatusInternalServerError, "pda_derivation_failed", err.Error())
@@ -475,7 +475,7 @@ func (s *Service) passkeyUseSubmit(w http.ResponseWriter, r *http.Request) {
 		ProgramID:           s.ProgramID,
 		Engine:              derived.engine,
 		DWallet:             derived.dwallet,
-		Coordinator:         derived.dwallet,
+		Coordinator:         IkaCoordinator(),
 		MessageApproval:     msgApproval,
 		Payer:               s.GasSponsor.PublicKey(),
 		CPIAuthority:        cpiAuth,
@@ -571,9 +571,9 @@ func (s *Service) passkeyClose(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, herr := s.buildUnsignedTx(r, recipient, []solana.Instruction{closeIx},
 		map[string]any{
-			"engine_address":         engine.String(),
-			"session_address":        sessionPDA.String(),
-			"passkey_session_nonce":  req.PasskeySessionNonce,
+			"engine_address":        engine.String(),
+			"session_address":       sessionPDA.String(),
+			"passkey_session_nonce": req.PasskeySessionNonce,
 		})
 	if herr != nil {
 		herr.write(w)

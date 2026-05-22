@@ -15,6 +15,7 @@ var (
 	DomainInitV1     = []byte("andromeda::policy-engine::init::v1")
 	DomainV3         = []byte("andromeda::policy-engine::v3")
 	DomainRequestV1  = []byte("andromeda::policy-engine::request::v1")
+	DomainRequestV2  = []byte("andromeda::policy-engine::request::v2")
 	DomainRecoveryV3 = []byte("andromeda::policy-engine::recovery::v3")
 )
 
@@ -27,6 +28,8 @@ var (
 	OpAllowlistRemoveDest = []byte("allowlist-remove-destination")
 	OpAddOracle           = []byte("add-rule-oracle")
 	OpOracleAddFeed       = []byte("oracle-add-feed")
+	OpAddSpendingUsd      = []byte("add-rule-spending-usd")
+	OpSpendingUsdAddFeed  = []byte("spending-usd-add-feed")
 	OpPause               = []byte("pause")
 	OpResume              = []byte("resume")
 	OpRevoke              = []byte("revoke")
@@ -118,11 +121,17 @@ type RequestMetadataDigestInput struct {
 	SignatureScheme uint16
 	Path            uint8 // AppliesNormal | AppliesRecovery | AppliesSession
 	RulesGeneration uint32
+	// Update 3 (ABI V2): the asset amount (base units) and its index in the
+	// active KIND_SPENDING_USD allowlist. Bound into the digest so a USD
+	// spending limit is enforced end-to-end. Zero for non-spending requests
+	// and for the session path (matches the on-chain 0/0 binding).
+	Amount     uint64
+	AssetIndex uint8
 }
 
 func (in *RequestMetadataDigestInput) Preimage() []byte {
 	var buf bytes.Buffer
-	buf.Write(DomainRequestV1)
+	buf.Write(DomainRequestV2)
 	buf.WriteString("request-signature")
 	buf.Write(in.Engine.Bytes())
 	buf.Write(in.DWallet.Bytes())
@@ -136,6 +145,10 @@ func (in *RequestMetadataDigestInput) Preimage() []byte {
 	var gen [4]byte
 	binary.LittleEndian.PutUint32(gen[:], in.RulesGeneration)
 	buf.Write(gen[:])
+	var amt [8]byte
+	binary.LittleEndian.PutUint64(amt[:], in.Amount)
+	buf.Write(amt[:])
+	buf.WriteByte(in.AssetIndex)
 	return buf.Bytes()
 }
 
@@ -179,6 +192,65 @@ func OracleConfigHash(appliesTo, feedsCount, freshnessSecondsDiv16, minConfidenc
 	var out [32]byte
 	copy(out[:], h.Sum(nil))
 	return out, nil
+}
+
+// SpendingUsdConfigHash computes sha256("spending-usd-config-v1" || applies_to
+// || feeds_count || freshness_seconds_div16 || max_confidence_bps_div4 ||
+// caps(24) || feeds_flat) where caps = LE(max_per_tx ‖ max_per_day ‖
+// max_per_week). Mirror of the on-chain `add_rule_spending_usd` /
+// `update_rule_spending_usd_add_feed` handlers. `feedsFlat` must be exactly
+// MaxSpendingUsdFeeds*SpendingUsdFeedBytes (528) bytes.
+func SpendingUsdConfigHash(appliesTo, feedsCount, freshnessSecondsDiv16, maxConfidenceBpsDiv4 uint8, maxPerTx, maxPerDay, maxPerWeek uint64, feedsFlat []byte) ([32]byte, error) {
+	if len(feedsFlat) != MaxSpendingUsdFeeds*SpendingUsdFeedBytes {
+		return [32]byte{}, fmt.Errorf("policy: spending feeds_flat must be %d bytes, got %d",
+			MaxSpendingUsdFeeds*SpendingUsdFeedBytes, len(feedsFlat))
+	}
+	h := sha256.New()
+	h.Write([]byte("spending-usd-config-v1"))
+	h.Write([]byte{appliesTo, feedsCount, freshnessSecondsDiv16, maxConfidenceBpsDiv4})
+	var caps [24]byte
+	binary.LittleEndian.PutUint64(caps[0:8], maxPerTx)
+	binary.LittleEndian.PutUint64(caps[8:16], maxPerDay)
+	binary.LittleEndian.PutUint64(caps[16:24], maxPerWeek)
+	h.Write(caps[:])
+	h.Write(feedsFlat)
+	var out [32]byte
+	copy(out[:], h.Sum(nil))
+	return out, nil
+}
+
+// HumanMessageSpendingUsdAdd renders the clear-signing v2 line for disc 18.
+// Byte-for-byte mirror of `spending_usd_add_message` in
+// contracts/auth/src/human_message.rs.
+func HumanMessageSpendingUsdAdd(maxPerTx, maxPerDay, maxPerWeek uint64, engine, dwallet solana.PublicKey) []byte {
+	var buf bytes.Buffer
+	buf.WriteString("Add USD spending limit policy ")
+	buf.WriteString(engine.String())
+	buf.WriteString(" for dWallet ")
+	buf.WriteString(dwallet.String())
+	buf.WriteString(" maxPerTx ")
+	buf.WriteString(strconv.FormatUint(maxPerTx, 10))
+	buf.WriteString(" maxPerDay ")
+	buf.WriteString(strconv.FormatUint(maxPerDay, 10))
+	buf.WriteString(" maxPerWeek ")
+	buf.WriteString(strconv.FormatUint(maxPerWeek, 10))
+	return buf.Bytes()
+}
+
+// HumanMessageSpendingUsdAddFeed renders the clear-signing v2 line for disc 19.
+// Byte-for-byte mirror of `spending_usd_add_feed_message` in
+// contracts/auth/src/human_message.rs.
+func HumanMessageSpendingUsdAddFeed(feedCache solana.PublicKey, decimals uint8, engine, dwallet solana.PublicKey) []byte {
+	var buf bytes.Buffer
+	buf.WriteString("Add spending feed ")
+	buf.WriteString(feedCache.String())
+	buf.WriteString(" decimals ")
+	buf.WriteString(strconv.FormatUint(uint64(decimals), 10))
+	buf.WriteString(" on USD spending policy ")
+	buf.WriteString(engine.String())
+	buf.WriteString(" for dWallet ")
+	buf.WriteString(dwallet.String())
+	return buf.Bytes()
 }
 
 // HumanMessageOracleAddFeed renders the clear-signing v2 line for disc 122:

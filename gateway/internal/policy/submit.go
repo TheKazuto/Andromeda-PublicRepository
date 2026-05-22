@@ -191,13 +191,17 @@ type addRuleSubmitRequest struct {
 	DwalletAddress    string         `json:"dwallet_address" validate:"required,solana_pubkey"`
 	InitAuthorityHash string         `json:"init_authority_hash_hex" validate:"required,hex_len=32"`
 	OwnerSlot         memberSlotJSON `json:"owner_slot" validate:"required"`
-	RuleKind          uint8          `json:"rule_kind" validate:"required,min=1,max=8"`
+	RuleKind          uint8          `json:"rule_kind" validate:"required,min=1,max=9"`
 	RuleIndex         uint8          `json:"rule_index" validate:"max=15"`
 	ExpectedNonce     uint64         `json:"expected_nonce"`
 	AppliesTo         uint8          `json:"applies_to" validate:"required,min=1,max=7"`
-	// Oracle-only (rule_kind=4); divided forms (see addRuleRequest).
+	// Oracle (rule_kind=4) + SpendingUsd (rule_kind=9); divided forms (see addRuleRequest).
 	FreshnessSecondsDiv16 uint8 `json:"freshness_seconds_div16,omitempty"`
 	MinConfidenceBpsDiv4  uint8 `json:"min_confidence_bps_div4,omitempty"`
+	// SpendingUsd-only (rule_kind=9). USD ceilings, canonical 1e8.
+	MaxPerTxUsd   uint64 `json:"max_per_tx_usd,omitempty"`
+	MaxPerDayUsd  uint64 `json:"max_per_day_usd,omitempty"`
+	MaxPerWeekUsd uint64 `json:"max_per_week_usd,omitempty"`
 }
 
 func (s *Service) addRuleSubmit(w http.ResponseWriter, r *http.Request) {
@@ -213,9 +217,11 @@ func (s *Service) addRuleSubmit(w http.ResponseWriter, r *http.Request) {
 		s.addRuleAllowlistSubmit(w, r, req)
 	case KindOracle:
 		s.addRuleOracleSubmit(w, r, req)
+	case KindSpendingUsd:
+		s.addRuleSpendingUsdSubmit(w, r, req)
 	default:
 		httpx.WriteError(w, http.StatusNotImplemented, "kind_not_supported_yet",
-			"rule_kind must be 1 (Allowlist) or 4 (Oracle)")
+			"rule_kind must be 1 (Allowlist), 4 (Oracle) or 9 (SpendingUsd)")
 	}
 }
 
@@ -390,7 +396,7 @@ type itemsAddSubmitRequest struct {
 	DwalletAddress    string         `json:"dwallet_address" validate:"required,solana_pubkey"`
 	InitAuthorityHash string         `json:"init_authority_hash_hex" validate:"required,hex_len=32"`
 	OwnerSlot         memberSlotJSON `json:"owner_slot" validate:"required"`
-	RuleKind          uint8          `json:"rule_kind" validate:"required,min=1,max=8"`
+	RuleKind          uint8          `json:"rule_kind" validate:"required,min=1,max=9"`
 	RuleGeneration    uint32         `json:"rule_generation" validate:"required,min=1"`
 	ExpectedNonce     uint64         `json:"expected_nonce"`
 	// Allowlist item (rule_kind=1).
@@ -400,6 +406,8 @@ type itemsAddSubmitRequest struct {
 	FeedOwner   string `json:"feed_owner,omitempty" validate:"omitempty,solana_pubkey"`
 	MinQ64      int64  `json:"min_q64,omitempty"`
 	MaxQ64      int64  `json:"max_q64,omitempty"`
+	// SpendingUsd feed (rule_kind=9). FeedAccount (reused) is the FeedCache PDA.
+	Decimals uint8 `json:"decimals,omitempty" validate:"max=24"`
 }
 
 func (s *Service) itemsAddSubmit(w http.ResponseWriter, r *http.Request) {
@@ -421,9 +429,11 @@ func (s *Service) itemsAddSubmit(w http.ResponseWriter, r *http.Request) {
 		s.itemsAddAllowlistSubmit(w, r, req, uint8(ruleIndex))
 	case KindOracle:
 		s.itemsAddOracleSubmit(w, r, req, uint8(ruleIndex))
+	case KindSpendingUsd:
+		s.itemsAddSpendingUsdSubmit(w, r, req, uint8(ruleIndex))
 	default:
 		httpx.WriteError(w, http.StatusNotImplemented, "kind_not_supported_yet",
-			"rule_kind must be 1 (Allowlist) or 4 (Oracle)")
+			"rule_kind must be 1 (Allowlist), 4 (Oracle) or 9 (SpendingUsd)")
 	}
 }
 
@@ -602,7 +612,7 @@ type requestSignatureSubmitRequest struct {
 	MessageDigestHex  string `json:"message_digest_hex" validate:"required,hex_len=32"`
 	MetadataDigestHex string `json:"metadata_digest_hex" validate:"required,hex_len=32"`
 	UserPubkeyHex     string `json:"user_pubkey_hex" validate:"required,hex_len=32"`
-	SignatureScheme   uint16 `json:"signature_scheme" validate:"max=4"`
+	SignatureScheme   uint16 `json:"signature_scheme" validate:"max=6"` // DWalletSignatureScheme 0..6 (5=EddsaSha512 Solana/Sui, 6=SchnorrkelMerlin)
 	DestinationHex    string `json:"destination_hex" validate:"required,hex_len=32"`
 	RulesGeneration   uint32 `json:"rules_generation_seen"`
 	// F8a: client passes one sub-PDA per active rule slot, in ascending slot
@@ -625,6 +635,12 @@ type requestSignatureSubmitRequest struct {
 	AutoResolveAccounts bool   `json:"auto_resolve_accounts,omitempty"`
 	IkaCurve            uint16 `json:"ika_curve" validate:"max=2"`
 	IkaDWalletPubkey    string `json:"ika_dwallet_pubkey_hex" validate:"required"`
+	// Update 3 (ABI V2): asset amount (base units) + index in the active
+	// KIND_SPENDING_USD allowlist. Bound into the metadata digest the client
+	// obtained from /request-signature/challenge. Default 0/0 when no spending
+	// rule is active. `asset_index` is capped at MaxSpendingUsdFeeds-1.
+	Amount     uint64 `json:"amount,omitempty"`
+	AssetIndex uint8  `json:"asset_index,omitempty" validate:"max=15"`
 }
 
 func (s *Service) requestSignatureSubmit(w http.ResponseWriter, r *http.Request) {
@@ -753,7 +769,7 @@ func (s *Service) assembleRequestSignatureIx(
 		return nil, zero, zero, nil, &buildError{http.StatusInternalServerError, "pda_derivation_failed", err.Error()}
 	}
 	msgApproval, msgApprovalBump, err := MessageApprovalPDA(
-		req.IkaCurve, ikaPK, req.SignatureScheme, msgDigest[:], metaDigest[:],
+		req.IkaCurve, ikaPK, req.SignatureScheme, msgDigest[:],
 	)
 	if err != nil {
 		return nil, zero, zero, nil, &buildError{http.StatusInternalServerError, "pda_derivation_failed", err.Error()}
@@ -791,7 +807,7 @@ func (s *Service) assembleRequestSignatureIx(
 			return nil, zero, zero, nil, &buildError{http.StatusServiceUnavailable, "no_rpc",
 				"auto_resolve_accounts requires SOLANA_RPC_URL"}
 		}
-		resolvedPDAs, resolvedAux, rerr := s.resolveTrailingAccounts(ctx, engine)
+		resolvedPDAs, resolvedAux, rerr := s.resolveTrailingAccounts(ctx, engine, req.AssetIndex)
 		if rerr != nil {
 			return nil, zero, zero, nil, &buildError{http.StatusBadGateway, "resolve_failed", rerr.Error()}
 		}
@@ -808,7 +824,7 @@ func (s *Service) assembleRequestSignatureIx(
 		ProgramID:           s.ProgramID,
 		Engine:              engine,
 		DWallet:             dwallet,
-		Coordinator:         dwallet, // F2.6c placeholder — real coordinator lookup is F9
+		Coordinator:         IkaCoordinator(), // Ika DWalletCoordinator PDA (approve_message CPI)
 		MessageApproval:     msgApproval,
 		Payer:               payer,
 		CPIAuthority:        cpiAuth,
@@ -825,6 +841,8 @@ func (s *Service) assembleRequestSignatureIx(
 		CPIAuthorityBump:    cpiBump,
 		Destination:         dest,
 		RulesGenerationSeen: req.RulesGeneration,
+		Amount:              req.Amount,
+		AssetIndex:          req.AssetIndex,
 	})
 	if err != nil {
 		return nil, zero, zero, nil, &buildError{http.StatusInternalServerError, "build_failed", err.Error()}

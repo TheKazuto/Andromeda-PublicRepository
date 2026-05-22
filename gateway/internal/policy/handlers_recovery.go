@@ -31,31 +31,31 @@ import (
 // ── /v1/policy/recover-as-primary/challenge ──────────────────────────────────
 
 type recoverAsPrimaryChallengeRequest struct {
-	DwalletAddress      string         `json:"dwallet_address"        validate:"required,solana_pubkey"`
-	InitAuthorityHash   string         `json:"init_authority_hash_hex" validate:"required,hex_len=32"`
-	PrimarySlot         memberSlotJSON `json:"primary_slot"            validate:"required"`
-	MessageDigestHex    string         `json:"message_digest_hex"      validate:"required,hex_len=32"`
-	MetadataDigestHex   string         `json:"metadata_digest_hex"     validate:"required,hex_len=32"`
-	UserPubkeyHex       string         `json:"user_pubkey_hex"         validate:"required,hex_len=32"`
-	SignatureScheme     uint16         `json:"signature_scheme"        validate:"max=6"`
-	DestinationHex      string         `json:"destination_hex"         validate:"required,hex_len=32"`
-	RuleIndex           uint8          `json:"rule_index"              validate:"max=15"`
-	ExpectedNonce       uint64         `json:"expected_nonce"`
-	IkaCurve            uint16         `json:"ika_curve"               validate:"max=2"`
-	IkaDWalletPubkey    string         `json:"ika_dwallet_pubkey_hex"  validate:"required"`
+	DwalletAddress    string         `json:"dwallet_address"        validate:"required,solana_pubkey"`
+	InitAuthorityHash string         `json:"init_authority_hash_hex" validate:"required,hex_len=32"`
+	PrimarySlot       memberSlotJSON `json:"primary_slot"            validate:"required"`
+	MessageDigestHex  string         `json:"message_digest_hex"      validate:"required,hex_len=32"`
+	MetadataDigestHex string         `json:"metadata_digest_hex"     validate:"required,hex_len=32"`
+	UserPubkeyHex     string         `json:"user_pubkey_hex"         validate:"required,hex_len=32"`
+	SignatureScheme   uint16         `json:"signature_scheme"        validate:"max=6"`
+	DestinationHex    string         `json:"destination_hex"         validate:"required,hex_len=32"`
+	RuleIndex         uint8          `json:"rule_index"              validate:"max=15"`
+	ExpectedNonce     uint64         `json:"expected_nonce"`
+	IkaCurve          uint16         `json:"ika_curve"               validate:"max=2"`
+	IkaDWalletPubkey  string         `json:"ika_dwallet_pubkey_hex"  validate:"required"`
 }
 
 type recoverAsPrimaryChallengeResponse struct {
-	ProgramID                 string `json:"program_id"`
-	EngineAddress             string `json:"engine_address"`
-	RulePDA                   string `json:"rule_pda"`
-	MessageApprovalAddress    string `json:"message_approval_address"`
-	MessageApprovalBump       uint8  `json:"message_approval_bump"`
-	OpTag                     string `json:"op_tag"`
-	HumanMessage              string `json:"human_message"`
-	PreimageHex               string `json:"preimage_hex"`
-	ChallengeHex              string `json:"challenge_hex"`
-	PrimaryScheme             uint8  `json:"primary_scheme"`
+	ProgramID              string `json:"program_id"`
+	EngineAddress          string `json:"engine_address"`
+	RulePDA                string `json:"rule_pda"`
+	MessageApprovalAddress string `json:"message_approval_address"`
+	MessageApprovalBump    uint8  `json:"message_approval_bump"`
+	OpTag                  string `json:"op_tag"`
+	HumanMessage           string `json:"human_message"`
+	PreimageHex            string `json:"preimage_hex"`
+	ChallengeHex           string `json:"challenge_hex"`
+	PrimaryScheme          uint8  `json:"primary_scheme"`
 }
 
 func (s *Service) recoverAsPrimaryChallenge(w http.ResponseWriter, r *http.Request) {
@@ -168,7 +168,7 @@ func (s *Service) recoverAsPrimarySubmit(w http.ResponseWriter, r *http.Request)
 		ProgramID:           s.ProgramID,
 		Engine:              derived.engine,
 		DWallet:             derived.dwallet,
-		Coordinator:         derived.dwallet, // F2.6c placeholder — real coordinator lookup is F9
+		Coordinator:         IkaCoordinator(), // Ika DWalletCoordinator PDA (approve_message CPI)
 		MessageApproval:     derived.msgApproval,
 		Payer:               s.GasSponsor.PublicKey(),
 		CPIAuthority:        derived.cpiAuthority,
@@ -290,7 +290,7 @@ func (s *Service) deriveRecoverAsPrimary(
 		return nil, &httpError{http.StatusInternalServerError, "pda_derivation_failed", err.Error()}
 	}
 	msgApproval, msgApprovalBump, err := MessageApprovalPDA(
-		req.IkaCurve, ikaPK, req.SignatureScheme, msgDigest[:], metaDigest[:],
+		req.IkaCurve, ikaPK, req.SignatureScheme, msgDigest[:],
 	)
 	if err != nil {
 		return nil, &httpError{http.StatusInternalServerError, "pda_derivation_failed", err.Error()}
