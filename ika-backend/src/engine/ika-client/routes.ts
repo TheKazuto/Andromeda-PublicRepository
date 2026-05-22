@@ -4,6 +4,8 @@
 //   POST /v1/dwallet/transfer-ownership →  MCP tool `transfer_ownership`
 //   POST /v1/dwallet/presign            →  MCP tool `presign`
 //   POST /v1/dwallet/sign               →  MCP tool `sign_message`
+//   GET  /v1/dwallet/addresses/:addr    →  MCP tool `dwallet_addresses`
+//   POST /v1/dwallet/prepare-message    →  MCP tool `prepare_message`
 // (the gateway auto-generates the MCP tools from its route catalogue, so
 // adding the matching entries to `gateway/internal/routes/routes.go` is all
 // that's needed on the gateway side.)
@@ -34,7 +36,9 @@ import {
   allocatePresign,
   signMessage,
   transferDwalletOwnership,
+  deriveWalletAddresses,
 } from './wallet.js'
+import { prepareMessage } from '../../chain/index.js'
 
 const HEX = /^[0-9a-fA-F]*$/
 
@@ -89,6 +93,20 @@ const signSchema = z.object({
   approvalSlot: z.coerce.bigint().nonnegative(),
 })
 
+// 256 K hex chars = 128 KB of payload — generous for any destination-chain tx,
+// while bounding the keccak/blake2b work a single request can trigger (DoS).
+const PAYLOAD_HEX_MAX = 256 * 1024
+
+const prepareMessageSchema = z.object({
+  chainId: z.string().min(3).max(128),
+  payloadHex: z
+    .string()
+    .regex(HEX)
+    .max(PAYLOAD_HEX_MAX, 'payloadHex too large')
+    .refine((s) => s.length % 2 === 0 && s.length > 0, 'payloadHex must be non-empty even-length hex'),
+  kind: z.enum(['transaction', 'message']),
+})
+
 function ownerRefOf(headerValue: string | undefined): string {
   if (!headerValue || headerValue.trim() === '') {
     const e = new Error('missing tenant identity — call this endpoint through the Andromeda gateway')
@@ -118,6 +136,10 @@ const KNOWN_4XX: Record<string, number> = {
   WrongPassphraseError: 401,
   WalletKeyNotFoundError: 404,
   WalletKeyNotFinalizedError: 409,
+  // Multi-chain layer (Update 2 / B2-B3): all are caller input errors.
+  ChainIdParseError: 400,
+  UnsupportedChainError: 400,
+  InvalidPublicKeyError: 400,
 }
 
 function respondErr(res: Response, scope: string, err: unknown): void {
@@ -177,6 +199,10 @@ export function mountMcpWalletRoutes(router: Router, config: AppConfig): void {
           curve: result.curve,
           curveId: result.curveId,
           ownerPubkeyBase58: bs58.encode(result.ownerPubkey),
+          // The curve-specific dWallet public key — derive destination-chain
+          // addresses from THIS, not from `ownerPubkeyBase58` (Ed25519). See
+          // GET /v1/dwallet/addresses for the derived addresses themselves.
+          dwalletPublicKeyHex: Buffer.from(result.dwalletPublicKey).toString('hex'),
           committed: result.committed,
           signable: result.signable,
           recoverable: result.recoverable,
@@ -273,8 +299,37 @@ export function mountMcpWalletRoutes(router: Router, config: AppConfig): void {
     }
   })
 
+  router.get('/addresses/:dwalletAddress', async (req, res) => {
+    try {
+      const ownerRef = ownerRefOf(req.header('x-andromeda-user-id'))
+      const dwalletAddress = req.params.dwalletAddress
+      if (!dwalletAddress || dwalletAddress.length < 32) {
+        res.status(400).json(fail('dwalletAddress path parameter is required (base58)'))
+        return
+      }
+      const result = await deriveWalletAddresses({ ownerRef, dwalletAddress })
+      res.json(ok(result))
+    } catch (err) {
+      respondErr(res, 'mcp/dwallet/addresses', err)
+    }
+  })
+
+  // Stateless utility: given a destination chainId + raw payload, return the
+  // envelope-applied bytes to sign and the on-chain message digest. No tenant
+  // data, no signing — pure compute. Single source of truth for the
+  // (preprocessed, digest) pair so approve and sign never drift.
+  router.post('/prepare-message', (req, res) => {
+    try {
+      const body = prepareMessageSchema.parse(req.body)
+      const result = prepareMessage(body.chainId, hexToBytes(body.payloadHex), body.kind)
+      res.json(ok(result))
+    } catch (err) {
+      respondErr(res, 'mcp/dwallet/prepare-message', err)
+    }
+  })
+
   logger.info(
     { policyEngineEnabled },
-    'MCP dWallet routes mounted (/v1/dwallet/{create,transfer-ownership,presign,sign})',
+    'MCP dWallet routes mounted (/v1/dwallet/{create,transfer-ownership,presign,sign,addresses,prepare-message})',
   )
 }

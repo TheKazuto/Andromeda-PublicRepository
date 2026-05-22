@@ -49,6 +49,7 @@ import {
   Curve,
   type CurveName,
 } from './request.js'
+import { deriveAccountsForCurve, type DerivedAccount } from '../../chain/index.js'
 import { buildTransferOwnershipInstruction } from '../../clients/ika/transferOwnership.js'
 import { buildInitEngineInstruction } from '../../clients/policyEngine/instructions.js'
 import {
@@ -107,6 +108,13 @@ export interface CreateDwalletResult {
   curveId: number
   /** 32-byte Ed25519 pubkey = the dWallet's on-chain owner / chain sender. */
   ownerPubkey: Uint8Array
+  /**
+   * The DKG-produced dWallet public key, on the dWallet's curve (secp256k1
+   * compressed for EVM/BTC/etc, ed25519 for Solana/Sui). THIS is the key the
+   * destination chain's address derives from — NOT `ownerPubkey` (always
+   * Ed25519). See `deriveWalletAddresses` / `GET /v1/dwallet/addresses`.
+   */
+  dwalletPublicKey: Uint8Array
   /** True once the NOA's `commit_dwallet` has landed and the PDA exists. */
   committed: boolean
   /** True once the dWallet's authority is the PolicyEngine v3 CPI PDA. */
@@ -194,6 +202,7 @@ export async function createDwallet(opts: {
       curve,
       curveId,
       ownerPubkey: created.signerPubkey,
+      dwalletPublicKey: dkg.publicKey,
       committed,
       signable: false,
       recoverable: false,
@@ -383,6 +392,35 @@ export async function allocatePresign(opts: {
     senderPubkey: meta.signerPubkey,
   })
   return { presignSessionId }
+}
+
+export interface WalletAddressesResult {
+  dwalletAddress: string
+  curve: CurveName
+  /** Hex of the curve-specific dWallet public key the addresses derive from. */
+  dwalletPublicKeyHex: string
+  /** Every chain-native address this dWallet's curve can hold. */
+  addresses: DerivedAccount[]
+}
+
+/**
+ * Read-only: derive every chain-native address for an MCP-created dWallet from
+ * its stored `dwalletPublicKey` + curve. No passphrase, no gas, no signing —
+ * only `getWalletKeyMeta` (which never decrypts). Resolves the §1.3 mismatch by
+ * deriving from the curve-specific key, never the Ed25519 signer key.
+ */
+export async function deriveWalletAddresses(opts: {
+  ownerRef: string
+  dwalletAddress: string
+}): Promise<WalletAddressesResult> {
+  const meta = await getWalletKeyMeta(opts)
+  const curve = curveNameFromId(meta.curve)
+  return {
+    dwalletAddress: opts.dwalletAddress,
+    curve,
+    dwalletPublicKeyHex: Buffer.from(meta.dwalletPublicKey).toString('hex'),
+    addresses: deriveAccountsForCurve(meta.dwalletPublicKey, curve),
+  }
 }
 
 export interface SignMessageResult {
