@@ -80,6 +80,10 @@ const CHAIN_FAMILIES: Record<string, Omit<ChainSigningParams, 'namespace'>> = {
   casper: { curve: 'Curve25519', scheme: SignatureScheme.EddsaSha512, chainFamily: 'Casper' },
   tezos: { curve: 'Curve25519', scheme: SignatureScheme.EddsaSha512, chainFamily: 'Tezos' },
   iota: { curve: 'Curve25519', scheme: SignatureScheme.EddsaSha512, chainFamily: 'IOTA' },
+  near: { curve: 'Curve25519', scheme: SignatureScheme.EddsaSha512, chainFamily: 'NEAR' },
+  // Substrate via ed25519 accounts (SS58). sr25519 (the Polkadot default) needs
+  // Schnorrkel/Ristretto, deferred like Taproot.
+  polkadot: { curve: 'Curve25519', scheme: SignatureScheme.EddsaSha512, chainFamily: 'Substrate' },
 }
 
 /** All supported CAIP-2 namespaces. */

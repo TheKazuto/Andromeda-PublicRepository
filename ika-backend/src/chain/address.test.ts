@@ -72,7 +72,7 @@ describe('deriveAccountsForCurve', () => {
   it('Curve25519 yields Solana / Sui / Stellar / Algorand / Aptos / MultiversX', () => {
     const accounts = deriveAccountsForCurve(edKey, 'Curve25519')
     expect(accounts.map((a) => a.chainId.split(':')[0]).sort()).toEqual(
-      ['algorand', 'aptos', 'casper', 'iota', 'mvx', 'solana', 'stellar', 'sui', 'tezos', 'ton'],
+      ['algorand', 'aptos', 'casper', 'iota', 'mvx', 'near', 'polkadot', 'solana', 'stellar', 'sui', 'tezos', 'ton'],
     )
   })
 

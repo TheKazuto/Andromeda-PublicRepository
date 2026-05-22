@@ -44,11 +44,27 @@ const MVX_MAINNET_REF = '1'
 const ADDRESS_NAMESPACES: readonly string[] = [
   'eip155', 'tron', 'bip122', 'solana', 'sui', 'cosmos',
   'fil', 'stellar', 'algorand', 'aptos', 'mvx', 'ton', 'vechain',
-  'avalanche', 'casper', 'tezos', 'iota',
+  'avalanche', 'casper', 'tezos', 'iota', 'near', 'polkadot',
 ]
 
 /** Stellar StrKey version byte for an ed25519 public key (the "G" prefix). */
 const STELLAR_VERSION_ED25519 = 6 << 3
+
+/** Substrate SS58 address: base58(prefix || accountId || blake2b-512("SS58PRE"||prefix||accountId)[:2]). */
+function substrateSS58(accountId: Uint8Array, prefix: number): string {
+  const payload = new Uint8Array(1 + accountId.length)
+  payload[0] = prefix
+  payload.set(accountId, 1)
+  const ssPre = new TextEncoder().encode('SS58PRE')
+  const checkInput = new Uint8Array(ssPre.length + payload.length)
+  checkInput.set(ssPre, 0)
+  checkInput.set(payload, ssPre.length)
+  const checksum = blake2b(checkInput, { dkLen: 64 }).slice(0, 2)
+  const full = new Uint8Array(payload.length + 2)
+  full.set(payload, 0)
+  full.set(checksum, payload.length)
+  return bs58.encode(full)
+}
 
 /** CRC16/XMODEM (poly 0x1021, init 0) — Stellar StrKey checksum. */
 function crc16xmodem(data: Uint8Array): number {
@@ -259,6 +275,17 @@ export function deriveAddress(publicKey: Uint8Array, chainId: string): string {
       assertEd25519(publicKey)
       return '0x' + toHex(blake2b(publicKey, { dkLen: 32 }))
     }
+    case 'near': {
+      // NEAR implicit account = lowercase hex of the ed25519 public key.
+      assertEd25519(publicKey)
+      return toHex(publicKey)
+    }
+    case 'polkadot': {
+      // Substrate SS58 from an ed25519 account, Polkadot network prefix (0).
+      // sr25519 (the Polkadot wallet default) is deferred (Schnorrkel/Ristretto).
+      assertEd25519(publicKey)
+      return substrateSS58(publicKey, 0)
+    }
     default:
       throw new UnsupportedChainError(chainId, ADDRESS_NAMESPACES)
   }
@@ -304,6 +331,8 @@ export function deriveAccountsForCurve(publicKey: Uint8Array, curve: CurveName):
       'casper:casper',
       'tezos:mainnet',
       'iota:iota',
+      'near:mainnet',
+      'polkadot:91b171bb158e2d3848fa23a9f1c25182',
     ]
   } else {
     // Secp256r1 / Ristretto: no address-derivable destination chains in B1.

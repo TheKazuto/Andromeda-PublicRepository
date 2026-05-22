@@ -46,6 +46,8 @@ describe('resolveChainParams', () => {
     expect(resolveChainParams('casper:casper')).toMatchObject({ curve: 'Curve25519', scheme: 5 })
     expect(resolveChainParams('tezos:mainnet')).toMatchObject({ curve: 'Curve25519', scheme: 5 })
     expect(resolveChainParams('iota:iota')).toMatchObject({ curve: 'Curve25519', scheme: 5 })
+    expect(resolveChainParams('near:mainnet')).toMatchObject({ curve: 'Curve25519', scheme: 5 })
+    expect(resolveChainParams('polkadot:91b171bb158e2d3848fa23a9f1c25182')).toMatchObject({ curve: 'Curve25519', scheme: 5 })
     expect(resolveChainParams('stellar:pubnet')).toMatchObject({ curve: 'Curve25519', scheme: 5 })
     expect(resolveChainParams('algorand:x')).toMatchObject({ curve: 'Curve25519', scheme: 5 })
     expect(resolveChainParams('aptos:1')).toMatchObject({ curve: 'Curve25519', scheme: 5 })
@@ -77,7 +79,7 @@ describe('helpers', () => {
   it('namespacesForCurve groups by curve', () => {
     expect(namespacesForCurve('Secp256k1').sort()).toEqual(['avalanche', 'bip122', 'cosmos', 'eip155', 'fil', 'tron', 'vechain'])
     expect(namespacesForCurve('Curve25519').sort()).toEqual(
-      ['algorand', 'aptos', 'casper', 'iota', 'mvx', 'solana', 'stellar', 'sui', 'tezos', 'ton'],
+      ['algorand', 'aptos', 'casper', 'iota', 'mvx', 'near', 'polkadot', 'solana', 'stellar', 'sui', 'tezos', 'ton'],
     )
     expect(namespacesForCurve('Secp256r1')).toEqual([])
   })
