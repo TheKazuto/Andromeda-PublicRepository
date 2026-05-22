@@ -76,7 +76,7 @@ Capabilities beyond the core Ika and Encrypt primitives: the surrounding product
 ### Multi-chain core
 - **Any wallet, any chain adapter for Ika on Solana.** Uniform REST surface over 4 cryptographic curves (Ed25519, SECP256K1, SECP256R1, Ristretto).
 - **Multi-chain signing pipeline.** DKG, Presign, Sign, Future-Sign, Imported Key, Re-Encrypt Share exposed as stateless REST primitives.
-- **Chain-native address derivation & message prep.** One read-only call returns every chain-native address a dWallet can hold; another returns the envelope-applied bytes to sign plus the on-chain digest. 17 chain families, each validated byte-for-byte against that chain's official SDK: EVM, Bitcoin (SegWit + legacy), Solana, Sui, Cosmos, Tron, TON, Stellar, Algorand, Aptos, MultiversX, Filecoin, VeChain, Avalanche, Casper, Tezos, IOTA.
+- **Chain-native address derivation & message prep.** One read-only call returns every chain-native address a dWallet can hold; another returns the envelope-applied bytes to sign plus the on-chain digest. 19 chain families, each validated byte-for-byte against that chain's official SDK: EVM, Bitcoin (SegWit + legacy), Solana, Sui, Cosmos, Tron, TON, Stellar, Algorand, Aptos, MultiversX, Filecoin, VeChain, Avalanche, Casper, Tezos, IOTA, NEAR, Substrate (ed25519).
 
 ### Wallet-agnostic + gas sponsor
 - **Gas sponsor.** Andromeda absorbs Solana fees on every flow it controls. End users sign 32-byte canonical challenges with whatever wallet they already own; the gateway pays gas and submits.
