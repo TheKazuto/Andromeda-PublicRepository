@@ -43,6 +43,12 @@ ika-backend/
 │   │       ├── keystore.ts         # Passphrase-encrypted key material (cache/UX)
 │   │       ├── request.ts          # gRPC request shaping
 │   │       └── bcs.ts              # BCS codecs for Ika request payloads
+│   ├── chain/                      # Multi-chain layer (CAIP-2 → curve/scheme, address derivation, message envelopes)
+│   │   ├── chains.ts               # CAIP-2 namespace → { curve, scheme }
+│   │   ├── address.ts              # Chain-native address derivation per family
+│   │   ├── preprocess.ts           # Per-chain message/tx envelopes (EIP-191, Sui/IOTA intent, Tezos watermark, …)
+│   │   ├── digest.ts               # Scheme hash (keccak/sha256/double-sha256/blake2b)
+│   │   └── prepare.ts              # prepare-message = preprocessed bytes + on-chain digest
 │   ├── clients/
 │   │   ├── ika/                    # transfer-ownership instruction codec
 │   │   └── policyEngine/           # Codecs + instructions + program PDA for PolicyEngine v3
@@ -81,16 +87,43 @@ Alpha 1; the response carries the disclaimer.
 
 | Route | MCP tool | Notes |
 |-------|----------|-------|
-| `POST /v1/dwallet/create` | `create_dwallet` | `passphrase` (≥12), optional `curve` (`Curve25519`/`Secp256k1`/`Secp256r1`), optional `attachPolicyEngine: true` (deploys a fresh PolicyEngine v3 and delegates the dWallet's authority in the same call). |
+| `POST /v1/dwallet/create` | `create_dwallet` | `passphrase` (≥12), optional `curve` (`Curve25519`/`Secp256k1`/`Secp256r1`), optional `attachPolicyEngine: true` (deploys a fresh PolicyEngine v3 and delegates the dWallet's authority in the same call). Returns `dwalletPublicKeyHex` (the curve-specific key destination addresses derive from). |
 | `POST /v1/dwallet/transfer-ownership` | `transfer_ownership` | Delegates dWallet authority to a new account (e.g. a PolicyEngine v3 CPI authority PDA). |
 | `POST /v1/dwallet/presign` | `presign` | Allocates a presign session. |
 | `POST /v1/dwallet/sign` | `sign_message` | Signs a message using an approval + presign → returns `signatureBase64`. |
+| `GET /v1/dwallet/addresses/:dwalletAddress` | `dwallet_addresses` | Read-only: every chain-native address the dWallet's curve can hold (see "Supported destination chains"). No gas, no passphrase. |
+| `POST /v1/dwallet/prepare-message` | `prepare_message` | Stateless: `{ chainId, payloadHex, kind }` → `{ curve, scheme, preprocessedHex, digestHex }`. Single source of truth for the bytes to sign (`preprocessedHex` → `/sign`) and the on-chain digest (`digestHex` → request-signature). |
 
 ### MPC engine — low-level (prepare → submit)
 - `POST /v1/dwallet/dkg/prepare` — `{ curve, userPublicKeyBase58 }` → returns the BCS `SignedRequestData` (base64) to sign, plus `sessionPreimageBase64`, `epoch` and `intendedChainSenderBase58`
 - `POST /v1/dwallet/{dkg,sign,presign,future-sign,re-encrypt-share,make-share-public}/submit`
 - `POST /v1/dwallet/future-sign/complete/submit`
 - `GET  /v1/dwallet/presigns/:userPubkey` — `:userPubkey` is base64
+
+### Supported destination chains
+
+The `chain/` layer maps a CAIP-2 chain id to the right curve + signature scheme, derives chain-native addresses from the dWallet public key, and applies per-chain message envelopes. Every family below is validated byte-for-byte against that chain's official SDK in `fixtures/chain/`.
+
+| Curve | Families |
+|-------|----------|
+| Secp256k1 | EVM (`eip155`), Tron, Bitcoin, Cosmos, Filecoin (`fil`), VeChain, Avalanche X/P |
+| Curve25519 (ed25519) | Solana, Sui, TON, Stellar, Algorand, Aptos, MultiversX (`mvx`), Casper, Tezos, IOTA |
+
+A single dWallet signs for every family on its curve. Address derivation and signing are custody-free: the engine returns a raw signature; the client assembles and broadcasts the destination-chain transaction.
+
+#### Bitcoin
+
+Bitcoin uses the Secp256k1 curve. Three address/signing modes share one dWallet key:
+
+| Mode | Address | Scheme | Status |
+|------|---------|--------|--------|
+| SegWit P2WPKH (BIP143) | `bc1q…` | `2` EcdsaDoubleSha256 | **Live** |
+| Legacy P2PKH | `1…` | `1` EcdsaSha256 | **Live** |
+| Taproot P2TR (BIP340/Schnorr) | `bc1p…` | `3` TaprootSha256 | **Deferred** |
+
+`GET /v1/dwallet/addresses` returns both the segwit (`p2wpkh`) and legacy (`p2pkh`) addresses for a Secp256k1 dWallet. Legacy and segwit share the ECDSA presign, so both sign through the standard flow (pass the matching `signature_scheme` to the gateway's request-signature step).
+
+> **Taproot will be activated once Ika leaves devnet.** Taproot requires a Schnorr presign (signature algorithm `Taproot`, value 2) and, because MPC cannot tweak the internal key, a script-path P2TR construction. None of this can be validated end-to-end while the network runs the pre-alpha mock signer, so Taproot stays disabled until the real distributed signer ships on the post-devnet network.
 
 ### Login Social — OIDC pre-flow
 
