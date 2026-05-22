@@ -107,7 +107,9 @@ The `chain/` layer maps a CAIP-2 chain id to the right curve + signature scheme,
 | Curve | Families |
 |-------|----------|
 | Secp256k1 | EVM (`eip155`), Tron, Bitcoin, Cosmos, Filecoin (`fil`), VeChain, Avalanche X/P |
-| Curve25519 (ed25519) | Solana, Sui, TON, Stellar, Algorand, Aptos, MultiversX (`mvx`), Casper, Tezos, IOTA |
+| Curve25519 (ed25519) | Solana, Sui, TON, Stellar, Algorand, Aptos, MultiversX (`mvx`), Casper, Tezos, IOTA, NEAR, Substrate/Polkadot (`polkadot`) |
+
+> NEAR uses **implicit accounts** (lowercase hex of the ed25519 key). Substrate is supported via **ed25519 accounts** (SS58, Polkadot prefix); **sr25519** — the Polkadot wallet default — needs Schnorrkel/Ristretto and is deferred like Bitcoin Taproot.
 
 A single dWallet signs for every family on its curve. Address derivation and signing are custody-free: the engine returns a raw signature; the client assembles and broadcasts the destination-chain transaction.
 
