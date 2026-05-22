@@ -99,7 +99,7 @@ production, `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, `Per
 | **PolicyEngine v3 — read** | `GET policy/{dwallet}` — engine state (header, every active rule slot, members, destinations, nonces) | read | local |
 | **PolicyEngine v3 — admin** | `policy/init/{challenge,submit}`, `policy/rules/add/{challenge,submit}`, `policy/rules/{ruleIndex}/items/add/{challenge,submit}` — challenge → owner-signs → submit. Admin scope, Idempotency-Key MANDATORY on every submit. | admin | local |
 | **PolicyEngine v3 — recovery** | `policy/recover-as-primary/{challenge,submit}` (single-tx primary) · `policy/quorum/session/{open,contribute}/{challenge,submit}` · `policy/quorum/session/{finalize,close}` · `policy/passkey/session/open/{challenge,submit}` · `policy/passkey/use/{challenge,submit}` · `policy/passkey/session/close` | write | local |
-| **PolicyEngine v3 — request signature** | `policy/request-signature/{challenge,submit}` — runtime metadata digest + on-chain dispatch loop across every active rule slot + CPI Ika `approve_message`. | write | local |
+| **PolicyEngine v3 — request signature** | `policy/request-signature/{challenge,submit}` — runtime metadata digest (V2: binds `amount` + `asset_index` for `KIND_SPENDING_USD`) + on-chain dispatch loop across every active rule slot + CPI Ika `approve_message`. `signature_scheme` accepts 0..6 (incl. EdDSA=5 for Solana/Sui). | write | local |
 | **Login Social — OIDC pre-flow** | `POST oidc/{nonce,validate}` — canonical OAuth `nonce` builder + provider JWKS pre-validation of `id_token`s. 8 KiB body cap on `/validate` (carries a JWT). | write / read | proxied to ika-backend |
 | **OAuth broker (Login Social)** | `GET oauth/{authorize,callback}`, `POST oauth/token-exchange` — gateway-hosted Andromeda OAuth client (Google + Apple, `scope=openid` only). Authorization Code + PKCE. Free (no token cost). | write | gateway |
 | **Private TX** | `private-tx/submit`, `GET private-tx/status/{signature}` | write / read | proxied to encrypt-backend |
@@ -163,7 +163,7 @@ challenge = sha256(
 ```
 
 * `human_message` — the exact ASCII text the approver MUST see before signing. Plain text, no locale, no truncation.
-* `op_tag` — canonical operation tag, e.g. `init` / `init-with-recovery` / `add-allowlist` / `add-velocity` / `add-time-lock` / `add-oracle` / `add-passkey` / `add-fhe-gated` / `add-session-key` / `add-recovery` / `allowlist-add-dest` / `primary-recover` / `quorum-session-open` / `quorum-contribute` / `passkey-session-open` / `passkey-primary-use`.
+* `op_tag` — canonical operation tag, e.g. `init` / `init-with-recovery` / `add-allowlist` / `add-velocity` / `add-time-lock` / `add-oracle` / `add-passkey` / `add-fhe-gated` / `add-session-key` / `add-recovery` / `add-rule-spending-usd` / `allowlist-add-dest` / `oracle-add-feed` / `spending-usd-add-feed` / `primary-recover` / `quorum-session-open` / `quorum-contribute` / `passkey-session-open` / `passkey-primary-use`.
 * `config_hash_hex` — sha256 of the canonical config payload for the rule (immutable identity of the rule at this generation).
 
 **`/submit` never trusts caller text.** The handler recomputes the challenge from the same typed
