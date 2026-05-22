@@ -47,7 +47,7 @@ ika-backend/
 │   │   ├── chains.ts               # CAIP-2 namespace → { curve, scheme }
 │   │   ├── address.ts              # Chain-native address derivation per family
 │   │   ├── preprocess.ts           # Per-chain message/tx envelopes (EIP-191, Sui/IOTA intent, Tezos watermark, …)
-│   │   ├── digest.ts               # Scheme hash (keccak/sha256/double-sha256/blake2b)
+│   │   ├── digest.ts               # On-chain MessageApproval.message_digest — keccak256(message) for EVM + EdDSA (Solana/Sui scheme 5); sha256/double-sha256/blake2b kept only for the non-keccak ECDSA Bitcoin/Zcash schemes
 │   │   └── prepare.ts              # prepare-message = preprocessed bytes + on-chain digest
 │   ├── clients/
 │   │   ├── ika/                    # transfer-ownership instruction codec
