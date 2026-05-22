@@ -967,6 +967,85 @@ pub fn oracle_update_bounds_message(
     Ok(w.len())
 }
 
+/// PolicyEngine v3 `KIND_ORACLE` add-feed (disc 122). Binds the FeedCache
+/// account, its adapter owner and the canonical price band the approver is
+/// authorising onto the rule. Mirror in `gateway/internal/policy/challenges.go`
+/// (`HumanMessageOracleAddFeed`).
+#[allow(clippy::too_many_arguments)]
+pub fn oracle_add_feed_message(
+    out: &mut [u8; MAX_HUMAN_MESSAGE_BYTES],
+    feed_account: &[u8; 32],
+    feed_owner: &[u8; 32],
+    min_price: i64,
+    max_price: i64,
+    policy: &Address,
+    dwallet: &Address,
+) -> Result<usize, HumanMessageError> {
+    let mut w = MsgWriter::new(out);
+    w.write_str("Add oracle feed ")?;
+    w.write_base58_32(feed_account)?;
+    w.write_str(" owner ")?;
+    w.write_base58_32(feed_owner)?;
+    w.write_str(" min ")?;
+    w.write_i64_dec(min_price)?;
+    w.write_str(" max ")?;
+    w.write_i64_dec(max_price)?;
+    w.write_str(" on oracle policy ")?;
+    w.write_base58_32(policy.as_array())?;
+    w.write_str(" for dWallet ")?;
+    w.write_base58_32(dwallet.as_array())?;
+    Ok(w.len())
+}
+
+/// PolicyEngine v3 `KIND_SPENDING_USD` add-rule (disc 18). Binds the three USD
+/// ceilings (canonical 1e8, 0 = window disabled) the approver is authorising
+/// onto the rule. Mirror in `gateway/internal/policy/challenges.go`
+/// (`HumanMessageSpendingUsdAdd`).
+pub fn spending_usd_add_message(
+    out: &mut [u8; MAX_HUMAN_MESSAGE_BYTES],
+    max_per_tx_usd: u64,
+    max_per_day_usd: u64,
+    max_per_week_usd: u64,
+    policy: &Address,
+    dwallet: &Address,
+) -> Result<usize, HumanMessageError> {
+    let mut w = MsgWriter::new(out);
+    w.write_str("Add USD spending limit policy ")?;
+    w.write_base58_32(policy.as_array())?;
+    w.write_str(" for dWallet ")?;
+    w.write_base58_32(dwallet.as_array())?;
+    w.write_str(" maxPerTx ")?;
+    w.write_u64_dec(max_per_tx_usd)?;
+    w.write_str(" maxPerDay ")?;
+    w.write_u64_dec(max_per_day_usd)?;
+    w.write_str(" maxPerWeek ")?;
+    w.write_u64_dec(max_per_week_usd)?;
+    Ok(w.len())
+}
+
+/// PolicyEngine v3 `KIND_SPENDING_USD` add-feed (disc 19). Binds the FeedCache
+/// account and the asset's base-unit decimals the approver is authorising onto
+/// the rule. Mirror in `gateway/internal/policy/challenges.go`
+/// (`HumanMessageSpendingUsdAddFeed`).
+pub fn spending_usd_add_feed_message(
+    out: &mut [u8; MAX_HUMAN_MESSAGE_BYTES],
+    feed_cache_account: &[u8; 32],
+    decimals: u8,
+    policy: &Address,
+    dwallet: &Address,
+) -> Result<usize, HumanMessageError> {
+    let mut w = MsgWriter::new(out);
+    w.write_str("Add spending feed ")?;
+    w.write_base58_32(feed_cache_account)?;
+    w.write_str(" decimals ")?;
+    w.write_u8_dec(decimals)?;
+    w.write_str(" on USD spending policy ")?;
+    w.write_base58_32(policy.as_array())?;
+    w.write_str(" for dWallet ")?;
+    w.write_base58_32(dwallet.as_array())?;
+    Ok(w.len())
+}
+
 pub fn oracle_pause_message(
     out: &mut [u8; MAX_HUMAN_MESSAGE_BYTES],
     policy: &Address,

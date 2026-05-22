@@ -543,8 +543,7 @@ fn admin_hash_with_human(
     let nonce_le = nonce.to_le_bytes();
     // 8 fixed parts + up to 6 extras × 2 (length + payload) = 20 slots.
     let mut parts: [&[u8]; 20] = [&[]; 20];
-    let mut extra_lens: [[u8; 2]; ADMIN_HASH_MAX_EXTRAS] =
-        [[0u8; 2]; ADMIN_HASH_MAX_EXTRAS];
+    let mut extra_lens: [[u8; 2]; ADMIN_HASH_MAX_EXTRAS] = [[0u8; 2]; ADMIN_HASH_MAX_EXTRAS];
     parts[0] = DOMAIN;
     parts[1] = op_tag;
     parts[2] = &h_len;
