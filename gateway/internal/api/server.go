@@ -147,6 +147,23 @@ func NewServer(d Deps) *Server {
 	if d.PolicyV3Service != nil && d.Audit != nil {
 		d.PolicyV3Service.WithAuditRecorder(policyEngineAuditBridge{rec: d.Audit}, resolveAPIKeyIDString)
 	}
+	// Update 2 Part A: async presign prefetch on the signing challenge. Opt-in
+	// via IKA_PRESIGN_PREFETCH_ENABLED (off in pre-alpha); needs Redis + the ika
+	// upstream. Fully non-fatal — when off, /sign allocates the presign inline.
+	if d.PolicyV3Service != nil && d.Config != nil && d.Config.PresignPrefetchEnabled &&
+		d.Redis != nil && d.Upstreams != nil {
+		if ika := d.Upstreams.Get(routes.UpstreamIka); ika != nil {
+			d.PolicyV3Service.WithPresignPrefetch(
+				presignDispatcher{ika: ika},
+				presignRedisCache{rdb: d.Redis},
+				tenantFromRequest,
+				d.Config.PresignPrefetchTTL,
+			)
+			if d.Metrics != nil {
+				d.PolicyV3Service.WithPresignMetrics(presignMetricsAdapter{m: d.Metrics})
+			}
+		}
+	}
 	tools := mcp.NewToolRegistry(d.Upstreams)
 	if d.Logger != nil {
 		d.Logger.Info("mcp tool registry ready", "tools", tools.Count())

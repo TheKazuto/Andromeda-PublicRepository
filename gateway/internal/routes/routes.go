@@ -112,6 +112,16 @@ var All = []Route{
 	{Method: "POST", Path: "/v1/dwallet/transfer-ownership", Upstream: UpstreamIka, Key: "ika.dwallet.transferOwnership", Idempotent: true, RateClass: RateClassTx, TimeoutSeconds: 90},
 	{Method: "POST", Path: "/v1/dwallet/presign", Upstream: UpstreamIka, Key: "ika.dwallet.presign", Idempotent: true, RateClass: RateClassTx, TimeoutSeconds: 90},
 	{Method: "POST", Path: "/v1/dwallet/sign", Upstream: UpstreamIka, Key: "ika.dwallet.sign", Idempotent: true, RateClass: RateClassTx, TimeoutSeconds: 90},
+	// Read-only multi-chain address derivation (Update 2 / B2). Returns every
+	// chain-native address the dWallet's curve can hold, derived from the
+	// curve-specific dWallet public key. Auto-registers as MCP tool
+	// `dwallet_addresses`. No gas, no passphrase, no signing.
+	{Method: "GET", Path: "/v1/dwallet/addresses/{dwalletAddress}", Upstream: UpstreamIka, Key: "ika.dwallet.addresses", RateClass: RateClassRead},
+	// Read-only message preparation (Update 2 / B3). Given a destination chainId
+	// + raw payload, returns the envelope-applied bytes to sign and the on-chain
+	// message digest — single source of truth so approve and sign never drift.
+	// Stateless, no gas. Auto-registers as MCP tool `prepare_message`.
+	{Method: "POST", Path: "/v1/dwallet/prepare-message", Upstream: UpstreamIka, Key: "ika.dwallet.prepareMessage", RateClass: RateClassRead},
 
 	// Signing
 	{Method: "POST", Path: "/v1/dwallet/sign/submit", Upstream: UpstreamIka, Key: "ika.sign.submit", Idempotent: true, RequiresIdempotencyKey: true, RateClass: RateClassTx, TimeoutSeconds: 90},

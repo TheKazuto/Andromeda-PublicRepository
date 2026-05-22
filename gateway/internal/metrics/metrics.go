@@ -124,6 +124,10 @@ type Metrics struct {
 	OracleMonitorErrorsTotal  *prometheus.CounterVec // labels: stage (tick|hermes|claim|reap)
 	OracleFeedRefreshTotal    *prometheus.CounterVec // labels: result (success|skipped|stale|error)
 	OracleArmedTriggers       prometheus.Gauge       // armed price triggers (sampled every 15s)
+
+	// Async presign prefetch (Update 2 Part A). Bounded labels only.
+	PresignPrefetchTotal *prometheus.CounterVec // labels: result (ok|error) — background presign dispatched at challenge time
+	PresignHarvestTotal  *prometheus.CounterVec // labels: result (hit|miss) — submit lookup of the prefetched presign
 }
 
 // New builds and registers every collector. Returns the Metrics bundle
@@ -438,6 +442,15 @@ func New() (*Metrics, http.Handler) {
 		Help:      "Price triggers currently armed (sampled every 15s by the metrics scraper).",
 	})
 
+	m.PresignPrefetchTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "gateway", Subsystem: "presign_prefetch", Name: "dispatched_total",
+		Help: "Background presigns dispatched at signing-challenge time, by result (ok|error).",
+	}, []string{"result"})
+	m.PresignHarvestTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "gateway", Subsystem: "presign_prefetch", Name: "harvest_total",
+		Help: "Submit lookups of the prefetched presign, by result (hit|miss). hit/(hit+miss) = cache-hit rate.",
+	}, []string{"result"})
+
 	m.GasSponsorDuplicateSig = prometheus.NewCounter(prometheus.CounterOpts{
 		Namespace: "gateway", Subsystem: "gas_sponsor", Name: "duplicate_signature_total",
 		Help: "Cumulative count of Solana sendTransaction calls that returned duplicate-signature.",
@@ -478,6 +491,8 @@ func New() (*Metrics, http.Handler) {
 		m.RedisOpLatency,
 		m.RedisErrors,
 		m.RedisFailOpen,
+		m.PresignPrefetchTotal,
+		m.PresignHarvestTotal,
 		m.AuditSignerLatency,
 		m.AuditAppendLatency,
 		m.AuditFailuresTotal,
@@ -562,6 +577,32 @@ func (m *Metrics) IncFailOpen(op string) {
 		return
 	}
 	m.RedisFailOpen.WithLabelValues(op).Inc()
+}
+
+// --- policy.PresignMetrics adapter (Update 2 Part A) ---
+
+// RecordPresignPrefetch counts a background presign dispatch (ok|error).
+func (m *Metrics) RecordPresignPrefetch(ok bool) {
+	if m == nil || m.PresignPrefetchTotal == nil {
+		return
+	}
+	res := "ok"
+	if !ok {
+		res = "error"
+	}
+	m.PresignPrefetchTotal.WithLabelValues(res).Inc()
+}
+
+// RecordPresignHarvest counts a submit lookup of the prefetched presign (hit|miss).
+func (m *Metrics) RecordPresignHarvest(hit bool) {
+	if m == nil || m.PresignHarvestTotal == nil {
+		return
+	}
+	res := "miss"
+	if hit {
+		res = "hit"
+	}
+	m.PresignHarvestTotal.WithLabelValues(res).Inc()
 }
 
 // --- audit.SignerObserver adapter ---

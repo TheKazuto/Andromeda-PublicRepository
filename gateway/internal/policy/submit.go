@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/rpc"
@@ -77,6 +78,17 @@ func (f signedSubmitFields) decode() (sig []byte, authData []byte, cdj []byte, e
 type txSignatureResponse struct {
 	TxSignature   string `json:"tx_signature"`
 	EngineAddress string `json:"engine_address"`
+	// ApprovalSlot is the slot the request_signature tx landed in — pass it as
+	// `approvalSlot` to POST /v1/dwallet/sign (the Ika ApprovalProof). Omitted
+	// when confirmation timed out; the client then fetches it from the tx
+	// signature via any Solana RPC. Only set by the signing submits.
+	ApprovalSlot uint64 `json:"approval_slot,omitempty"`
+	// PresignSessionIdHex is the presign prefetched during the challenge window
+	// (Update 2 Part A), ready for the client to pass straight to
+	// POST /v1/dwallet/sign. Omitted when prefetch is off, missed, or N/A —
+	// the /sign fallback then allocates a presign inline. Additive: existing
+	// submit responses that don't set it serialize exactly as before.
+	PresignSessionIdHex string `json:"presign_session_id_hex,omitempty"`
 }
 
 // ─── /v1/policy/init/submit ─────────────────────────────────────────────────
@@ -651,10 +663,35 @@ func (s *Service) requestSignatureSubmit(w http.ResponseWriter, r *http.Request)
 	extra := fmt.Sprintf(`{"signature_scheme":%d,"rules_generation":%d}`,
 		req.SignatureScheme, req.RulesGeneration)
 	s.appendAuditSubmit(r, "request-signature", engine.String(), dwallet.String(), sigOut.String(), extra)
+	// Update 2 Part A: hand the client the presign prefetched at challenge time
+	// (keyed by the same metadata digest), so /sign skips the inline allocation.
+	// approval_slot is the slot this tx landed in — needed by /v1/dwallet/sign.
 	httpx.WriteJSON(w, http.StatusOK, txSignatureResponse{
-		TxSignature:   sigOut.String(),
-		EngineAddress: engine.String(),
+		TxSignature:         sigOut.String(),
+		EngineAddress:       engine.String(),
+		ApprovalSlot:        s.confirmApprovalSlot(r.Context(), sigOut),
+		PresignSessionIdHex: s.harvestPresign(r, req.MetadataDigestHex),
 	})
+}
+
+// approvalConfirmTimeout bounds the best-effort wait to learn the slot the
+// request_signature tx landed in (for the Ika ApprovalProof).
+const approvalConfirmTimeout = 30 * time.Second
+
+// confirmApprovalSlot best-effort resolves the slot a just-sent signing tx
+// landed in, so the submit can hand it back for POST /v1/dwallet/sign. Returns
+// 0 when it can't confirm in time — the client then fetches the slot from the
+// returned tx signature via any Solana RPC.
+func (s *Service) confirmApprovalSlot(ctx context.Context, sig solana.Signature) uint64 {
+	if s.GasSponsor == nil {
+		return 0
+	}
+	slot, err := s.GasSponsor.ConfirmSlot(ctx, sig, approvalConfirmTimeout)
+	if err != nil {
+		slog.Warn("approval slot not confirmed in time", "sig", sig.String(), "err", err)
+		return 0
+	}
+	return slot
 }
 
 // buildError carries an HTTP-shaped failure from the pure assembler so the

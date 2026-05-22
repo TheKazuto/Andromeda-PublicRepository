@@ -22,6 +22,13 @@ type Config struct {
 
 	RateLimitFailOpen bool
 
+	// PresignPrefetchEnabled turns on async presign prefetch on the signing
+	// challenge (Update 2 Part A). Default off — pre-alpha's mock signer makes
+	// presign instant, so there's no latency to hide yet; flip on at Alpha.
+	PresignPrefetchEnabled bool
+	// PresignPrefetchTTL bounds the ephemeral (tenant, challenge) presign cache.
+	PresignPrefetchTTL time.Duration
+
 	AdminToken string
 
 	IkaUpstreamURL     string
@@ -183,6 +190,8 @@ func Load() *Config {
 		DatabaseURL:            getenv("DATABASE_URL", ""),
 		RedisURL:               getenv("REDIS_URL", ""),
 		RateLimitFailOpen:      getenvBool("RATE_LIMIT_FAIL_OPEN", true),
+		PresignPrefetchEnabled: getenvBool("IKA_PRESIGN_PREFETCH_ENABLED", false),
+		PresignPrefetchTTL:     time.Duration(getenvInt("IKA_PRESIGN_PREFETCH_TTL_SECONDS", 120)) * time.Second,
 		AdminToken:             getenv("ADMIN_TOKEN", "dev-only-admin-token-change-me"),
 		IkaUpstreamURL:         strings.TrimRight(getenv("IKA_UPSTREAM_URL", ""), "/"),
 		EncryptUpstreamURL:     strings.TrimRight(getenv("ENCRYPT_UPSTREAM_URL", ""), "/"),

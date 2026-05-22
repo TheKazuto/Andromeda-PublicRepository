@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/rpc"
@@ -50,6 +51,20 @@ type Service struct {
 	// request_signature for each sponsored FeedCache the tx reads, so the price
 	// is fresh at signing time. Wired in main with the Pyth adapter program id.
 	oracleRefresher OracleRefresher
+
+	// Async presign prefetch (Update 2 Part A). All optional; when any is nil
+	// the feature is off and signing behaves exactly as before. Wired via
+	// WithPresignPrefetch / WithPresignMetrics.
+	presignDispatcher PresignDispatcher
+	presignCache      PresignCache
+	presignMetrics    PresignMetrics
+	resolveTenant     func(*http.Request) string
+	presignTTL        time.Duration
+	// presignSem bounds the number of in-flight background prefetch goroutines
+	// so a burst of challenges can't pile up unbounded goroutines (each lives
+	// up to presignDispatchTimeout). Non-blocking: when full, the prefetch is
+	// dropped (best-effort) and /sign allocates the presign inline.
+	presignSem chan struct{}
 }
 
 // OracleRefresher builds refresh_feed instructions to prepend to a
@@ -734,6 +749,9 @@ func (s *Service) requestSignatureChallenge(w http.ResponseWriter, r *http.Reque
 	}
 	pre := in.Preimage()
 	digest := in.Hash()
+	// Update 2 Part A: kick off the presign now (during the human review/sign
+	// window), keyed by the metadata digest the submit will replay. Non-fatal.
+	s.firePresignPrefetch(r, req.DwalletAddress, hex.EncodeToString(digest[:]))
 	httpx.WriteJSON(w, http.StatusOK, requestSignatureChallengeResponse{
 		EngineAddress:  engine.String(),
 		MetadataDigest: hex.EncodeToString(digest[:]),

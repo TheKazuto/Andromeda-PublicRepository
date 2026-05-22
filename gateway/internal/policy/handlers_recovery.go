@@ -90,6 +90,10 @@ func (s *Service) recoverAsPrimaryChallenge(w http.ResponseWriter, r *http.Reque
 		derived.dwallet, derived.msgDigest, derived.metaDigest, derived.userPubkey, req.SignatureScheme,
 	)
 
+	// Update 2 Part A: prefetch the presign during the review/sign window, keyed
+	// by the challenge the submit recomputes. Non-fatal.
+	s.firePresignPrefetch(r, req.DwalletAddress, hex.EncodeToString(hash[:]))
+
 	httpx.WriteJSON(w, http.StatusOK, recoverAsPrimaryChallengeResponse{
 		ProgramID:              s.ProgramID.String(),
 		EngineAddress:          derived.engine.String(),
@@ -198,8 +202,10 @@ func (s *Service) recoverAsPrimarySubmit(w http.ResponseWriter, r *http.Request)
 		derived.engine.String(), derived.dwallet.String(), sigOut.String(), extra)
 
 	httpx.WriteJSON(w, http.StatusOK, txSignatureResponse{
-		TxSignature:   sigOut.String(),
-		EngineAddress: derived.engine.String(),
+		TxSignature:         sigOut.String(),
+		EngineAddress:       derived.engine.String(),
+		ApprovalSlot:        s.confirmApprovalSlot(r.Context(), sigOut),
+		PresignSessionIdHex: s.harvestPresign(r, hex.EncodeToString(challenge[:])),
 	})
 }
 

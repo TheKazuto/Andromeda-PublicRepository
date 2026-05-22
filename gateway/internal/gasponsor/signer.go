@@ -190,3 +190,35 @@ func (s *Signer) WaitForConfirmation(ctx context.Context, sig solana.Signature, 
 		}
 	}
 }
+
+// ConfirmSlot polls GetSignatureStatuses until `sig` reaches confirmed (or
+// finalized) commitment and returns the slot it landed in — the slot a caller
+// needs for an Ika `ApprovalProof::Solana { transaction_signature, slot }`.
+// Best-effort companion to SignAndSend; returns ErrConfirmationTimeout on
+// deadline (callers treat the slot as unknown and let the client fetch it).
+func (s *Signer) ConfirmSlot(ctx context.Context, sig solana.Signature, timeout time.Duration) (uint64, error) {
+	deadline := time.Now().Add(timeout)
+	tick := time.NewTicker(400 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		case <-tick.C:
+		}
+		res, err := s.rpc.GetSignatureStatuses(ctx, true, sig)
+		if err == nil && res != nil && len(res.Value) > 0 && res.Value[0] != nil {
+			st := res.Value[0]
+			if st.Err != nil {
+				return 0, fmt.Errorf("transaction failed on-chain: %v", st.Err)
+			}
+			if st.ConfirmationStatus == rpc.ConfirmationStatusConfirmed ||
+				st.ConfirmationStatus == rpc.ConfirmationStatusFinalized {
+				return st.Slot, nil
+			}
+		}
+		if time.Now().After(deadline) {
+			return 0, ErrConfirmationTimeout
+		}
+	}
+}
