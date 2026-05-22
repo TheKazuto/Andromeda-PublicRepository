@@ -24,7 +24,7 @@
 
 Andromeda is hosted infrastructure that turns two of Solana's most powerful primitives, Ika's 2PC-MPC threshold signing and Encrypt's homomorphic computation, into plain REST endpoints and MCP tools.
 
-Threshold signing lets a single identity control wallets on every chain (EVM, Bitcoin, Cosmos, NEAR, Aptos, Solana, Substrate) with no seed phrase and no single point of compromise. Confidential computing lets authorization logic run directly on encrypted data. Both are extraordinary, and both today require running validator clients, writing Rust or Move programs that hold wallet authority, and shipping a Node runtime to your users.
+Threshold signing lets a single identity control wallets across chains (EVM, Bitcoin, Solana, Sui, Cosmos, Tron, TON, Stellar, Aptos, and more) with no seed phrase and no single point of compromise. Confidential computing lets authorization logic run directly on encrypted data. Both are extraordinary, and both today require running validator clients, writing Rust or Move programs that hold wallet authority, and shipping a Node runtime to your users.
 
 Andromeda removes all of that. You call an HTTPS endpoint. We run the engines, the on-chain policy programs, the gas, the wallet-agnostic auth layer, and the product surface around it. Your users never see the chain underneath: no wallet to install, no SOL to hold, no MPC network to learn.
 
@@ -47,7 +47,7 @@ Reference docs: [Ika](https://docs.ika.xyz/) · [Encrypt](https://docs.encrypt.x
 
 Andromeda is a **B2D (Business-to-Developer)** platform.
 
-- **Web3 developers** building multi-chain apps that need a unified signing surface across EVM, Solana, Bitcoin, Cosmos, NEAR, Aptos, Substrate.
+- **Web3 developers** building multi-chain apps that need a unified signing surface across EVM, Solana, Bitcoin, Sui, Cosmos, Tron, TON, Stellar, Aptos.
 - **Wallet and smart-wallet teams** that need cross-chain recovery and on-chain policy enforcement without writing Rust.
 - **DeFi protocols** that need treasury policies (allowlists, velocity guards, oracle circuit breakers) enforced by Solana programs, not by a centralised backend.
 - **AI agent builders** integrating signing capabilities into LLM workflows via MCP: no SDK, no glue code, just a streamable HTTP endpoint.
@@ -59,7 +59,7 @@ Andromeda is a **B2D (Business-to-Developer)** platform.
 
 Cases that Andromeda specifically unblocks, not generic Web3 use cases.
 
-- **Cross-chain smart wallets.** Same identity drives signing across EVM, Solana, Bitcoin, Cosmos, NEAR and Aptos. The user signs into the app once and the same dWallet works on every chain.
+- **Cross-chain smart wallets.** Same identity drives signing across EVM, Solana, Bitcoin, Sui, Cosmos, Tron, TON and Aptos. The user signs into the app once and the same dWallet works on every chain.
 - **Onboarding without a wallet (Login Social).** The user signs in with Google or Apple and gets a cross-chain dWallet immediately, with no wallet to install, no seed phrase, no SOL to hold. The same Google/Apple account derives the same dWallet in any app on Andromeda: one identity, one wallet, every chain.
 - **DAO treasuries with on-chain rule enforcement.** A single Solana Quasar program — the PolicyEngine v3 — holds the dWallet authority with a composable allowlist + velocity rule attached. The treasury can only interact with whitelisted programs, capped at N signatures per slot window, with no ability for the gateway to bypass the policy.
 - **Trading bots with scoped delegation.** The `KIND_SESSION_KEY` rule of the PolicyEngine grants a temporary key with on-chain limits on slot expiry, number of uses, amount per transaction, and allowed destination programs. Multiple sessions per dWallet (up to 2^32 concurrent), each with its own monotonic replay nonce.
@@ -76,6 +76,7 @@ Capabilities beyond the core Ika and Encrypt primitives: the surrounding product
 ### Multi-chain core
 - **Any wallet, any chain adapter for Ika on Solana.** Uniform REST surface over 4 cryptographic curves (Ed25519, SECP256K1, SECP256R1, Ristretto).
 - **Multi-chain signing pipeline.** DKG, Presign, Sign, Future-Sign, Imported Key, Re-Encrypt Share exposed as stateless REST primitives.
+- **Chain-native address derivation & message prep.** One read-only call returns every chain-native address a dWallet can hold; another returns the envelope-applied bytes to sign plus the on-chain digest. 17 chain families, each validated byte-for-byte against that chain's official SDK: EVM, Bitcoin (SegWit + legacy), Solana, Sui, Cosmos, Tron, TON, Stellar, Algorand, Aptos, MultiversX, Filecoin, VeChain, Avalanche, Casper, Tezos, IOTA.
 
 ### Wallet-agnostic + gas sponsor
 - **Gas sponsor.** Andromeda absorbs Solana fees on every flow it controls. End users sign 32-byte canonical challenges with whatever wallet they already own; the gateway pays gas and submits.
