@@ -37,18 +37,17 @@
 #![allow(dead_code)]
 
 use andromeda_auth::admin::verify_owner_admin;
-use andromeda_auth::hash::hashv;
-use andromeda_auth::human_message::{self, HumanMessageError, MAX_HUMAN_MESSAGE_BYTES};
-use andromeda_auth::precompile::{check_sysvar_address, ED25519_PRECOMPILE_ID};
 use andromeda_auth::challenge::{
     oidc_primary_use_challenge, oidc_session_open_challenge, passkey_primary_use_challenge,
     passkey_session_open_challenge, primary_recover_challenge, quorum_contribute_challenge,
     quorum_session_open_challenge,
 };
+use andromeda_auth::hash::hashv;
+use andromeda_auth::human_message::{self, HumanMessageError, MAX_HUMAN_MESSAGE_BYTES};
+use andromeda_auth::precompile::{check_sysvar_address, ED25519_PRECOMPILE_ID};
 use andromeda_auth::{
-    validate_oidc_slot, validate_slot, verify_signature, AuthError, VerifyInput,
-    MEMBER_SLOT_LEN, SCHEME_ED25519,
-    SCHEME_OIDC_JWT, SCHEME_SECP256K1, SCHEME_SECP256R1, SCHEME_WEBAUTHN,
+    validate_oidc_slot, validate_slot, verify_signature, AuthError, VerifyInput, MEMBER_SLOT_LEN,
+    SCHEME_ED25519, SCHEME_OIDC_JWT, SCHEME_SECP256K1, SCHEME_SECP256R1, SCHEME_WEBAUTHN,
 };
 use andromeda_oidc_verifier as oidc_verifier;
 use andromeda_policy_shared::{invoke_ika_approve_message, validate_ika_cpi_accounts};
@@ -81,6 +80,8 @@ pub const KIND_PASSKEY: u8 = 5;
 pub const KIND_FHE_GATED: u8 = 6;
 pub const KIND_SESSION_KEY: u8 = 7;
 pub const KIND_RECOVERY: u8 = 8;
+// Update 3: USD spending limit (tag 9).
+pub const KIND_SPENDING_USD: u8 = 9;
 
 // RuleAppliesTo (mirror of ABI §3.5, ADR PE-006).
 pub const APPLIES_NORMAL: u8 = 1;
@@ -102,6 +103,9 @@ pub const PASSKEY_CONFIG_BYTES: usize = 520;
 pub const FHE_GATED_CONFIG_BYTES: usize = 136;
 pub const SESSION_KEY_CONFIG_BYTES: usize = 608;
 pub const RECOVERY_CONFIG_BYTES: usize = 1232;
+// Update 3: config payload of `KIND_SPENDING_USD` (8 hdr + 24 caps + 32 accum
+// + 16×33 feeds = 592 bytes). See `SpendingUsdRule`.
+pub const SPENDING_USD_CONFIG_BYTES: usize = 592;
 
 pub const RULE_HEADER_BYTES: usize = 96;
 
@@ -115,11 +119,15 @@ pub const SEED_RULE_PASSKEY: &[u8] = b"rule_passkey";
 pub const SEED_RULE_FHE_GATED: &[u8] = b"rule_fhe_gated";
 pub const SEED_RULE_SESSION_KEY: &[u8] = b"rule_session_key";
 pub const SEED_RULE_RECOVERY: &[u8] = b"rule_recovery";
+pub const SEED_RULE_SPENDING_USD: &[u8] = b"rule_spending_usd";
 
 // Challenge domains (mirror of ABI §6.1).
 pub const DOMAIN_INIT_V1: &[u8] = b"andromeda::policy-engine::init::v1";
 pub const DOMAIN_V3: &[u8] = b"andromeda::policy-engine::v3";
 pub const DOMAIN_REQUEST_V1: &[u8] = b"andromeda::policy-engine::request::v1";
+// Update 3: V2 binds `amount` + `asset_index` into the request metadata digest
+// so a USD spending limit (KIND_SPENDING_USD) can be enforced end-to-end.
+pub const DOMAIN_REQUEST_V2: &[u8] = b"andromeda::policy-engine::request::v2";
 pub const DOMAIN_RECOVERY_V3: &[u8] = b"andromeda::policy-engine::recovery::v3";
 
 // Op tags (mirror of ABI §6.3).
@@ -135,8 +143,10 @@ pub const OP_ADD_PASSKEY: &[u8] = b"add-rule-passkey";
 pub const OP_ADD_FHE_GATED: &[u8] = b"add-rule-fhe-gated";
 pub const OP_ADD_SESSION_KEY: &[u8] = b"add-rule-session-key";
 pub const OP_ADD_RECOVERY: &[u8] = b"add-rule-recovery";
+pub const OP_ADD_SPENDING_USD: &[u8] = b"add-rule-spending-usd";
 pub const OP_UPDATE_ALLOWLIST: &[u8] = b"update-rule-allowlist";
 pub const OP_ORACLE_ADD_FEED: &[u8] = b"oracle-add-feed";
+pub const OP_SPENDING_USD_ADD_FEED: &[u8] = b"spending-usd-add-feed";
 pub const OP_UPDATE_RECOVERY: &[u8] = b"update-rule-recovery";
 pub const OP_UPDATE_FHE_AUTH: &[u8] = b"update-rule-fhe-authorities";
 pub const OP_REMOVE_RULE: &[u8] = b"remove-rule";
@@ -255,6 +265,22 @@ pub enum PolicyEngineError {
     IkaCpiFailed,
 
     DelegationNotConfirmed = 6080,
+
+    // Update 3: USD spending limit (KIND_SPENDING_USD dispatch + admin).
+    /// The single-tx USD value exceeds the rule's `max_per_tx_usd`.
+    SpendingPerTxExceeded = 6090,
+    /// The accumulated daily USD spend would exceed `max_per_day_usd`.
+    SpendingDailyExceeded,
+    /// The accumulated weekly USD spend would exceed `max_per_week_usd`.
+    SpendingWeeklyExceeded,
+    /// The attached price feed is older than the rule's freshness window.
+    SpendingPriceStale,
+    /// The price feed confidence exceeds the rule's `max_confidence_bps`.
+    SpendingConfidenceExceeded,
+    /// `asset_index` is out of range, or the asset is not in the allowlist.
+    SpendingAssetNotAllowed,
+    /// amount→USD conversion overflowed u64, or the price was non-positive.
+    SpendingConversionOverflow,
 }
 
 impl From<AuthError> for PolicyEngineError {
@@ -486,11 +512,7 @@ pub fn read_rule_entry(rules_flat: &[u8; RULES_FLAT_BYTES], slot: usize) -> Rule
 }
 
 #[inline]
-pub fn write_rule_entry(
-    rules_flat: &mut [u8; RULES_FLAT_BYTES],
-    slot: usize,
-    entry: &RuleEntry,
-) {
+pub fn write_rule_entry(rules_flat: &mut [u8; RULES_FLAT_BYTES], slot: usize, entry: &RuleEntry) {
     debug_assert!(slot < MAX_RULES);
     let off = slot * RULE_ENTRY_BYTES;
     rules_flat[off] = entry.kind;
@@ -685,6 +707,63 @@ pub struct FheGatedRule {
 
 pub const MAX_FHE_AUTHORITIES: usize = 4;
 
+// ─── SpendingUsdRule (Update 3 — KIND_SPENDING_USD, tag 9) ─────────────────
+//
+// USD-denominated spending cap: per-tx / per-day / per-week ceilings enforced
+// on-chain by converting `amount` (asset base units) → USD via the Pyth
+// adapter `FeedCache` price (canonical 1e8). Up to 16 assets per rule; exactly
+// ONE feed (the moved asset) is attached + verified per signature, so the CU
+// cost is constant regardless of allowlist size. Day/week accumulators live in
+// the sub-PDA and are mutated at dispatch (same data_mut_ptr pattern as
+// `KIND_VELOCITY`). Account-relative offsets (1-based after the disc byte):
+//   sub_data[97]        config_applies_to       u8
+//   sub_data[98]        feeds_count             u8   (0..=16)
+//   sub_data[99]        freshness_seconds_div16 u8
+//   sub_data[100]       max_confidence_bps_div4 u8   (0 disables)
+//   sub_data[101..105]  _pad_cfg0               [u8;4]
+//   sub_data[105..113]  max_per_tx_usd          u64 LE   (0 = window off)
+//   sub_data[113..121]  max_per_day_usd         u64 LE
+//   sub_data[121..129]  max_per_week_usd        u64 LE
+//   sub_data[129..137]  current_day_unix        i64 LE   (floor(ts/86400)*86400)
+//   sub_data[137..145]  current_day_sum_usd     u64 LE
+//   sub_data[145..153]  current_week_unix       i64 LE   (floor(ts/604800)*604800)
+//   sub_data[153..161]  current_week_sum_usd    u64 LE
+//   sub_data[161..689]  feeds_flat              [u8; 16*33]
+//     each SpendingUsdFeed (33 B): [..32] feed_cache_account, [32] decimals
+#[account(discriminator = 2, set_inner)]
+#[seeds(b"rule_spending_usd", engine: Address, rule_index: u8)]
+pub struct SpendingUsdRule {
+    pub kind: u8,
+    pub index: u8,
+    pub enabled: u8,
+    pub _pad0: u8,
+    pub generation: u32,
+    pub config_version: u32,
+    pub _pad1: [u8; 4],
+    pub engine: Address,
+    pub next_admin_nonce: u64,
+    pub config_hash: [u8; 32],
+    pub _pad_header_tail: [u8; 8],
+    // ─── config payload (592 bytes) ──
+    pub config_applies_to: u8,
+    pub feeds_count: u8,
+    pub freshness_seconds_div16: u8,
+    pub max_confidence_bps_div4: u8,
+    pub _pad_cfg0: [u8; 4],
+    pub max_per_tx_usd: u64,
+    pub max_per_day_usd: u64,
+    pub max_per_week_usd: u64,
+    pub current_day_unix: i64,
+    pub current_day_sum_usd: u64,
+    pub current_week_unix: i64,
+    pub current_week_sum_usd: u64,
+    // 16 × SpendingUsdFeed (33 bytes each: feed_cache_account 32 + decimals 1)
+    pub feeds_flat: [u8; 16 * 33],
+}
+
+pub const SPENDING_USD_FEED_BYTES: usize = 33;
+pub const MAX_SPENDING_USD_FEEDS: usize = 16;
+
 // ── Allowlists (H1, C2) ────────────────────────────────────────────────────
 //
 // Defense-in-depth lists for two trust boundaries the audit (2026-05-16)
@@ -782,13 +861,13 @@ pub struct SessionKeyRule {
     pub config_hash: [u8; 32],
     pub _pad_header_tail: [u8; 8],
     // ─── config payload (40 bytes, F8b minimal) ──
-    pub config_applies_to: u8,           // MUST equal APPLIES_SESSION (=4).
-    pub max_sessions: u8,                // 1..16 — upper bound on session_index.
+    pub config_applies_to: u8, // MUST equal APPLIES_SESSION (=4).
+    pub max_sessions: u8,      // 1..16 — upper bound on session_index.
     pub _pad_cfg0: [u8; 6],
-    pub default_ttl_seconds: u64,        // upper bound for session expires_at - created_at.
-    pub default_max_uses: u32,           // upper bound for session.max_uses.
+    pub default_ttl_seconds: u64, // upper bound for session expires_at - created_at.
+    pub default_max_uses: u32,    // upper bound for session.max_uses.
     pub _pad_cfg1: u32,
-    pub session_max_amount_per_tx: u64,  // per-session per-tx amount cap.
+    pub session_max_amount_per_tx: u64, // per-session per-tx amount cap.
 }
 
 pub const MAX_SESSIONS_PER_ENGINE: u8 = 16;
@@ -984,10 +1063,8 @@ const _: () = assert!(
 /// always have non-empty `ALLOWED_OIDC_ISSUERS`/`ALLOWED_OIDC_AUDIENCES`
 /// (compile-time enforced) and never hit this path.
 #[cfg(not(feature = "mainnet"))]
-const DEVNET_FALLBACK_ISSUERS: &[&[u8]] = &[
-    b"https://accounts.google.com",
-    b"https://appleid.apple.com",
-];
+const DEVNET_FALLBACK_ISSUERS: &[&[u8]] =
+    &[b"https://accounts.google.com", b"https://appleid.apple.com"];
 #[cfg(not(feature = "mainnet"))]
 const DEVNET_FALLBACK_AUDIENCES: &[&[u8]] = &[b"andromeda-devnet"];
 
@@ -1212,8 +1289,13 @@ pub fn admin_challenge(
     hashv(&parts[..n])
 }
 
-/// Runtime request_metadata_digest (ABI §6.4). Not human-signed — gateway
+/// Runtime request_metadata_digest (ABI §6.4, V2). Not human-signed — gateway
 /// computes canonically and the program recomputes & compares.
+///
+/// Update 3: V2 appends `amount` (asset base units) + `asset_index` (index in
+/// the `KIND_SPENDING_USD` allowlist) and bumps the domain to
+/// `DOMAIN_REQUEST_V2`. The normal signing path (disc 1) passes the real
+/// values; paths that do not carry a value (session) pass `0, 0`.
 #[inline]
 #[allow(clippy::too_many_arguments)]
 pub fn request_metadata_digest(
@@ -1225,12 +1307,16 @@ pub fn request_metadata_digest(
     signature_scheme: u16,
     path: u8,
     rules_generation: u32,
+    amount: u64,
+    asset_index: u8,
 ) -> [u8; 32] {
     let scheme_le = signature_scheme.to_le_bytes();
     let path_b = [path];
     let gen_le = rules_generation.to_le_bytes();
+    let amount_le = amount.to_le_bytes();
+    let asset_b = [asset_index];
     hashv(&[
-        DOMAIN_REQUEST_V1,
+        DOMAIN_REQUEST_V2,
         b"request-signature",
         engine.as_array().as_slice(),
         dwallet.as_array().as_slice(),
@@ -1240,6 +1326,8 @@ pub fn request_metadata_digest(
         &scheme_le,
         &path_b,
         &gen_le,
+        &amount_le,
+        &asset_b,
     ])
 }
 
@@ -1291,7 +1379,9 @@ fn read_ix_body_for_fhe(sysvar_data: &[u8], i: usize) -> Result<Option<(&[u8], &
         return Ok(None);
     }
     let table_start: usize = 2;
-    let off_ptr = table_start.checked_add(i.checked_mul(2).ok_or(())?).ok_or(())?;
+    let off_ptr = table_start
+        .checked_add(i.checked_mul(2).ok_or(())?)
+        .ok_or(())?;
     let ix_offset = read_u16_le_local(sysvar_data, off_ptr).ok_or(())? as usize;
     let accounts_count = read_u16_le_local(sysvar_data, ix_offset).ok_or(())? as usize;
     let accounts_size = accounts_count.checked_mul(ACCOUNT_META_LEN).ok_or(())?;
@@ -1299,11 +1389,7 @@ fn read_ix_body_for_fhe(sysvar_data: &[u8], i: usize) -> Result<Option<(&[u8], &
         .checked_add(2)
         .and_then(|x| x.checked_add(accounts_size))
         .ok_or(())?;
-    if program_id_off
-        .checked_add(PROGRAM_ID_LEN)
-        .ok_or(())?
-        > sysvar_data.len()
-    {
+    if program_id_off.checked_add(PROGRAM_ID_LEN).ok_or(())? > sysvar_data.len() {
         return Err(());
     }
     let program_id = &sysvar_data[program_id_off..program_id_off + PROGRAM_ID_LEN];
@@ -1313,7 +1399,10 @@ fn read_ix_body_for_fhe(sysvar_data: &[u8], i: usize) -> Result<Option<(&[u8], &
     if data_off.checked_add(data_len).ok_or(())? > sysvar_data.len() {
         return Err(());
     }
-    Ok(Some((program_id, &sysvar_data[data_off..data_off + data_len])))
+    Ok(Some((
+        program_id,
+        &sysvar_data[data_off..data_off + data_len],
+    )))
 }
 
 /// Parses a long-record (Ed25519 / Secp256r1) precompile ix data buffer and
@@ -1397,8 +1486,7 @@ mod policy_engine_program {
         validate_slot(&init_authority_slot)
             .map_err(|_| PolicyEngineError::InvalidInitAuthoritySlot)?;
         require!(
-            init_authority_slot[0] != SCHEME_WEBAUTHN
-                && init_authority_slot[0] != SCHEME_OIDC_JWT,
+            init_authority_slot[0] != SCHEME_WEBAUTHN && init_authority_slot[0] != SCHEME_OIDC_JWT,
             PolicyEngineError::UnsupportedScheme
         );
 
@@ -1496,6 +1584,12 @@ mod policy_engine_program {
         cpi_authority_bump: u8,
         destination: [u8; 32],
         rules_generation_seen: u32,
+        // Update 3 (ABI V2): the asset amount (base units) and the index of the
+        // asset in the active KIND_SPENDING_USD allowlist. Bound into the
+        // metadata_digest below. Ignored by every other rule kind; pass 0/0 when
+        // no spending rule is active.
+        amount: u64,
+        asset_index: u8,
     ) -> Result<(), ProgramError> {
         let current_ts: i64 = ctx.accounts.clock.unix_timestamp.into();
         let engine_addr = *ctx.accounts.engine.address();
@@ -1533,6 +1627,8 @@ mod policy_engine_program {
             signature_scheme,
             PATH_NORMAL,
             on_chain_gen,
+            amount,
+            asset_index,
         );
         require!(
             metadata_digest == expected_md,
@@ -1593,10 +1689,7 @@ mod policy_engine_program {
             // by `add_rule_*`, but explicitly checking the discriminator
             // hardens the loop against any future refactor that changes how
             // rule PDAs are derived or owned.
-            require!(
-                sub_data[0] == 2,
-                PolicyEngineError::InvalidRuleHeader
-            );
+            require!(sub_data[0] == 2, PolicyEngineError::InvalidRuleHeader);
             let header_kind = sub_data[1];
             let header_index = sub_data[2];
             let header_enabled = sub_data[3];
@@ -1639,10 +1732,7 @@ mod policy_engine_program {
                             break;
                         }
                     }
-                    require!(
-                        allowed,
-                        PolicyEngineError::AllowlistDestinationNotAllowed
-                    );
+                    require!(allowed, PolicyEngineError::AllowlistDestinationNotAllowed);
                 }
                 KIND_VELOCITY => {
                     // F3b: count-based rate limit with real mutation via
@@ -1662,32 +1752,37 @@ mod policy_engine_program {
                     for i in 0..count {
                         let base = 105 + i * 48;
                         let window_seconds = u64::from_le_bytes(
-                            sub_data[base..base + 8].try_into().map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
+                            sub_data[base..base + 8]
+                                .try_into()
+                                .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
                         );
                         let cap = u64::from_le_bytes(
-                            sub_data[base + 8..base + 16].try_into().map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
+                            sub_data[base + 8..base + 16]
+                                .try_into()
+                                .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
                         );
                         let current_count = u64::from_le_bytes(
-                            sub_data[base + 16..base + 24].try_into().map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
+                            sub_data[base + 16..base + 24]
+                                .try_into()
+                                .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
                         );
                         let window_start = i64::from_le_bytes(
-                            sub_data[base + 32..base + 40].try_into().map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
+                            sub_data[base + 32..base + 40]
+                                .try_into()
+                                .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
                         );
                         require!(
                             window_seconds > 0 && cap > 0,
                             PolicyEngineError::InvalidRuleHeader
                         );
-                        let elapsed = current_ts
-                            >= window_start.saturating_add(window_seconds as i64);
+                        let elapsed =
+                            current_ts >= window_start.saturating_add(window_seconds as i64);
                         let (next_count, next_start) = if elapsed {
                             (1u64, current_ts)
                         } else {
                             (current_count.saturating_add(1), window_start)
                         };
-                        require!(
-                            next_count <= cap,
-                            PolicyEngineError::VelocityCapExceeded
-                        );
+                        require!(next_count <= cap, PolicyEngineError::VelocityCapExceeded);
                         to_apply[i] = (next_count, next_start);
                     }
                     let data_len = sub_data.len();
@@ -1704,18 +1799,13 @@ mod policy_engine_program {
                     // Quasar uses internally for cross-account mutations
                     // (cf. `set_lamports` in quasar-lang/accounts/account.rs).
                     let data_mut: &mut [u8] = unsafe {
-                        core::slice::from_raw_parts_mut(
-                            sub_view.data_ptr() as *mut u8,
-                            data_len,
-                        )
+                        core::slice::from_raw_parts_mut(sub_view.data_ptr() as *mut u8, data_len)
                     };
                     for i in 0..count {
                         let (next_count, next_start) = to_apply[i];
                         let base = 105 + i * 48;
-                        data_mut[base + 16..base + 24]
-                            .copy_from_slice(&next_count.to_le_bytes());
-                        data_mut[base + 32..base + 40]
-                            .copy_from_slice(&next_start.to_le_bytes());
+                        data_mut[base + 16..base + 24].copy_from_slice(&next_count.to_le_bytes());
+                        data_mut[base + 32..base + 40].copy_from_slice(&next_start.to_le_bytes());
                     }
                 }
                 KIND_TIME_LOCK => {
@@ -1728,19 +1818,23 @@ mod policy_engine_program {
                     //   sub_data[121..129] created_at_ts i64
                     let mode = sub_data[98];
                     let unlock_ts = i64::from_le_bytes(
-                        sub_data[105..113].try_into().map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
+                        sub_data[105..113]
+                            .try_into()
+                            .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
                     );
                     let delay_seconds = u64::from_le_bytes(
-                        sub_data[113..121].try_into().map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
+                        sub_data[113..121]
+                            .try_into()
+                            .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
                     );
                     let created_at_ts = i64::from_le_bytes(
-                        sub_data[121..129].try_into().map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
+                        sub_data[121..129]
+                            .try_into()
+                            .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
                     );
                     let effective_unlock = match mode {
                         TIME_LOCK_MODE_ABSOLUTE => unlock_ts,
-                        TIME_LOCK_MODE_DELAY => {
-                            created_at_ts.saturating_add(delay_seconds as i64)
-                        }
+                        TIME_LOCK_MODE_DELAY => created_at_ts.saturating_add(delay_seconds as i64),
                         _ => return Err(PolicyEngineError::InvalidRuleHeader.into()),
                     };
                     require!(
@@ -1806,10 +1900,14 @@ mod policy_engine_program {
                         let mut feed_owner = [0u8; 32];
                         feed_owner.copy_from_slice(&sub_data[base + 32..base + 64]);
                         let min_q64 = i64::from_le_bytes(
-                            sub_data[base + 64..base + 72].try_into().map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
+                            sub_data[base + 64..base + 72]
+                                .try_into()
+                                .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
                         );
                         let max_q64 = i64::from_le_bytes(
-                            sub_data[base + 72..base + 80].try_into().map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
+                            sub_data[base + 72..base + 80]
+                                .try_into()
+                                .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
                         );
                         feeds[i] = (feed_acct, feed_owner, min_q64, max_q64);
                     }
@@ -1817,8 +1915,7 @@ mod policy_engine_program {
 
                     let max_confidence_bps = max_confidence_bps_div4.saturating_mul(4);
                     for i in 0..count {
-                        let (expected_acct, expected_owner, min_q64, max_q64) =
-                            feeds[i];
+                        let (expected_acct, expected_owner, min_q64, max_q64) = feeds[i];
                         // H1 fix: defense-in-depth allowlist. A rule whose
                         // feed_owner is outside the allowed set is rejected
                         // even if the rule itself was created by a legit
@@ -1844,18 +1941,21 @@ mod policy_engine_program {
                         let aux_data = aux_view
                             .try_borrow()
                             .map_err(|_| PolicyEngineError::InvalidRuleHeader)?;
-                        require!(
-                            aux_data.len() >= 64,
-                            PolicyEngineError::InvalidRuleHeader
-                        );
+                        require!(aux_data.len() >= 64, PolicyEngineError::InvalidRuleHeader);
                         let price = i64::from_le_bytes(
-                            aux_data[32..40].try_into().map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
+                            aux_data[32..40]
+                                .try_into()
+                                .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
                         );
                         let confidence = u64::from_le_bytes(
-                            aux_data[40..48].try_into().map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
+                            aux_data[40..48]
+                                .try_into()
+                                .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
                         );
                         let publish_time = i64::from_le_bytes(
-                            aux_data[56..64].try_into().map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
+                            aux_data[56..64]
+                                .try_into()
+                                .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
                         );
                         require!(
                             publish_time.saturating_add(freshness_secs) >= current_ts,
@@ -1885,8 +1985,7 @@ mod policy_engine_program {
                                     PolicyEngineError::OracleConfidenceExceeded
                                 );
                             } else {
-                                let confidence_bps =
-                                    confidence.saturating_mul(10_000) / abs_price;
+                                let confidence_bps = confidence.saturating_mul(10_000) / abs_price;
                                 require!(
                                     confidence_bps <= max_confidence_bps,
                                     PolicyEngineError::OracleConfidenceExceeded
@@ -1894,6 +1993,198 @@ mod policy_engine_program {
                             }
                         }
                     }
+                }
+                KIND_SPENDING_USD => {
+                    // Update 3 — USD spending-limit dispatch.
+                    //
+                    // Reads ONE feed (the moved asset, `asset_index`) from the
+                    // allowlist, converts `amount` (asset base units) → USD 1e8
+                    // via the Pyth adapter FeedCache price, and enforces the
+                    // per-tx / per-day / per-week ceilings. Day/week accumulators
+                    // are mutated in place (KIND_VELOCITY data_mut_ptr pattern).
+                    // Layout mirror: see `SpendingUsdRule`.
+                    //
+                    // Defense-in-depth: the address binding + header drift checks
+                    // above already constrain this to a full sub-PDA written by
+                    // add_rule_spending_usd (always 689 bytes), but assert the
+                    // exact size so any future refactor or undersized account
+                    // fails closed instead of panicking on the offset reads below.
+                    require!(
+                        sub_data.len()
+                            >= 1 + RULE_HEADER_BYTES
+                                + SPENDING_USD_CONFIG_BYTES,
+                        PolicyEngineError::InvalidRuleHeader
+                    );
+                    let feeds_count = sub_data[98] as usize;
+                    require!(
+                        feeds_count <= MAX_SPENDING_USD_FEEDS,
+                        PolicyEngineError::InvalidRuleHeader
+                    );
+                    let aidx = asset_index as usize;
+                    require!(
+                        aidx < feeds_count,
+                        PolicyEngineError::SpendingAssetNotAllowed
+                    );
+
+                    let freshness_secs = (sub_data[99] as i64).saturating_mul(16);
+                    let max_confidence_bps = (sub_data[100] as u64).saturating_mul(4);
+                    let max_per_tx = u64::from_le_bytes(
+                        sub_data[105..113]
+                            .try_into()
+                            .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
+                    );
+                    let max_per_day = u64::from_le_bytes(
+                        sub_data[113..121]
+                            .try_into()
+                            .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
+                    );
+                    let max_per_week = u64::from_le_bytes(
+                        sub_data[121..129]
+                            .try_into()
+                            .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
+                    );
+                    let cur_day_unix = i64::from_le_bytes(
+                        sub_data[129..137]
+                            .try_into()
+                            .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
+                    );
+                    let cur_day_sum = u64::from_le_bytes(
+                        sub_data[137..145]
+                            .try_into()
+                            .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
+                    );
+                    let cur_week_unix = i64::from_le_bytes(
+                        sub_data[145..153]
+                            .try_into()
+                            .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
+                    );
+                    let cur_week_sum = u64::from_le_bytes(
+                        sub_data[153..161]
+                            .try_into()
+                            .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
+                    );
+                    // Read only the moved asset's feed entry (stack budget: never
+                    // load all 16 — read just `asset_index` straight from data).
+                    let fbase = 161 + aidx * SPENDING_USD_FEED_BYTES;
+                    let mut feed_cache_account = [0u8; 32];
+                    feed_cache_account.copy_from_slice(&sub_data[fbase..fbase + 32]);
+                    let decimals = sub_data[fbase + 32];
+                    let data_len = sub_data.len();
+                    drop(sub_data);
+
+                    // Pull the single aux FeedCache account for the moved asset.
+                    let aux_view = rem_iter
+                        .next()
+                        .ok_or(PolicyEngineError::InvalidRuleHeader)?
+                        .map_err(|_| PolicyEngineError::InvalidRuleHeader)?;
+                    require!(
+                        aux_view.address().as_array() == &feed_cache_account,
+                        PolicyEngineError::SpendingAssetNotAllowed
+                    );
+                    require!(
+                        is_oracle_owner_allowed(aux_view.owner().as_array()),
+                        PolicyEngineError::OracleOwnerMismatch
+                    );
+                    let aux_data = aux_view
+                        .try_borrow()
+                        .map_err(|_| PolicyEngineError::InvalidRuleHeader)?;
+                    require!(aux_data.len() >= 64, PolicyEngineError::InvalidRuleHeader);
+                    let price = i64::from_le_bytes(
+                        aux_data[32..40]
+                            .try_into()
+                            .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
+                    );
+                    let confidence = u64::from_le_bytes(
+                        aux_data[40..48]
+                            .try_into()
+                            .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
+                    );
+                    let publish_time = i64::from_le_bytes(
+                        aux_data[56..64]
+                            .try_into()
+                            .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
+                    );
+                    drop(aux_data);
+
+                    // Frescor fail-closed: an old price is never assumed valid.
+                    require!(
+                        publish_time.saturating_add(freshness_secs) >= current_ts,
+                        PolicyEngineError::SpendingPriceStale
+                    );
+                    // A non-positive price cannot value a spend — reject.
+                    require!(price > 0, PolicyEngineError::SpendingConversionOverflow);
+                    // Optional confidence ceiling (same maths as KIND_ORACLE).
+                    if max_confidence_bps > 0 {
+                        let abs_price = price as u64; // price > 0 guaranteed above
+                        let confidence_bps = confidence.saturating_mul(10_000) / abs_price;
+                        require!(
+                            confidence_bps <= max_confidence_bps,
+                            PolicyEngineError::SpendingConfidenceExceeded
+                        );
+                    }
+
+                    // Convert: amount_usd_1e8 = amount * price / 10^decimals.
+                    // u128 intermediate; price already USD 1e8; dividing by the
+                    // asset's base-unit scale brings it back to USD 1e8.
+                    let pow10 = 10u128
+                        .checked_pow(decimals as u32)
+                        .ok_or(PolicyEngineError::SpendingConversionOverflow)?;
+                    let numer = (amount as u128)
+                        .checked_mul(price as u128)
+                        .ok_or(PolicyEngineError::SpendingConversionOverflow)?;
+                    let amount_usd_1e8: u64 = (numer / pow10)
+                        .try_into()
+                        .map_err(|_| PolicyEngineError::SpendingConversionOverflow)?;
+
+                    // Per-tx ceiling.
+                    if max_per_tx > 0 {
+                        require!(
+                            amount_usd_1e8 <= max_per_tx,
+                            PolicyEngineError::SpendingPerTxExceeded
+                        );
+                    }
+
+                    // Daily bucket: floor(ts/86400)*86400. Reset on a new bucket.
+                    let day_bucket = (current_ts / 86_400).saturating_mul(86_400);
+                    let next_day_sum = if day_bucket != cur_day_unix {
+                        amount_usd_1e8
+                    } else {
+                        cur_day_sum.saturating_add(amount_usd_1e8)
+                    };
+                    if max_per_day > 0 {
+                        require!(
+                            next_day_sum <= max_per_day,
+                            PolicyEngineError::SpendingDailyExceeded
+                        );
+                    }
+
+                    // Weekly bucket: floor(ts/604800)*604800.
+                    let week_bucket = (current_ts / 604_800).saturating_mul(604_800);
+                    let next_week_sum = if week_bucket != cur_week_unix {
+                        amount_usd_1e8
+                    } else {
+                        cur_week_sum.saturating_add(amount_usd_1e8)
+                    };
+                    if max_per_week > 0 {
+                        require!(
+                            next_week_sum <= max_per_week,
+                            PolicyEngineError::SpendingWeeklyExceeded
+                        );
+                    }
+
+                    // Write back the accumulators.
+                    //
+                    // SAFETY: the sub_view is declared writable, the immutable
+                    // borrow above was dropped, and no other alias exists. We
+                    // only touch existing bytes (no resize). Same pattern as
+                    // KIND_VELOCITY.
+                    let data_mut: &mut [u8] = unsafe {
+                        core::slice::from_raw_parts_mut(sub_view.data_ptr() as *mut u8, data_len)
+                    };
+                    data_mut[129..137].copy_from_slice(&day_bucket.to_le_bytes());
+                    data_mut[137..145].copy_from_slice(&next_day_sum.to_le_bytes());
+                    data_mut[145..153].copy_from_slice(&week_bucket.to_le_bytes());
+                    data_mut[153..161].copy_from_slice(&next_week_sum.to_le_bytes());
                 }
                 KIND_PASSKEY => {
                     // F6b — Passkey dispatch.
@@ -2136,7 +2427,13 @@ mod policy_engine_program {
         invoke_ika_approve_message(
             &ctx.accounts.dwallet_program.to_account_view(),
             &ctx.accounts.cpi_authority.to_account_view(),
-            &ctx.accounts.caller_program.to_account_view(),
+            // F9-COORD: the Ika caller_program must be THIS program's id — Ika
+            // derives the signing authority as PDA(["__ika_cpi_authority"],
+            // caller_program) and requires it to sign. Use the `program`
+            // account (= policy-engine id, executable). The separate
+            // `caller_program` slot stays in the context (now unused) so the
+            // instruction account layout is unchanged.
+            &ctx.accounts.program.to_account_view(),
             cpi_authority_bump,
             &ctx.accounts.coordinator.to_account_view(),
             &ctx.accounts.message_approval.to_account_view(),
@@ -2144,7 +2441,13 @@ mod policy_engine_program {
             &ctx.accounts.payer.to_account_view(),
             &ctx.accounts.system_program.to_account_view(),
             message_digest,
-            metadata_digest,
+            // F9-SIGN: Ika message_metadata_digest = 0 (the signed message carries
+            // no Ika metadata). The Andromeda policy challenge (metadata_digest) is
+            // already enforced above via the request_metadata_digest match, so
+            // binding it into the Ika MessageApproval here is both redundant and
+            // breaks the Ika Sign step (the network derives the approval with empty
+            // metadata → otherwise "MessageApproval PDA not found").
+            [0u8; 32],
             user_pubkey,
             signature_scheme,
             message_approval_bump,
@@ -2216,12 +2519,9 @@ mod policy_engine_program {
 
         // Human-readable message (clear-signing v2).
         let mut human_buf = [0u8; MAX_HUMAN_MESSAGE_BYTES];
-        let human_len = human_message::allowlist_pause_message(
-            &mut human_buf,
-            &engine_addr,
-            &dwallet_addr,
-        )
-        .map_err(PolicyEngineError::from)?;
+        let human_len =
+            human_message::allowlist_pause_message(&mut human_buf, &engine_addr, &dwallet_addr)
+                .map_err(PolicyEngineError::from)?;
         let human = &human_buf[..human_len];
 
         let gen_le = new_generation.to_le_bytes();
@@ -2366,10 +2666,14 @@ mod policy_engine_program {
         for i in 0..(windows_count as usize) {
             let base = i * 16;
             let window_seconds = u64::from_le_bytes(
-                windows_config[base..base + 8].try_into().map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
+                windows_config[base..base + 8]
+                    .try_into()
+                    .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
             );
             let cap = u64::from_le_bytes(
-                windows_config[base + 8..base + 16].try_into().map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
+                windows_config[base + 8..base + 16]
+                    .try_into()
+                    .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
             );
             require!(
                 window_seconds > 0 && cap > 0,
@@ -2390,23 +2694,15 @@ mod policy_engine_program {
 
         let applies_b = [config_applies_to];
         let count_b = [windows_count];
-        let config_hash = hashv(&[
-            b"velocity-config-v1",
-            &applies_b,
-            &count_b,
-            &windows_flat,
-        ]);
+        let config_hash = hashv(&[b"velocity-config-v1", &applies_b, &count_b, &windows_flat]);
         let new_generation = existing.generation.saturating_add(1);
 
         // Reuse the allowlist_pause renderer for now (TODO F3: dedicated
         // velocity_add_rule renderer in `andromeda_auth::human_message`).
         let mut human_buf = [0u8; MAX_HUMAN_MESSAGE_BYTES];
-        let human_len = human_message::allowlist_pause_message(
-            &mut human_buf,
-            &engine_addr,
-            &dwallet_addr,
-        )
-        .map_err(PolicyEngineError::from)?;
+        let human_len =
+            human_message::allowlist_pause_message(&mut human_buf, &engine_addr, &dwallet_addr)
+                .map_err(PolicyEngineError::from)?;
         let human = &human_buf[..human_len];
 
         let gen_le = new_generation.to_le_bytes();
@@ -2518,7 +2814,10 @@ mod policy_engine_program {
         let owner_slot = ctx.accounts.engine.owner_slot;
         let on_chain_nonce: u64 = ctx.accounts.engine.next_admin_nonce.into();
 
-        require!((rule_index as usize) < MAX_RULES, PolicyEngineError::TooManyRules);
+        require!(
+            (rule_index as usize) < MAX_RULES,
+            PolicyEngineError::TooManyRules
+        );
         require!(
             (config_applies_to & !APPLIES_ALL) == 0 && config_applies_to != 0,
             PolicyEngineError::RuleNotApplicable
@@ -2555,40 +2854,68 @@ mod policy_engine_program {
         let new_generation = existing.generation.saturating_add(1);
 
         let mut human_buf = [0u8; MAX_HUMAN_MESSAGE_BYTES];
-        let human_len = human_message::allowlist_pause_message(
-            &mut human_buf, &engine_addr, &dwallet_addr,
-        )
-        .map_err(PolicyEngineError::from)?;
+        let human_len =
+            human_message::allowlist_pause_message(&mut human_buf, &engine_addr, &dwallet_addr)
+                .map_err(PolicyEngineError::from)?;
         let human = &human_buf[..human_len];
 
         let gen_le = new_generation.to_le_bytes();
         let challenge = admin_challenge(
-            OP_ADD_TIME_LOCK, human, &engine_addr, &dwallet_addr,
-            KIND_TIME_LOCK, rule_index, new_generation, on_chain_nonce,
-            &config_hash, &owner_slot,
+            OP_ADD_TIME_LOCK,
+            human,
+            &engine_addr,
+            &dwallet_addr,
+            KIND_TIME_LOCK,
+            rule_index,
+            new_generation,
+            on_chain_nonce,
+            &config_hash,
+            &owner_slot,
             &[&applies_b, &mode_b, &unlock_le, &delay_le, &gen_le],
         );
         check_sysvar_addr(ctx.accounts.instructions_sysvar.address())?;
         let sysvar_view = ctx.accounts.instructions_sysvar.to_account_view();
-        let sysvar_data_ref = sysvar_view.try_borrow()
+        let sysvar_data_ref = sysvar_view
+            .try_borrow()
             .map_err(|_| PolicyEngineError::AuthFailed)?;
         let new_nonce = verify_owner_admin(
-            expected_nonce, on_chain_nonce, &owner_slot, &challenge, &sysvar_data_ref,
-        ).map_err(PolicyEngineError::from)?;
+            expected_nonce,
+            on_chain_nonce,
+            &owner_slot,
+            &challenge,
+            &sysvar_data_ref,
+        )
+        .map_err(PolicyEngineError::from)?;
         drop(sysvar_data_ref);
 
         let rule_addr = *ctx.accounts.rule_pda.address();
         ctx.accounts.rule_pda.set_inner(TimeLockRuleInner {
-            kind: KIND_TIME_LOCK, index: rule_index, enabled: 1, _pad0: 0,
-            generation: new_generation, config_version: 1, _pad1: [0u8; 4],
-            engine: engine_addr, next_admin_nonce: 0, config_hash,
+            kind: KIND_TIME_LOCK,
+            index: rule_index,
+            enabled: 1,
+            _pad0: 0,
+            generation: new_generation,
+            config_version: 1,
+            _pad1: [0u8; 4],
+            engine: engine_addr,
+            next_admin_nonce: 0,
+            config_hash,
             _pad_header_tail: [0u8; 8],
-            config_applies_to, mode, _pad_cfg0: [0u8; 6],
-            unlock_ts, delay_seconds, created_at_ts: current_ts,
+            config_applies_to,
+            mode,
+            _pad_cfg0: [0u8; 6],
+            unlock_ts,
+            delay_seconds,
+            created_at_ts: current_ts,
         });
         let new_entry = RuleEntry {
-            kind: KIND_TIME_LOCK, bump: 0, version: RULE_HEADER_V1,
-            enabled: 1, generation: new_generation, rule_pda: rule_addr, config_hash,
+            kind: KIND_TIME_LOCK,
+            bump: 0,
+            version: RULE_HEADER_V1,
+            enabled: 1,
+            generation: new_generation,
+            rule_pda: rule_addr,
+            config_hash,
         };
         write_rule_entry(&mut ctx.accounts.engine.rules_flat, slot, &new_entry);
         let cur_count: u8 = ctx.accounts.engine.rules_count;
@@ -2607,7 +2934,8 @@ mod policy_engine_program {
 
         ctx.accounts.program.emit_event(
             &RuleAdded {
-                engine: engine_addr, ts: current_ts,
+                engine: engine_addr,
+                ts: current_ts,
                 kind: KIND_TIME_LOCK as u64,
                 rule_index: rule_index as u64,
                 generation: new_generation as u64,
@@ -2636,7 +2964,10 @@ mod policy_engine_program {
         let owner_slot = ctx.accounts.engine.owner_slot;
         let on_chain_nonce: u64 = ctx.accounts.engine.next_admin_nonce.into();
 
-        require!((rule_index as usize) < MAX_RULES, PolicyEngineError::TooManyRules);
+        require!(
+            (rule_index as usize) < MAX_RULES,
+            PolicyEngineError::TooManyRules
+        );
         require!(
             (config_applies_to & !APPLIES_ALL) == 0 && config_applies_to != 0,
             PolicyEngineError::RuleNotApplicable
@@ -2657,46 +2988,78 @@ mod policy_engine_program {
         let conf_b = [min_confidence_bps_div4];
         let zero_count = [0u8];
         let config_hash = hashv(&[
-            b"oracle-config-v1", &applies_b, &zero_count, &fresh_b, &conf_b, &empty_feeds,
+            b"oracle-config-v1",
+            &applies_b,
+            &zero_count,
+            &fresh_b,
+            &conf_b,
+            &empty_feeds,
         ]);
         let new_generation = existing.generation.saturating_add(1);
 
         let mut human_buf = [0u8; MAX_HUMAN_MESSAGE_BYTES];
-        let human_len = human_message::allowlist_pause_message(
-            &mut human_buf, &engine_addr, &dwallet_addr,
-        ).map_err(PolicyEngineError::from)?;
+        let human_len =
+            human_message::allowlist_pause_message(&mut human_buf, &engine_addr, &dwallet_addr)
+                .map_err(PolicyEngineError::from)?;
         let human = &human_buf[..human_len];
 
         let gen_le = new_generation.to_le_bytes();
         let challenge = admin_challenge(
-            OP_ADD_ORACLE, human, &engine_addr, &dwallet_addr,
-            KIND_ORACLE, rule_index, new_generation, on_chain_nonce,
-            &config_hash, &owner_slot,
+            OP_ADD_ORACLE,
+            human,
+            &engine_addr,
+            &dwallet_addr,
+            KIND_ORACLE,
+            rule_index,
+            new_generation,
+            on_chain_nonce,
+            &config_hash,
+            &owner_slot,
             &[&applies_b, &fresh_b, &conf_b, &gen_le],
         );
         check_sysvar_addr(ctx.accounts.instructions_sysvar.address())?;
         let sysvar_view = ctx.accounts.instructions_sysvar.to_account_view();
-        let sysvar_data_ref = sysvar_view.try_borrow()
+        let sysvar_data_ref = sysvar_view
+            .try_borrow()
             .map_err(|_| PolicyEngineError::AuthFailed)?;
         let new_nonce = verify_owner_admin(
-            expected_nonce, on_chain_nonce, &owner_slot, &challenge, &sysvar_data_ref,
-        ).map_err(PolicyEngineError::from)?;
+            expected_nonce,
+            on_chain_nonce,
+            &owner_slot,
+            &challenge,
+            &sysvar_data_ref,
+        )
+        .map_err(PolicyEngineError::from)?;
         drop(sysvar_data_ref);
 
         let rule_addr = *ctx.accounts.rule_pda.address();
         ctx.accounts.rule_pda.set_inner(OracleRuleInner {
-            kind: KIND_ORACLE, index: rule_index, enabled: 1, _pad0: 0,
-            generation: new_generation, config_version: 1, _pad1: [0u8; 4],
-            engine: engine_addr, next_admin_nonce: 0, config_hash,
+            kind: KIND_ORACLE,
+            index: rule_index,
+            enabled: 1,
+            _pad0: 0,
+            generation: new_generation,
+            config_version: 1,
+            _pad1: [0u8; 4],
+            engine: engine_addr,
+            next_admin_nonce: 0,
+            config_hash,
             _pad_header_tail: [0u8; 8],
-            config_applies_to, feeds_count: 0,
-            freshness_seconds_div16, min_confidence_bps_div4,
+            config_applies_to,
+            feeds_count: 0,
+            freshness_seconds_div16,
+            min_confidence_bps_div4,
             _pad_cfg0: [0u8; 4],
             feeds_flat: empty_feeds,
         });
         let new_entry = RuleEntry {
-            kind: KIND_ORACLE, bump: 0, version: RULE_HEADER_V1,
-            enabled: 1, generation: new_generation, rule_pda: rule_addr, config_hash,
+            kind: KIND_ORACLE,
+            bump: 0,
+            version: RULE_HEADER_V1,
+            enabled: 1,
+            generation: new_generation,
+            rule_pda: rule_addr,
+            config_hash,
         };
         write_rule_entry(&mut ctx.accounts.engine.rules_flat, slot, &new_entry);
         let cur_count: u8 = ctx.accounts.engine.rules_count;
@@ -2715,8 +3078,180 @@ mod policy_engine_program {
 
         ctx.accounts.program.emit_event(
             &RuleAdded {
-                engine: engine_addr, ts: current_ts,
+                engine: engine_addr,
+                ts: current_ts,
                 kind: KIND_ORACLE as u64,
+                rule_index: rule_index as u64,
+                generation: new_generation as u64,
+            },
+            &ctx.accounts.event_authority,
+            EventAuthority::BUMP,
+        )?;
+        Ok(())
+    }
+
+    /// Disc 18 — `add_rule_spending_usd` (Update 3 — KIND_SPENDING_USD storage).
+    ///
+    /// Creates a USD spending-limit rule with `feeds_count = 0` and the
+    /// per-tx / per-day / per-week USD ceilings (canonical 1e8, 0 = window
+    /// disabled). Assets are added one-by-one via
+    /// `update_rule_spending_usd_add_feed` (disc 19) — a rule with zero feeds
+    /// enforces nothing. Accumulators start zeroed. Owner-signed
+    /// `OP_ADD_SPENDING_USD` admin challenge (clear-signing on the caps).
+    #[instruction(discriminator = 18)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_rule_spending_usd(
+        ctx: Ctx<AddRuleSpendingUsd>,
+        _init_authority_hash: Address,
+        expected_nonce: u64,
+        rule_index: u8,
+        config_applies_to: u8,
+        freshness_seconds_div16: u8,
+        max_confidence_bps_div4: u8,
+        max_per_tx_usd: u64,
+        max_per_day_usd: u64,
+        max_per_week_usd: u64,
+    ) -> Result<(), ProgramError> {
+        let current_ts: i64 = ctx.accounts.clock.unix_timestamp.into();
+        let engine_addr = *ctx.accounts.engine.address();
+        let dwallet_addr = *ctx.accounts.dwallet_account.address();
+        let owner_slot = ctx.accounts.engine.owner_slot;
+        let on_chain_nonce: u64 = ctx.accounts.engine.next_admin_nonce.into();
+
+        require!(
+            (rule_index as usize) < MAX_RULES,
+            PolicyEngineError::TooManyRules
+        );
+        require!(
+            (config_applies_to & !APPLIES_ALL) == 0 && config_applies_to != 0,
+            PolicyEngineError::RuleNotApplicable
+        );
+        for s in 0..MAX_RULES {
+            let entry = read_rule_entry(&ctx.accounts.engine.rules_flat, s);
+            if entry.kind == KIND_SPENDING_USD && entry.enabled == 1 {
+                return Err(PolicyEngineError::RuleAlreadyActive.into());
+            }
+        }
+        let slot = rule_index as usize;
+        let existing = read_rule_entry(&ctx.accounts.engine.rules_flat, slot);
+        require!(existing.is_empty(), PolicyEngineError::RuleSlotInUse);
+
+        let empty_feeds = [0u8; MAX_SPENDING_USD_FEEDS * SPENDING_USD_FEED_BYTES];
+        let applies_b = [config_applies_to];
+        let fresh_b = [freshness_seconds_div16];
+        let conf_b = [max_confidence_bps_div4];
+        let zero_count = [0u8];
+        // Caps travel as one 24-byte LE block in both the config_hash and the
+        // admin challenge so the approver signs over the exact ceilings.
+        let mut caps = [0u8; 24];
+        caps[0..8].copy_from_slice(&max_per_tx_usd.to_le_bytes());
+        caps[8..16].copy_from_slice(&max_per_day_usd.to_le_bytes());
+        caps[16..24].copy_from_slice(&max_per_week_usd.to_le_bytes());
+        let config_hash = hashv(&[
+            b"spending-usd-config-v1",
+            &applies_b,
+            &zero_count,
+            &fresh_b,
+            &conf_b,
+            &caps,
+            &empty_feeds,
+        ]);
+        let new_generation = existing.generation.saturating_add(1);
+
+        let mut human_buf = [0u8; MAX_HUMAN_MESSAGE_BYTES];
+        let human_len = human_message::spending_usd_add_message(
+            &mut human_buf,
+            max_per_tx_usd,
+            max_per_day_usd,
+            max_per_week_usd,
+            &engine_addr,
+            &dwallet_addr,
+        )
+        .map_err(PolicyEngineError::from)?;
+        let human = &human_buf[..human_len];
+
+        let gen_le = new_generation.to_le_bytes();
+        let challenge = admin_challenge(
+            OP_ADD_SPENDING_USD,
+            human,
+            &engine_addr,
+            &dwallet_addr,
+            KIND_SPENDING_USD,
+            rule_index,
+            new_generation,
+            on_chain_nonce,
+            &config_hash,
+            &owner_slot,
+            &[&applies_b, &fresh_b, &conf_b, &caps, &gen_le],
+        );
+        check_sysvar_addr(ctx.accounts.instructions_sysvar.address())?;
+        let sysvar_view = ctx.accounts.instructions_sysvar.to_account_view();
+        let sysvar_data_ref = sysvar_view
+            .try_borrow()
+            .map_err(|_| PolicyEngineError::AuthFailed)?;
+        let new_nonce = verify_owner_admin(
+            expected_nonce,
+            on_chain_nonce,
+            &owner_slot,
+            &challenge,
+            &sysvar_data_ref,
+        )
+        .map_err(PolicyEngineError::from)?;
+        drop(sysvar_data_ref);
+
+        let rule_addr = *ctx.accounts.rule_pda.address();
+        ctx.accounts.rule_pda.set_inner(SpendingUsdRuleInner {
+            kind: KIND_SPENDING_USD,
+            index: rule_index,
+            enabled: 1,
+            _pad0: 0,
+            generation: new_generation,
+            config_version: 1,
+            _pad1: [0u8; 4],
+            engine: engine_addr,
+            next_admin_nonce: 0,
+            config_hash,
+            _pad_header_tail: [0u8; 8],
+            config_applies_to,
+            feeds_count: 0,
+            freshness_seconds_div16,
+            max_confidence_bps_div4,
+            _pad_cfg0: [0u8; 4],
+            max_per_tx_usd,
+            max_per_day_usd,
+            max_per_week_usd,
+            current_day_unix: 0,
+            current_day_sum_usd: 0,
+            current_week_unix: 0,
+            current_week_sum_usd: 0,
+            feeds_flat: empty_feeds,
+        });
+        let new_entry = RuleEntry {
+            kind: KIND_SPENDING_USD,
+            bump: 0,
+            version: RULE_HEADER_V1,
+            enabled: 1,
+            generation: new_generation,
+            rule_pda: rule_addr,
+            config_hash,
+        };
+        write_rule_entry(&mut ctx.accounts.engine.rules_flat, slot, &new_entry);
+        let cur_count: u8 = ctx.accounts.engine.rules_count;
+        ctx.accounts.engine.rules_count = cur_count
+            .checked_add(1)
+            .ok_or(PolicyEngineError::TooManyRules)?;
+        let cur_gen: u32 = ctx.accounts.engine.rules_generation.into();
+        ctx.accounts.engine.rules_generation = cur_gen
+            .checked_add(1)
+            .ok_or(PolicyEngineError::TooManyRules)?
+            .into();
+        ctx.accounts.engine.next_admin_nonce = new_nonce.into();
+
+        ctx.accounts.program.emit_event(
+            &RuleAdded {
+                engine: engine_addr,
+                ts: current_ts,
+                kind: KIND_SPENDING_USD as u64,
                 rule_index: rule_index as u64,
                 generation: new_generation as u64,
             },
@@ -2741,7 +3276,10 @@ mod policy_engine_program {
         let owner_slot = ctx.accounts.engine.owner_slot;
         let on_chain_nonce: u64 = ctx.accounts.engine.next_admin_nonce.into();
 
-        require!((rule_index as usize) < MAX_RULES, PolicyEngineError::TooManyRules);
+        require!(
+            (rule_index as usize) < MAX_RULES,
+            PolicyEngineError::TooManyRules
+        );
         require!(
             (config_applies_to & !APPLIES_ALL) == 0 && config_applies_to != 0,
             PolicyEngineError::RuleNotApplicable
@@ -2759,45 +3297,70 @@ mod policy_engine_program {
         let empty_creds = [0u8; 4 * 128];
         let applies_b = [config_applies_to];
         let zero_count = [0u8];
-        let config_hash = hashv(&[
-            b"passkey-config-v1", &applies_b, &zero_count, &empty_creds,
-        ]);
+        let config_hash = hashv(&[b"passkey-config-v1", &applies_b, &zero_count, &empty_creds]);
         let new_generation = existing.generation.saturating_add(1);
 
         let mut human_buf = [0u8; MAX_HUMAN_MESSAGE_BYTES];
-        let human_len = human_message::allowlist_pause_message(
-            &mut human_buf, &engine_addr, &dwallet_addr,
-        ).map_err(PolicyEngineError::from)?;
+        let human_len =
+            human_message::allowlist_pause_message(&mut human_buf, &engine_addr, &dwallet_addr)
+                .map_err(PolicyEngineError::from)?;
         let human = &human_buf[..human_len];
 
         let gen_le = new_generation.to_le_bytes();
         let challenge = admin_challenge(
-            OP_ADD_PASSKEY, human, &engine_addr, &dwallet_addr,
-            KIND_PASSKEY, rule_index, new_generation, on_chain_nonce,
-            &config_hash, &owner_slot,
+            OP_ADD_PASSKEY,
+            human,
+            &engine_addr,
+            &dwallet_addr,
+            KIND_PASSKEY,
+            rule_index,
+            new_generation,
+            on_chain_nonce,
+            &config_hash,
+            &owner_slot,
             &[&applies_b, &gen_le],
         );
         check_sysvar_addr(ctx.accounts.instructions_sysvar.address())?;
         let sysvar_view = ctx.accounts.instructions_sysvar.to_account_view();
-        let sysvar_data_ref = sysvar_view.try_borrow()
+        let sysvar_data_ref = sysvar_view
+            .try_borrow()
             .map_err(|_| PolicyEngineError::AuthFailed)?;
         let new_nonce = verify_owner_admin(
-            expected_nonce, on_chain_nonce, &owner_slot, &challenge, &sysvar_data_ref,
-        ).map_err(PolicyEngineError::from)?;
+            expected_nonce,
+            on_chain_nonce,
+            &owner_slot,
+            &challenge,
+            &sysvar_data_ref,
+        )
+        .map_err(PolicyEngineError::from)?;
         drop(sysvar_data_ref);
 
         let rule_addr = *ctx.accounts.rule_pda.address();
         ctx.accounts.rule_pda.set_inner(PasskeyRuleInner {
-            kind: KIND_PASSKEY, index: rule_index, enabled: 1, _pad0: 0,
-            generation: new_generation, config_version: 1, _pad1: [0u8; 4],
-            engine: engine_addr, next_admin_nonce: 0, config_hash,
+            kind: KIND_PASSKEY,
+            index: rule_index,
+            enabled: 1,
+            _pad0: 0,
+            generation: new_generation,
+            config_version: 1,
+            _pad1: [0u8; 4],
+            engine: engine_addr,
+            next_admin_nonce: 0,
+            config_hash,
             _pad_header_tail: [0u8; 8],
-            config_applies_to, credentials_count: 0, _pad_cfg0: [0u8; 6],
+            config_applies_to,
+            credentials_count: 0,
+            _pad_cfg0: [0u8; 6],
             credentials_flat: empty_creds,
         });
         let new_entry = RuleEntry {
-            kind: KIND_PASSKEY, bump: 0, version: RULE_HEADER_V1,
-            enabled: 1, generation: new_generation, rule_pda: rule_addr, config_hash,
+            kind: KIND_PASSKEY,
+            bump: 0,
+            version: RULE_HEADER_V1,
+            enabled: 1,
+            generation: new_generation,
+            rule_pda: rule_addr,
+            config_hash,
         };
         write_rule_entry(&mut ctx.accounts.engine.rules_flat, slot, &new_entry);
         let cur_count: u8 = ctx.accounts.engine.rules_count;
@@ -2816,7 +3379,8 @@ mod policy_engine_program {
 
         ctx.accounts.program.emit_event(
             &RuleAdded {
-                engine: engine_addr, ts: current_ts,
+                engine: engine_addr,
+                ts: current_ts,
                 kind: KIND_PASSKEY as u64,
                 rule_index: rule_index as u64,
                 generation: new_generation as u64,
@@ -2843,7 +3407,10 @@ mod policy_engine_program {
         let owner_slot = ctx.accounts.engine.owner_slot;
         let on_chain_nonce: u64 = ctx.accounts.engine.next_admin_nonce.into();
 
-        require!((rule_index as usize) < MAX_RULES, PolicyEngineError::TooManyRules);
+        require!(
+            (rule_index as usize) < MAX_RULES,
+            PolicyEngineError::TooManyRules
+        );
         require!(
             (config_applies_to & !APPLIES_ALL) == 0 && config_applies_to != 0,
             PolicyEngineError::RuleNotApplicable
@@ -2863,45 +3430,76 @@ mod policy_engine_program {
         let fresh_b = [freshness_seconds_div16];
         let zero_count = [0u8];
         let config_hash = hashv(&[
-            b"fhe-gated-config-v1", &applies_b, &zero_count, &fresh_b, &empty_auth,
+            b"fhe-gated-config-v1",
+            &applies_b,
+            &zero_count,
+            &fresh_b,
+            &empty_auth,
         ]);
         let new_generation = existing.generation.saturating_add(1);
 
         let mut human_buf = [0u8; MAX_HUMAN_MESSAGE_BYTES];
-        let human_len = human_message::allowlist_pause_message(
-            &mut human_buf, &engine_addr, &dwallet_addr,
-        ).map_err(PolicyEngineError::from)?;
+        let human_len =
+            human_message::allowlist_pause_message(&mut human_buf, &engine_addr, &dwallet_addr)
+                .map_err(PolicyEngineError::from)?;
         let human = &human_buf[..human_len];
 
         let gen_le = new_generation.to_le_bytes();
         let challenge = admin_challenge(
-            OP_ADD_FHE_GATED, human, &engine_addr, &dwallet_addr,
-            KIND_FHE_GATED, rule_index, new_generation, on_chain_nonce,
-            &config_hash, &owner_slot,
+            OP_ADD_FHE_GATED,
+            human,
+            &engine_addr,
+            &dwallet_addr,
+            KIND_FHE_GATED,
+            rule_index,
+            new_generation,
+            on_chain_nonce,
+            &config_hash,
+            &owner_slot,
             &[&applies_b, &fresh_b, &gen_le],
         );
         check_sysvar_addr(ctx.accounts.instructions_sysvar.address())?;
         let sysvar_view = ctx.accounts.instructions_sysvar.to_account_view();
-        let sysvar_data_ref = sysvar_view.try_borrow()
+        let sysvar_data_ref = sysvar_view
+            .try_borrow()
             .map_err(|_| PolicyEngineError::AuthFailed)?;
         let new_nonce = verify_owner_admin(
-            expected_nonce, on_chain_nonce, &owner_slot, &challenge, &sysvar_data_ref,
-        ).map_err(PolicyEngineError::from)?;
+            expected_nonce,
+            on_chain_nonce,
+            &owner_slot,
+            &challenge,
+            &sysvar_data_ref,
+        )
+        .map_err(PolicyEngineError::from)?;
         drop(sysvar_data_ref);
 
         let rule_addr = *ctx.accounts.rule_pda.address();
         ctx.accounts.rule_pda.set_inner(FheGatedRuleInner {
-            kind: KIND_FHE_GATED, index: rule_index, enabled: 1, _pad0: 0,
-            generation: new_generation, config_version: 1, _pad1: [0u8; 4],
-            engine: engine_addr, next_admin_nonce: 0, config_hash,
+            kind: KIND_FHE_GATED,
+            index: rule_index,
+            enabled: 1,
+            _pad0: 0,
+            generation: new_generation,
+            config_version: 1,
+            _pad1: [0u8; 4],
+            engine: engine_addr,
+            next_admin_nonce: 0,
+            config_hash,
             _pad_header_tail: [0u8; 8],
-            config_applies_to, authorities_count: 0,
-            freshness_seconds_div16, _pad_cfg0: [0u8; 5],
+            config_applies_to,
+            authorities_count: 0,
+            freshness_seconds_div16,
+            _pad_cfg0: [0u8; 5],
             authorities_flat: empty_auth,
         });
         let new_entry = RuleEntry {
-            kind: KIND_FHE_GATED, bump: 0, version: RULE_HEADER_V1,
-            enabled: 1, generation: new_generation, rule_pda: rule_addr, config_hash,
+            kind: KIND_FHE_GATED,
+            bump: 0,
+            version: RULE_HEADER_V1,
+            enabled: 1,
+            generation: new_generation,
+            rule_pda: rule_addr,
+            config_hash,
         };
         write_rule_entry(&mut ctx.accounts.engine.rules_flat, slot, &new_entry);
         let cur_count: u8 = ctx.accounts.engine.rules_count;
@@ -2920,7 +3518,8 @@ mod policy_engine_program {
 
         ctx.accounts.program.emit_event(
             &RuleAdded {
-                engine: engine_addr, ts: current_ts,
+                engine: engine_addr,
+                ts: current_ts,
                 kind: KIND_FHE_GATED as u64,
                 rule_index: rule_index as u64,
                 generation: new_generation as u64,
@@ -2961,7 +3560,10 @@ mod policy_engine_program {
         let owner_slot = ctx.accounts.engine.owner_slot;
         let on_chain_nonce: u64 = ctx.accounts.engine.next_admin_nonce.into();
 
-        require!((rule_index as usize) < MAX_RULES, PolicyEngineError::TooManyRules);
+        require!(
+            (rule_index as usize) < MAX_RULES,
+            PolicyEngineError::TooManyRules
+        );
         // SessionKey rule MUST be APPLIES_SESSION only — normal signing uses a
         // separate dispatch and would otherwise silently delegate to the
         // session keypair.
@@ -2996,45 +3598,78 @@ mod policy_engine_program {
         let amount_le = session_max_amount_per_tx.to_le_bytes();
         let config_hash = hashv(&[
             b"session-key-config-v1",
-            &applies_b, &max_b, &ttl_le, &uses_le, &amount_le,
+            &applies_b,
+            &max_b,
+            &ttl_le,
+            &uses_le,
+            &amount_le,
         ]);
         let new_generation = existing.generation.saturating_add(1);
 
         let mut human_buf = [0u8; MAX_HUMAN_MESSAGE_BYTES];
-        let human_len = human_message::allowlist_pause_message(
-            &mut human_buf, &engine_addr, &dwallet_addr,
-        ).map_err(PolicyEngineError::from)?;
+        let human_len =
+            human_message::allowlist_pause_message(&mut human_buf, &engine_addr, &dwallet_addr)
+                .map_err(PolicyEngineError::from)?;
         let human = &human_buf[..human_len];
 
         let gen_le = new_generation.to_le_bytes();
         let challenge = admin_challenge(
-            OP_ADD_SESSION_KEY, human, &engine_addr, &dwallet_addr,
-            KIND_SESSION_KEY, rule_index, new_generation, on_chain_nonce,
-            &config_hash, &owner_slot,
+            OP_ADD_SESSION_KEY,
+            human,
+            &engine_addr,
+            &dwallet_addr,
+            KIND_SESSION_KEY,
+            rule_index,
+            new_generation,
+            on_chain_nonce,
+            &config_hash,
+            &owner_slot,
             &[&applies_b, &max_b, &ttl_le, &uses_le, &amount_le, &gen_le],
         );
         check_sysvar_addr(ctx.accounts.instructions_sysvar.address())?;
         let sysvar_view = ctx.accounts.instructions_sysvar.to_account_view();
-        let sysvar_data_ref = sysvar_view.try_borrow()
+        let sysvar_data_ref = sysvar_view
+            .try_borrow()
             .map_err(|_| PolicyEngineError::AuthFailed)?;
         let new_nonce = verify_owner_admin(
-            expected_nonce, on_chain_nonce, &owner_slot, &challenge, &sysvar_data_ref,
-        ).map_err(PolicyEngineError::from)?;
+            expected_nonce,
+            on_chain_nonce,
+            &owner_slot,
+            &challenge,
+            &sysvar_data_ref,
+        )
+        .map_err(PolicyEngineError::from)?;
         drop(sysvar_data_ref);
 
         let rule_addr = *ctx.accounts.rule_pda.address();
         ctx.accounts.rule_pda.set_inner(SessionKeyRuleInner {
-            kind: KIND_SESSION_KEY, index: rule_index, enabled: 1, _pad0: 0,
-            generation: new_generation, config_version: 1, _pad1: [0u8; 4],
-            engine: engine_addr, next_admin_nonce: 0, config_hash,
+            kind: KIND_SESSION_KEY,
+            index: rule_index,
+            enabled: 1,
+            _pad0: 0,
+            generation: new_generation,
+            config_version: 1,
+            _pad1: [0u8; 4],
+            engine: engine_addr,
+            next_admin_nonce: 0,
+            config_hash,
             _pad_header_tail: [0u8; 8],
-            config_applies_to, max_sessions, _pad_cfg0: [0u8; 6],
-            default_ttl_seconds, default_max_uses, _pad_cfg1: 0,
+            config_applies_to,
+            max_sessions,
+            _pad_cfg0: [0u8; 6],
+            default_ttl_seconds,
+            default_max_uses,
+            _pad_cfg1: 0,
             session_max_amount_per_tx,
         });
         let new_entry = RuleEntry {
-            kind: KIND_SESSION_KEY, bump: 0, version: RULE_HEADER_V1,
-            enabled: 1, generation: new_generation, rule_pda: rule_addr, config_hash,
+            kind: KIND_SESSION_KEY,
+            bump: 0,
+            version: RULE_HEADER_V1,
+            enabled: 1,
+            generation: new_generation,
+            rule_pda: rule_addr,
+            config_hash,
         };
         write_rule_entry(&mut ctx.accounts.engine.rules_flat, slot, &new_entry);
         let cur_count: u8 = ctx.accounts.engine.rules_count;
@@ -3053,7 +3688,8 @@ mod policy_engine_program {
 
         ctx.accounts.program.emit_event(
             &RuleAdded {
-                engine: engine_addr, ts: current_ts,
+                engine: engine_addr,
+                ts: current_ts,
                 kind: KIND_SESSION_KEY as u64,
                 rule_index: rule_index as u64,
                 generation: new_generation as u64,
@@ -3131,8 +3767,7 @@ mod policy_engine_program {
                 validate_oidc_slot(&primary_slot)
                     .map_err(|_| PolicyEngineError::InvalidOwnerSlot)?;
             } else {
-                validate_slot(&primary_slot)
-                    .map_err(|_| PolicyEngineError::InvalidOwnerSlot)?;
+                validate_slot(&primary_slot).map_err(|_| PolicyEngineError::InvalidOwnerSlot)?;
             }
         }
 
@@ -3177,15 +3812,22 @@ mod policy_engine_program {
         ]);
 
         let mut human_buf = [0u8; MAX_HUMAN_MESSAGE_BYTES];
-        let human_len = human_message::allowlist_pause_message(
-            &mut human_buf, &engine_addr, &dwallet_addr,
-        ).map_err(PolicyEngineError::from)?;
+        let human_len =
+            human_message::allowlist_pause_message(&mut human_buf, &engine_addr, &dwallet_addr)
+                .map_err(PolicyEngineError::from)?;
         let human = &human_buf[..human_len];
         let gen_le = new_generation.to_le_bytes();
         let challenge = admin_challenge(
-            OP_ADD_RECOVERY, human, &engine_addr, &dwallet_addr,
-            KIND_RECOVERY, rule_index, new_generation, on_chain_nonce,
-            &config_hash, &owner_slot,
+            OP_ADD_RECOVERY,
+            human,
+            &engine_addr,
+            &dwallet_addr,
+            KIND_RECOVERY,
+            rule_index,
+            new_generation,
+            on_chain_nonce,
+            &config_hash,
+            &owner_slot,
             &[
                 &applies_b,
                 &primary_present_b,
@@ -3206,7 +3848,11 @@ mod policy_engine_program {
             .try_borrow()
             .map_err(|_| PolicyEngineError::AuthFailed)?;
         let new_nonce = verify_owner_admin(
-            expected_nonce, on_chain_nonce, &owner_slot, &challenge, &sysvar_data_ref,
+            expected_nonce,
+            on_chain_nonce,
+            &owner_slot,
+            &challenge,
+            &sysvar_data_ref,
         )
         .map_err(PolicyEngineError::from)?;
         drop(sysvar_data_ref);
@@ -3610,7 +4256,8 @@ mod policy_engine_program {
                     tail.copy_from_slice(&ctx.accounts.rule_pda.destinations_flat[last..last + 32]);
                     ctx.accounts.rule_pda.destinations_flat[off..off + 32].copy_from_slice(&tail);
                 }
-                ctx.accounts.rule_pda.destinations_flat[last..last + 32].copy_from_slice(&[0u8; 32]);
+                ctx.accounts.rule_pda.destinations_flat[last..last + 32]
+                    .copy_from_slice(&[0u8; 32]);
                 ctx.accounts.rule_pda.destinations_count = (count as u8) - 1;
                 break;
             }
@@ -3693,7 +4340,10 @@ mod policy_engine_program {
         let header_index = ctx.accounts.rule_pda.index;
         let header_enabled = ctx.accounts.rule_pda.enabled;
         let header_gen: u32 = ctx.accounts.rule_pda.generation.into();
-        require!(header_kind == KIND_ORACLE, PolicyEngineError::InvalidRuleKind);
+        require!(
+            header_kind == KIND_ORACLE,
+            PolicyEngineError::InvalidRuleKind
+        );
         require!(header_enabled == 1, PolicyEngineError::RuleDisabled);
         let entry = read_rule_entry(&ctx.accounts.engine.rules_flat, header_index as usize);
         require!(
@@ -3826,6 +4476,186 @@ mod policy_engine_program {
         Ok(())
     }
 
+    /// Disc 19 — `update_rule_spending_usd_add_feed` (Update 3).
+    ///
+    /// Appends one asset to an existing `KIND_SPENDING_USD` rule:
+    ///   `feed_cache_account` — the Pyth adapter `FeedCache` PDA
+    ///   `decimals`           — the asset's base-unit decimals (SOL=9, USDC=6…)
+    ///
+    /// Owner-signed `OP_SPENDING_USD_ADD_FEED` challenge. Idempotent on
+    /// `feed_cache_account`. `add_rule_spending_usd` (disc 18) creates the rule
+    /// with `feeds_count = 0`; a rule with zero feeds enforces nothing, so this
+    /// is the instruction that makes the spending limit actually gate signing.
+    ///
+    /// Defense-in-depth: the `feed_cache` account is passed in and its `owner`
+    /// is checked against `ALLOWED_ORACLE_OWNERS` (the Pyth adapter) — a feed
+    /// that would always fail at dispatch cannot even be registered.
+    #[instruction(discriminator = 19)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_rule_spending_usd_add_feed(
+        ctx: Ctx<UpdateRuleSpendingUsd>,
+        _init_authority_hash: Address,
+        expected_nonce: u64,
+        _rule_index: u8,
+        feed_cache_account: [u8; 32],
+        decimals: u8,
+    ) -> Result<(), ProgramError> {
+        let current_ts: i64 = ctx.accounts.clock.unix_timestamp.into();
+        let engine_addr = *ctx.accounts.engine.address();
+        let dwallet_addr = *ctx.accounts.dwallet_account.address();
+        let owner_slot = ctx.accounts.engine.owner_slot;
+        let on_chain_nonce: u64 = ctx.accounts.engine.next_admin_nonce.into();
+
+        // Validate rule header is consistent with engine's RuleEntry snapshot.
+        let header_kind = ctx.accounts.rule_pda.kind;
+        let header_index = ctx.accounts.rule_pda.index;
+        let header_enabled = ctx.accounts.rule_pda.enabled;
+        let header_gen: u32 = ctx.accounts.rule_pda.generation.into();
+        require!(
+            header_kind == KIND_SPENDING_USD,
+            PolicyEngineError::InvalidRuleKind
+        );
+        require!(header_enabled == 1, PolicyEngineError::RuleDisabled);
+        let entry = read_rule_entry(&ctx.accounts.engine.rules_flat, header_index as usize);
+        require!(
+            entry.kind == header_kind && entry.generation == header_gen,
+            PolicyEngineError::InvalidRuleHeader
+        );
+
+        // Decimals sanity — bounds 10^decimals so the dispatch conversion can
+        // never overflow u128 (and rejects an obviously bogus asset config).
+        require!(decimals <= 24, PolicyEngineError::SpendingAssetNotAllowed);
+
+        // Defense-in-depth: the feed cache must be owned by the Pyth adapter
+        // (mirrors the dispatch-time owner gate). Passing a wrong/non-existent
+        // account is rejected here instead of silently failing every sign.
+        let fc_view = ctx.accounts.feed_cache.to_account_view();
+        require!(
+            fc_view.address().as_array() == &feed_cache_account,
+            PolicyEngineError::SpendingAssetNotAllowed
+        );
+        require!(
+            is_oracle_owner_allowed(fc_view.owner().as_array()),
+            PolicyEngineError::OracleOwnerMismatch
+        );
+
+        let count: u8 = ctx.accounts.rule_pda.feeds_count;
+        require!(
+            (count as usize) < MAX_SPENDING_USD_FEEDS,
+            PolicyEngineError::TooManyRules
+        );
+
+        // Idempotent: if feed_cache_account already present, succeed without bumping.
+        for i in 0..(count as usize) {
+            let off = i * SPENDING_USD_FEED_BYTES;
+            if ctx.accounts.rule_pda.feeds_flat[off..off + 32] == feed_cache_account {
+                return Ok(());
+            }
+        }
+
+        let mut human_buf = [0u8; MAX_HUMAN_MESSAGE_BYTES];
+        let human_len = human_message::spending_usd_add_feed_message(
+            &mut human_buf,
+            &feed_cache_account,
+            decimals,
+            &engine_addr,
+            &dwallet_addr,
+        )
+        .map_err(PolicyEngineError::from)?;
+        let human = &human_buf[..human_len];
+
+        let new_gen = header_gen.saturating_add(1);
+        let gen_le = new_gen.to_le_bytes();
+        let dec_b = [decimals];
+        let challenge = admin_challenge(
+            OP_SPENDING_USD_ADD_FEED,
+            human,
+            &engine_addr,
+            &dwallet_addr,
+            KIND_SPENDING_USD,
+            header_index,
+            new_gen,
+            on_chain_nonce,
+            &[0u8; 32], // recomputed config_hash carried via extras for visibility.
+            &owner_slot,
+            &[&feed_cache_account, &dec_b, &gen_le],
+        );
+
+        check_sysvar_addr(ctx.accounts.instructions_sysvar.address())?;
+        let sysvar_view = ctx.accounts.instructions_sysvar.to_account_view();
+        let sysvar_data_ref = sysvar_view
+            .try_borrow()
+            .map_err(|_| PolicyEngineError::AuthFailed)?;
+        let new_nonce = verify_owner_admin(
+            expected_nonce,
+            on_chain_nonce,
+            &owner_slot,
+            &challenge,
+            &sysvar_data_ref,
+        )
+        .map_err(PolicyEngineError::from)?;
+        drop(sysvar_data_ref);
+
+        // Append feed entry (33 bytes: account 32 + decimals 1).
+        let off = (count as usize) * SPENDING_USD_FEED_BYTES;
+        ctx.accounts.rule_pda.feeds_flat[off..off + 32].copy_from_slice(&feed_cache_account);
+        ctx.accounts.rule_pda.feeds_flat[off + 32] = decimals;
+        ctx.accounts.rule_pda.feeds_count = count + 1;
+        ctx.accounts.rule_pda.generation = new_gen.into();
+
+        // Recompute config_hash to mirror the new state (caps unchanged).
+        let applies_b = [ctx.accounts.rule_pda.config_applies_to];
+        let new_count = [count + 1];
+        let fresh_b = [ctx.accounts.rule_pda.freshness_seconds_div16];
+        let conf_b = [ctx.accounts.rule_pda.max_confidence_bps_div4];
+        let max_per_tx: u64 = ctx.accounts.rule_pda.max_per_tx_usd.into();
+        let max_per_day: u64 = ctx.accounts.rule_pda.max_per_day_usd.into();
+        let max_per_week: u64 = ctx.accounts.rule_pda.max_per_week_usd.into();
+        let mut caps = [0u8; 24];
+        caps[0..8].copy_from_slice(&max_per_tx.to_le_bytes());
+        caps[8..16].copy_from_slice(&max_per_day.to_le_bytes());
+        caps[16..24].copy_from_slice(&max_per_week.to_le_bytes());
+        let new_hash = hashv(&[
+            b"spending-usd-config-v1",
+            &applies_b,
+            &new_count,
+            &fresh_b,
+            &conf_b,
+            &caps,
+            &ctx.accounts.rule_pda.feeds_flat,
+        ]);
+        ctx.accounts.rule_pda.config_hash = new_hash;
+
+        // Mirror into RuleEntry.
+        let mut entry = entry;
+        entry.generation = new_gen;
+        entry.config_hash = new_hash;
+        write_rule_entry(
+            &mut ctx.accounts.engine.rules_flat,
+            header_index as usize,
+            &entry,
+        );
+        ctx.accounts.engine.next_admin_nonce = new_nonce.into();
+        let cur_egen: u32 = ctx.accounts.engine.rules_generation.into();
+        ctx.accounts.engine.rules_generation = cur_egen
+            .checked_add(1)
+            .ok_or(PolicyEngineError::TooManyRules)?
+            .into();
+
+        ctx.accounts.program.emit_event(
+            &RuleUpdated {
+                engine: engine_addr,
+                ts: current_ts,
+                kind: KIND_SPENDING_USD as u64,
+                rule_index: header_index as u64,
+                generation: new_gen as u64,
+            },
+            &ctx.accounts.event_authority,
+            EventAuthority::BUMP,
+        )?;
+        Ok(())
+    }
+
     /// Disc 126 — `update_rule_fhe_gated_authorities` (C2 audit fix).
     ///
     /// Replaces the FHE authority list of a `KIND_FHE_GATED` rule in one
@@ -3863,18 +4693,14 @@ mod policy_engine_program {
             PolicyEngineError::InvalidRuleKind
         );
         require!(header_enabled == 1, PolicyEngineError::RuleDisabled);
-        let entry = read_rule_entry(
-            &ctx.accounts.engine.rules_flat,
-            header_index as usize,
-        );
+        let entry = read_rule_entry(&ctx.accounts.engine.rules_flat, header_index as usize);
         require!(
             entry.kind == header_kind && entry.generation == header_gen,
             PolicyEngineError::InvalidRuleHeader
         );
 
         require!(
-            new_count as usize > 0
-                && (new_count as usize) <= MAX_FHE_AUTHORITIES,
+            new_count as usize > 0 && (new_count as usize) <= MAX_FHE_AUTHORITIES,
             PolicyEngineError::InvalidRuleHeader
         );
         let count = new_count as usize;
@@ -3883,10 +4709,7 @@ mod policy_engine_program {
             let mut auth = [0u8; 32];
             auth.copy_from_slice(&new_authorities[off..off + 32]);
             // Zero pubkey is never a valid Ed25519 public key.
-            require!(
-                auth != [0u8; 32],
-                PolicyEngineError::InvalidRuleHeader
-            );
+            require!(auth != [0u8; 32], PolicyEngineError::InvalidRuleHeader);
             require!(
                 is_fhe_authority_allowed(&auth),
                 PolicyEngineError::AuthFailed
@@ -3910,10 +4733,9 @@ mod policy_engine_program {
         let gen_le = new_gen.to_le_bytes();
 
         let mut human_buf = [0u8; MAX_HUMAN_MESSAGE_BYTES];
-        let human_len = human_message::allowlist_pause_message(
-            &mut human_buf, &engine_addr, &dwallet_addr,
-        )
-        .map_err(PolicyEngineError::from)?;
+        let human_len =
+            human_message::allowlist_pause_message(&mut human_buf, &engine_addr, &dwallet_addr)
+                .map_err(PolicyEngineError::from)?;
         let human = &human_buf[..human_len];
 
         let challenge = admin_challenge(
@@ -3936,13 +4758,20 @@ mod policy_engine_program {
             .try_borrow()
             .map_err(|_| PolicyEngineError::AuthFailed)?;
         let new_nonce = verify_owner_admin(
-            expected_nonce, on_chain_nonce, &owner_slot, &challenge, &sysvar_data_ref,
+            expected_nonce,
+            on_chain_nonce,
+            &owner_slot,
+            &challenge,
+            &sysvar_data_ref,
         )
         .map_err(PolicyEngineError::from)?;
         drop(sysvar_data_ref);
 
         ctx.accounts.rule_pda.authorities_count = new_count;
-        ctx.accounts.rule_pda.authorities_flat.copy_from_slice(&canon);
+        ctx.accounts
+            .rule_pda
+            .authorities_flat
+            .copy_from_slice(&canon);
         ctx.accounts.rule_pda.generation = new_gen.into();
         ctx.accounts.rule_pda.config_hash = new_hash;
 
@@ -4065,8 +4894,7 @@ mod policy_engine_program {
         );
         // H0 audit fix (2026-05-16): OIDC slot has its own layout
         // (`[4, addr_seed(32), 0]`); the legacy `validate_slot` rejects it.
-        validate_oidc_slot(&primary_slot)
-            .map_err(|_| PolicyEngineError::InvalidOwnerSlot)?;
+        validate_oidc_slot(&primary_slot).map_err(|_| PolicyEngineError::InvalidOwnerSlot)?;
 
         // 2. JWT length bounds.
         let jl = jwt_len as usize;
@@ -4157,9 +4985,18 @@ mod policy_engine_program {
         // 7. Cross-check the JWK entry vs the JWT-derived hashes. Without
         // this, a compromised registry entry could be paired with a JWT
         // whose (iss, aud, kid) don't actually match.
-        require!(parsed.issuer_hash == reg_iss_hash, PolicyEngineError::OidcIssuerMismatch);
-        require!(parsed.audience_hash == reg_aud_hash, PolicyEngineError::OidcAudienceMismatch);
-        require!(parsed.kid_hash == reg_kid_hash, PolicyEngineError::OidcJwkInactive);
+        require!(
+            parsed.issuer_hash == reg_iss_hash,
+            PolicyEngineError::OidcIssuerMismatch
+        );
+        require!(
+            parsed.audience_hash == reg_aud_hash,
+            PolicyEngineError::OidcAudienceMismatch
+        );
+        require!(
+            parsed.kid_hash == reg_kid_hash,
+            PolicyEngineError::OidcJwkInactive
+        );
 
         // M8 audit fix (2026-05-16): the RecoveryRule pins a 16-byte prefix of
         // `(sha256(iss), sha256(aud))` independently of the registry. Defense
@@ -4374,7 +5211,13 @@ mod policy_engine_program {
         invoke_ika_approve_message(
             &ctx.accounts.dwallet_program.to_account_view(),
             &ctx.accounts.cpi_authority.to_account_view(),
-            &ctx.accounts.caller_program.to_account_view(),
+            // F9-COORD: the Ika caller_program must be THIS program's id — Ika
+            // derives the signing authority as PDA(["__ika_cpi_authority"],
+            // caller_program) and requires it to sign. Use the `program`
+            // account (= policy-engine id, executable). The separate
+            // `caller_program` slot stays in the context (now unused) so the
+            // instruction account layout is unchanged.
+            &ctx.accounts.program.to_account_view(),
             cpi_authority_bump,
             &ctx.accounts.coordinator.to_account_view(),
             &ctx.accounts.message_approval.to_account_view(),
@@ -4382,7 +5225,13 @@ mod policy_engine_program {
             &ctx.accounts.payer.to_account_view(),
             &ctx.accounts.system_program.to_account_view(),
             message_digest,
-            metadata_digest,
+            // F9-SIGN: Ika message_metadata_digest = 0 (the signed message carries
+            // no Ika metadata). The Andromeda policy challenge (metadata_digest) is
+            // already enforced above via the request_metadata_digest match, so
+            // binding it into the Ika MessageApproval here is both redundant and
+            // breaks the Ika Sign step (the network derives the approval with empty
+            // metadata → otherwise "MessageApproval PDA not found").
+            [0u8; 32],
             user_pubkey,
             signature_scheme,
             message_approval_bump,
@@ -4509,27 +5358,42 @@ mod policy_engine_program {
         let uses_le = max_uses.to_le_bytes();
         let amount_le = max_amount_per_tx.to_le_bytes();
         let mut human_buf = [0u8; MAX_HUMAN_MESSAGE_BYTES];
-        let human_len = human_message::allowlist_pause_message(
-            &mut human_buf, &engine_addr, &dwallet_addr,
-        ).map_err(PolicyEngineError::from)?;
+        let human_len =
+            human_message::allowlist_pause_message(&mut human_buf, &engine_addr, &dwallet_addr)
+                .map_err(PolicyEngineError::from)?;
         let human = &human_buf[..human_len];
         let challenge = admin_challenge(
-            OP_SESSION_OPEN, human, &engine_addr, &dwallet_addr,
-            KIND_SESSION_KEY, rule_index, entry.generation, on_chain_nonce,
-            &entry.config_hash, &owner_slot,
+            OP_SESSION_OPEN,
+            human,
+            &engine_addr,
+            &dwallet_addr,
+            KIND_SESSION_KEY,
+            rule_index,
+            entry.generation,
+            on_chain_nonce,
+            &entry.config_hash,
+            &owner_slot,
             &[
                 &session_idx_le,
                 session_signer_bytes.as_slice(),
-                &expires_le, &uses_le, &amount_le,
+                &expires_le,
+                &uses_le,
+                &amount_le,
             ],
         );
         check_sysvar_addr(ctx.accounts.instructions_sysvar.address())?;
         let sysvar_view = ctx.accounts.instructions_sysvar.to_account_view();
-        let sysvar_data_ref = sysvar_view.try_borrow()
+        let sysvar_data_ref = sysvar_view
+            .try_borrow()
             .map_err(|_| PolicyEngineError::AuthFailed)?;
         let new_nonce = verify_owner_admin(
-            expected_nonce, on_chain_nonce, &owner_slot, &challenge, &sysvar_data_ref,
-        ).map_err(PolicyEngineError::from)?;
+            expected_nonce,
+            on_chain_nonce,
+            &owner_slot,
+            &challenge,
+            &sysvar_data_ref,
+        )
+        .map_err(PolicyEngineError::from)?;
         drop(sysvar_data_ref);
 
         ctx.accounts.session.set_inner(SessionInner {
@@ -4640,17 +5504,13 @@ mod policy_engine_program {
             let mut allowed = false;
             for i in 0..dest_count {
                 let off = i * 32;
-                if &ctx.accounts.session.destinations_flat[off..off + 32]
-                    == destination.as_slice()
+                if &ctx.accounts.session.destinations_flat[off..off + 32] == destination.as_slice()
                 {
                     allowed = true;
                     break;
                 }
             }
-            require!(
-                allowed,
-                PolicyEngineError::SessionDestinationNotAllowed
-            );
+            require!(allowed, PolicyEngineError::SessionDestinationNotAllowed);
         }
 
         // metadata_digest binding — PATH_SESSION ensures a session-bound
@@ -4665,6 +5525,10 @@ mod policy_engine_program {
             signature_scheme,
             PATH_SESSION,
             rules_generation,
+            // Session path carries its amount in the session challenge, not in
+            // the metadata digest — pass 0/0 for the V2 binding.
+            0,
+            0,
         );
         require!(
             metadata_digest == expected_md,
@@ -4694,7 +5558,13 @@ mod policy_engine_program {
         invoke_ika_approve_message(
             &ctx.accounts.dwallet_program.to_account_view(),
             &ctx.accounts.cpi_authority.to_account_view(),
-            &ctx.accounts.caller_program.to_account_view(),
+            // F9-COORD: the Ika caller_program must be THIS program's id — Ika
+            // derives the signing authority as PDA(["__ika_cpi_authority"],
+            // caller_program) and requires it to sign. Use the `program`
+            // account (= policy-engine id, executable). The separate
+            // `caller_program` slot stays in the context (now unused) so the
+            // instruction account layout is unchanged.
+            &ctx.accounts.program.to_account_view(),
             cpi_authority_bump,
             &ctx.accounts.coordinator.to_account_view(),
             &ctx.accounts.message_approval.to_account_view(),
@@ -4702,7 +5572,13 @@ mod policy_engine_program {
             &ctx.accounts.payer.to_account_view(),
             &ctx.accounts.system_program.to_account_view(),
             message_digest,
-            metadata_digest,
+            // F9-SIGN: Ika message_metadata_digest = 0 (the signed message carries
+            // no Ika metadata). The Andromeda policy challenge (metadata_digest) is
+            // already enforced above via the request_metadata_digest match, so
+            // binding it into the Ika MessageApproval here is both redundant and
+            // breaks the Ika Sign step (the network derives the approval with empty
+            // metadata → otherwise "MessageApproval PDA not found").
+            [0u8; 32],
             user_pubkey,
             signature_scheme,
             message_approval_bump,
@@ -4743,24 +5619,37 @@ mod policy_engine_program {
         let session_idx: u32 = ctx.accounts.session.session_index.into();
 
         let mut human_buf = [0u8; MAX_HUMAN_MESSAGE_BYTES];
-        let human_len = human_message::allowlist_pause_message(
-            &mut human_buf, &engine_addr, &dwallet_addr,
-        ).map_err(PolicyEngineError::from)?;
+        let human_len =
+            human_message::allowlist_pause_message(&mut human_buf, &engine_addr, &dwallet_addr)
+                .map_err(PolicyEngineError::from)?;
         let human = &human_buf[..human_len];
         let idx_le = session_idx.to_le_bytes();
         let challenge = admin_challenge(
-            OP_SESSION_REVOKE, human, &engine_addr, &dwallet_addr,
-            KIND_SESSION_KEY, 0, 0, on_chain_nonce,
-            &[0u8; 32], &owner_slot,
+            OP_SESSION_REVOKE,
+            human,
+            &engine_addr,
+            &dwallet_addr,
+            KIND_SESSION_KEY,
+            0,
+            0,
+            on_chain_nonce,
+            &[0u8; 32],
+            &owner_slot,
             &[session_addr.as_array().as_slice(), &idx_le],
         );
         check_sysvar_addr(ctx.accounts.instructions_sysvar.address())?;
         let sysvar_view = ctx.accounts.instructions_sysvar.to_account_view();
-        let sysvar_data_ref = sysvar_view.try_borrow()
+        let sysvar_data_ref = sysvar_view
+            .try_borrow()
             .map_err(|_| PolicyEngineError::AuthFailed)?;
         let new_nonce = verify_owner_admin(
-            expected_nonce, on_chain_nonce, &owner_slot, &challenge, &sysvar_data_ref,
-        ).map_err(PolicyEngineError::from)?;
+            expected_nonce,
+            on_chain_nonce,
+            &owner_slot,
+            &challenge,
+            &sysvar_data_ref,
+        )
+        .map_err(PolicyEngineError::from)?;
         drop(sysvar_data_ref);
 
         ctx.accounts.session.expires_at_ts = 0i64.into();
@@ -4800,15 +5689,22 @@ mod policy_engine_program {
         let recipient_addr = *ctx.accounts.recipient.address();
 
         let mut human_buf = [0u8; MAX_HUMAN_MESSAGE_BYTES];
-        let human_len = human_message::allowlist_pause_message(
-            &mut human_buf, &engine_addr, &dwallet_addr,
-        ).map_err(PolicyEngineError::from)?;
+        let human_len =
+            human_message::allowlist_pause_message(&mut human_buf, &engine_addr, &dwallet_addr)
+                .map_err(PolicyEngineError::from)?;
         let human = &human_buf[..human_len];
         let idx_le = session_idx.to_le_bytes();
         let challenge = admin_challenge(
-            OP_SESSION_CLOSE, human, &engine_addr, &dwallet_addr,
-            KIND_SESSION_KEY, 0, 0, on_chain_nonce,
-            &[0u8; 32], &owner_slot,
+            OP_SESSION_CLOSE,
+            human,
+            &engine_addr,
+            &dwallet_addr,
+            KIND_SESSION_KEY,
+            0,
+            0,
+            on_chain_nonce,
+            &[0u8; 32],
+            &owner_slot,
             &[
                 session_addr.as_array().as_slice(),
                 &idx_le,
@@ -4817,11 +5713,17 @@ mod policy_engine_program {
         );
         check_sysvar_addr(ctx.accounts.instructions_sysvar.address())?;
         let sysvar_view = ctx.accounts.instructions_sysvar.to_account_view();
-        let sysvar_data_ref = sysvar_view.try_borrow()
+        let sysvar_data_ref = sysvar_view
+            .try_borrow()
             .map_err(|_| PolicyEngineError::AuthFailed)?;
         let _new_nonce = verify_owner_admin(
-            expected_nonce, on_chain_nonce, &owner_slot, &challenge, &sysvar_data_ref,
-        ).map_err(PolicyEngineError::from)?;
+            expected_nonce,
+            on_chain_nonce,
+            &owner_slot,
+            &challenge,
+            &sysvar_data_ref,
+        )
+        .map_err(PolicyEngineError::from)?;
         drop(sysvar_data_ref);
 
         // Close the PDA (transfers lamports to recipient and zeros data).
@@ -4898,24 +5800,37 @@ mod policy_engine_program {
         let session_idx: u32 = ctx.accounts.session.session_index.into();
 
         let mut human_buf = [0u8; MAX_HUMAN_MESSAGE_BYTES];
-        let human_len = human_message::allowlist_pause_message(
-            &mut human_buf, &engine_addr, &dwallet_addr,
-        ).map_err(PolicyEngineError::from)?;
+        let human_len =
+            human_message::allowlist_pause_message(&mut human_buf, &engine_addr, &dwallet_addr)
+                .map_err(PolicyEngineError::from)?;
         let human = &human_buf[..human_len];
         let idx_le = session_idx.to_le_bytes();
         let challenge = admin_challenge(
-            OP_SESSION_ADD_DEST, human, &engine_addr, &dwallet_addr,
-            KIND_SESSION_KEY, 0, 0, on_chain_nonce,
-            &[0u8; 32], &owner_slot,
+            OP_SESSION_ADD_DEST,
+            human,
+            &engine_addr,
+            &dwallet_addr,
+            KIND_SESSION_KEY,
+            0,
+            0,
+            on_chain_nonce,
+            &[0u8; 32],
+            &owner_slot,
             &[session_addr.as_array().as_slice(), &idx_le, &destination],
         );
         check_sysvar_addr(ctx.accounts.instructions_sysvar.address())?;
         let sysvar_view = ctx.accounts.instructions_sysvar.to_account_view();
-        let sysvar_data_ref = sysvar_view.try_borrow()
+        let sysvar_data_ref = sysvar_view
+            .try_borrow()
             .map_err(|_| PolicyEngineError::AuthFailed)?;
         let new_nonce = verify_owner_admin(
-            expected_nonce, on_chain_nonce, &owner_slot, &challenge, &sysvar_data_ref,
-        ).map_err(PolicyEngineError::from)?;
+            expected_nonce,
+            on_chain_nonce,
+            &owner_slot,
+            &challenge,
+            &sysvar_data_ref,
+        )
+        .map_err(PolicyEngineError::from)?;
         drop(sysvar_data_ref);
 
         let count = ctx.accounts.session.destinations_count as usize;
@@ -4959,24 +5874,37 @@ mod policy_engine_program {
         let session_idx: u32 = ctx.accounts.session.session_index.into();
 
         let mut human_buf = [0u8; MAX_HUMAN_MESSAGE_BYTES];
-        let human_len = human_message::allowlist_pause_message(
-            &mut human_buf, &engine_addr, &dwallet_addr,
-        ).map_err(PolicyEngineError::from)?;
+        let human_len =
+            human_message::allowlist_pause_message(&mut human_buf, &engine_addr, &dwallet_addr)
+                .map_err(PolicyEngineError::from)?;
         let human = &human_buf[..human_len];
         let idx_le = session_idx.to_le_bytes();
         let challenge = admin_challenge(
-            OP_SESSION_REMOVE_DEST, human, &engine_addr, &dwallet_addr,
-            KIND_SESSION_KEY, 0, 0, on_chain_nonce,
-            &[0u8; 32], &owner_slot,
+            OP_SESSION_REMOVE_DEST,
+            human,
+            &engine_addr,
+            &dwallet_addr,
+            KIND_SESSION_KEY,
+            0,
+            0,
+            on_chain_nonce,
+            &[0u8; 32],
+            &owner_slot,
             &[session_addr.as_array().as_slice(), &idx_le, &destination],
         );
         check_sysvar_addr(ctx.accounts.instructions_sysvar.address())?;
         let sysvar_view = ctx.accounts.instructions_sysvar.to_account_view();
-        let sysvar_data_ref = sysvar_view.try_borrow()
+        let sysvar_data_ref = sysvar_view
+            .try_borrow()
             .map_err(|_| PolicyEngineError::AuthFailed)?;
         let new_nonce = verify_owner_admin(
-            expected_nonce, on_chain_nonce, &owner_slot, &challenge, &sysvar_data_ref,
-        ).map_err(PolicyEngineError::from)?;
+            expected_nonce,
+            on_chain_nonce,
+            &owner_slot,
+            &challenge,
+            &sysvar_data_ref,
+        )
+        .map_err(PolicyEngineError::from)?;
         drop(sysvar_data_ref);
 
         let count = ctx.accounts.session.destinations_count as usize;
@@ -4986,14 +5914,10 @@ mod policy_engine_program {
                 let last = (count - 1) * 32;
                 if i != count - 1 {
                     let mut tail = [0u8; 32];
-                    tail.copy_from_slice(
-                        &ctx.accounts.session.destinations_flat[last..last + 32],
-                    );
-                    ctx.accounts.session.destinations_flat[off..off + 32]
-                        .copy_from_slice(&tail);
+                    tail.copy_from_slice(&ctx.accounts.session.destinations_flat[last..last + 32]);
+                    ctx.accounts.session.destinations_flat[off..off + 32].copy_from_slice(&tail);
                 }
-                ctx.accounts.session.destinations_flat[last..last + 32]
-                    .copy_from_slice(&[0u8; 32]);
+                ctx.accounts.session.destinations_flat[last..last + 32].copy_from_slice(&[0u8; 32]);
                 ctx.accounts.session.destinations_count = (count - 1) as u8;
                 ctx.accounts.session.next_admin_nonce = new_nonce.into();
                 return Ok(());
@@ -5023,8 +5947,7 @@ mod policy_engine_program {
         let owner_slot = ctx.accounts.engine.owner_slot;
         let on_chain_nonce: u64 = ctx.accounts.engine.next_admin_nonce.into();
 
-        validate_slot(&member_slot)
-            .map_err(|_| PolicyEngineError::InvalidOwnerSlot)?;
+        validate_slot(&member_slot).map_err(|_| PolicyEngineError::InvalidOwnerSlot)?;
         require!(
             member_slot[0] == SCHEME_ED25519
                 || member_slot[0] == SCHEME_SECP256K1
@@ -5047,24 +5970,37 @@ mod policy_engine_program {
 
         let new_generation = entry.generation.saturating_add(1);
         let mut human_buf = [0u8; MAX_HUMAN_MESSAGE_BYTES];
-        let human_len = human_message::allowlist_pause_message(
-            &mut human_buf, &engine_addr, &dwallet_addr,
-        ).map_err(PolicyEngineError::from)?;
+        let human_len =
+            human_message::allowlist_pause_message(&mut human_buf, &engine_addr, &dwallet_addr)
+                .map_err(PolicyEngineError::from)?;
         let human = &human_buf[..human_len];
         let gen_le = new_generation.to_le_bytes();
         let challenge = admin_challenge(
-            OP_RECOVERY_ADD_MEMBER, human, &engine_addr, &dwallet_addr,
-            KIND_RECOVERY, rule_index, new_generation, on_chain_nonce,
-            &entry.config_hash, &owner_slot,
+            OP_RECOVERY_ADD_MEMBER,
+            human,
+            &engine_addr,
+            &dwallet_addr,
+            KIND_RECOVERY,
+            rule_index,
+            new_generation,
+            on_chain_nonce,
+            &entry.config_hash,
+            &owner_slot,
             &[&member_slot, &gen_le],
         );
         check_sysvar_addr(ctx.accounts.instructions_sysvar.address())?;
         let sysvar_view = ctx.accounts.instructions_sysvar.to_account_view();
-        let sysvar_data_ref = sysvar_view.try_borrow()
+        let sysvar_data_ref = sysvar_view
+            .try_borrow()
             .map_err(|_| PolicyEngineError::AuthFailed)?;
         let new_nonce = verify_owner_admin(
-            expected_nonce, on_chain_nonce, &owner_slot, &challenge, &sysvar_data_ref,
-        ).map_err(PolicyEngineError::from)?;
+            expected_nonce,
+            on_chain_nonce,
+            &owner_slot,
+            &challenge,
+            &sysvar_data_ref,
+        )
+        .map_err(PolicyEngineError::from)?;
         drop(sysvar_data_ref);
 
         let count = ctx.accounts.rule_pda.members_count as usize;
@@ -5132,24 +6068,37 @@ mod policy_engine_program {
 
         let new_generation = entry.generation.saturating_add(1);
         let mut human_buf = [0u8; MAX_HUMAN_MESSAGE_BYTES];
-        let human_len = human_message::allowlist_pause_message(
-            &mut human_buf, &engine_addr, &dwallet_addr,
-        ).map_err(PolicyEngineError::from)?;
+        let human_len =
+            human_message::allowlist_pause_message(&mut human_buf, &engine_addr, &dwallet_addr)
+                .map_err(PolicyEngineError::from)?;
         let human = &human_buf[..human_len];
         let gen_le = new_generation.to_le_bytes();
         let challenge = admin_challenge(
-            OP_RECOVERY_REMOVE_MEMBER, human, &engine_addr, &dwallet_addr,
-            KIND_RECOVERY, rule_index, new_generation, on_chain_nonce,
-            &entry.config_hash, &owner_slot,
+            OP_RECOVERY_REMOVE_MEMBER,
+            human,
+            &engine_addr,
+            &dwallet_addr,
+            KIND_RECOVERY,
+            rule_index,
+            new_generation,
+            on_chain_nonce,
+            &entry.config_hash,
+            &owner_slot,
             &[&member_slot, &gen_le],
         );
         check_sysvar_addr(ctx.accounts.instructions_sysvar.address())?;
         let sysvar_view = ctx.accounts.instructions_sysvar.to_account_view();
-        let sysvar_data_ref = sysvar_view.try_borrow()
+        let sysvar_data_ref = sysvar_view
+            .try_borrow()
             .map_err(|_| PolicyEngineError::AuthFailed)?;
         let new_nonce = verify_owner_admin(
-            expected_nonce, on_chain_nonce, &owner_slot, &challenge, &sysvar_data_ref,
-        ).map_err(PolicyEngineError::from)?;
+            expected_nonce,
+            on_chain_nonce,
+            &owner_slot,
+            &challenge,
+            &sysvar_data_ref,
+        )
+        .map_err(PolicyEngineError::from)?;
         drop(sysvar_data_ref);
 
         let count = ctx.accounts.rule_pda.members_count as usize;
@@ -5214,24 +6163,37 @@ mod policy_engine_program {
 
         let new_generation = entry.generation.saturating_add(1);
         let mut human_buf = [0u8; MAX_HUMAN_MESSAGE_BYTES];
-        let human_len = human_message::allowlist_pause_message(
-            &mut human_buf, &engine_addr, &dwallet_addr,
-        ).map_err(PolicyEngineError::from)?;
+        let human_len =
+            human_message::allowlist_pause_message(&mut human_buf, &engine_addr, &dwallet_addr)
+                .map_err(PolicyEngineError::from)?;
         let human = &human_buf[..human_len];
         let gen_le = new_generation.to_le_bytes();
         let challenge = admin_challenge(
-            OP_RECOVERY_ADD_DEST, human, &engine_addr, &dwallet_addr,
-            KIND_RECOVERY, rule_index, new_generation, on_chain_nonce,
-            &entry.config_hash, &owner_slot,
+            OP_RECOVERY_ADD_DEST,
+            human,
+            &engine_addr,
+            &dwallet_addr,
+            KIND_RECOVERY,
+            rule_index,
+            new_generation,
+            on_chain_nonce,
+            &entry.config_hash,
+            &owner_slot,
             &[&destination, &gen_le],
         );
         check_sysvar_addr(ctx.accounts.instructions_sysvar.address())?;
         let sysvar_view = ctx.accounts.instructions_sysvar.to_account_view();
-        let sysvar_data_ref = sysvar_view.try_borrow()
+        let sysvar_data_ref = sysvar_view
+            .try_borrow()
             .map_err(|_| PolicyEngineError::AuthFailed)?;
         let new_nonce = verify_owner_admin(
-            expected_nonce, on_chain_nonce, &owner_slot, &challenge, &sysvar_data_ref,
-        ).map_err(PolicyEngineError::from)?;
+            expected_nonce,
+            on_chain_nonce,
+            &owner_slot,
+            &challenge,
+            &sysvar_data_ref,
+        )
+        .map_err(PolicyEngineError::from)?;
         drop(sysvar_data_ref);
 
         let count = ctx.accounts.rule_pda.destinations_count as usize;
@@ -5289,24 +6251,37 @@ mod policy_engine_program {
 
         let new_generation = entry.generation.saturating_add(1);
         let mut human_buf = [0u8; MAX_HUMAN_MESSAGE_BYTES];
-        let human_len = human_message::allowlist_pause_message(
-            &mut human_buf, &engine_addr, &dwallet_addr,
-        ).map_err(PolicyEngineError::from)?;
+        let human_len =
+            human_message::allowlist_pause_message(&mut human_buf, &engine_addr, &dwallet_addr)
+                .map_err(PolicyEngineError::from)?;
         let human = &human_buf[..human_len];
         let gen_le = new_generation.to_le_bytes();
         let challenge = admin_challenge(
-            OP_RECOVERY_REMOVE_DEST, human, &engine_addr, &dwallet_addr,
-            KIND_RECOVERY, rule_index, new_generation, on_chain_nonce,
-            &entry.config_hash, &owner_slot,
+            OP_RECOVERY_REMOVE_DEST,
+            human,
+            &engine_addr,
+            &dwallet_addr,
+            KIND_RECOVERY,
+            rule_index,
+            new_generation,
+            on_chain_nonce,
+            &entry.config_hash,
+            &owner_slot,
             &[&destination, &gen_le],
         );
         check_sysvar_addr(ctx.accounts.instructions_sysvar.address())?;
         let sysvar_view = ctx.accounts.instructions_sysvar.to_account_view();
-        let sysvar_data_ref = sysvar_view.try_borrow()
+        let sysvar_data_ref = sysvar_view
+            .try_borrow()
             .map_err(|_| PolicyEngineError::AuthFailed)?;
         let new_nonce = verify_owner_admin(
-            expected_nonce, on_chain_nonce, &owner_slot, &challenge, &sysvar_data_ref,
-        ).map_err(PolicyEngineError::from)?;
+            expected_nonce,
+            on_chain_nonce,
+            &owner_slot,
+            &challenge,
+            &sysvar_data_ref,
+        )
+        .map_err(PolicyEngineError::from)?;
         drop(sysvar_data_ref);
 
         let count = ctx.accounts.rule_pda.destinations_count as usize;
@@ -5316,9 +6291,7 @@ mod policy_engine_program {
                 let last = (count - 1) * 32;
                 if i != count - 1 {
                     let mut tail = [0u8; 32];
-                    tail.copy_from_slice(
-                        &ctx.accounts.rule_pda.destinations[last..last + 32],
-                    );
+                    tail.copy_from_slice(&ctx.accounts.rule_pda.destinations[last..last + 32]);
                     ctx.accounts.rule_pda.destinations[off..off + 32].copy_from_slice(&tail);
                 }
                 ctx.accounts.rule_pda.destinations[last..last + 32].copy_from_slice(&[0u8; 32]);
@@ -5423,17 +6396,12 @@ mod policy_engine_program {
             let mut allowed = false;
             for i in 0..dest_count {
                 let off = i * 32;
-                if &ctx.accounts.rule_pda.destinations[off..off + 32]
-                    == destination.as_slice()
-                {
+                if &ctx.accounts.rule_pda.destinations[off..off + 32] == destination.as_slice() {
                     allowed = true;
                     break;
                 }
             }
-            require!(
-                allowed,
-                PolicyEngineError::RecoveryDestinationNotAllowed
-            );
+            require!(allowed, PolicyEngineError::RecoveryDestinationNotAllowed);
         }
 
         // Daily-limit enforcement (when set).
@@ -5491,9 +6459,7 @@ mod policy_engine_program {
             .map_err(|_| PolicyEngineError::AuthFailed)?;
         let scheme = primary_slot[0];
         require!(
-            scheme == SCHEME_ED25519
-                || scheme == SCHEME_SECP256K1
-                || scheme == SCHEME_SECP256R1,
+            scheme == SCHEME_ED25519 || scheme == SCHEME_SECP256K1 || scheme == SCHEME_SECP256R1,
             PolicyEngineError::UnsupportedScheme
         );
         verify_signature(VerifyInput {
@@ -5516,7 +6482,13 @@ mod policy_engine_program {
         invoke_ika_approve_message(
             &ctx.accounts.dwallet_program.to_account_view(),
             &ctx.accounts.cpi_authority.to_account_view(),
-            &ctx.accounts.caller_program.to_account_view(),
+            // F9-COORD: the Ika caller_program must be THIS program's id — Ika
+            // derives the signing authority as PDA(["__ika_cpi_authority"],
+            // caller_program) and requires it to sign. Use the `program`
+            // account (= policy-engine id, executable). The separate
+            // `caller_program` slot stays in the context (now unused) so the
+            // instruction account layout is unchanged.
+            &ctx.accounts.program.to_account_view(),
             cpi_authority_bump,
             &ctx.accounts.coordinator.to_account_view(),
             &ctx.accounts.message_approval.to_account_view(),
@@ -5524,7 +6496,13 @@ mod policy_engine_program {
             &ctx.accounts.payer.to_account_view(),
             &ctx.accounts.system_program.to_account_view(),
             message_digest,
-            metadata_digest,
+            // F9-SIGN: Ika message_metadata_digest = 0 (the signed message carries
+            // no Ika metadata). The Andromeda policy challenge (metadata_digest) is
+            // already enforced above via the request_metadata_digest match, so
+            // binding it into the Ika MessageApproval here is both redundant and
+            // breaks the Ika Sign step (the network derives the approval with empty
+            // metadata → otherwise "MessageApproval PDA not found").
+            [0u8; 32],
             user_pubkey,
             signature_scheme,
             message_approval_bump,
@@ -5629,9 +6607,7 @@ mod policy_engine_program {
             .map_err(|_| PolicyEngineError::AuthFailed)?;
         let scheme = primary_slot[0];
         require!(
-            scheme == SCHEME_ED25519
-                || scheme == SCHEME_SECP256K1
-                || scheme == SCHEME_SECP256R1,
+            scheme == SCHEME_ED25519 || scheme == SCHEME_SECP256K1 || scheme == SCHEME_SECP256R1,
             PolicyEngineError::UnsupportedScheme
         );
         verify_signature(VerifyInput {
@@ -5698,10 +6674,7 @@ mod policy_engine_program {
             PolicyEngineError::GenericError
         );
         let expires_at: i64 = ctx.accounts.session.expires_at.into();
-        require!(
-            current_ts < expires_at,
-            PolicyEngineError::SessionExpired
-        );
+        require!(current_ts < expires_at, PolicyEngineError::SessionExpired);
 
         let mc = ctx.accounts.session.member_count_snapshot;
         require!(
@@ -5711,16 +6684,11 @@ mod policy_engine_program {
 
         let bit = 1u16 << (member_index as u16);
         let bitmap: u16 = ctx.accounts.session.contributions_bitmap.into();
-        require!(
-            (bitmap & bit) == 0,
-            PolicyEngineError::GenericError
-        );
+        require!((bitmap & bit) == 0, PolicyEngineError::GenericError);
 
         let off = (member_index as usize) * MEMBER_SLOT_LEN;
         let mut slot = [0u8; MEMBER_SLOT_LEN];
-        slot.copy_from_slice(
-            &ctx.accounts.session.members_snapshot[off..off + MEMBER_SLOT_LEN],
-        );
+        slot.copy_from_slice(&ctx.accounts.session.members_snapshot[off..off + MEMBER_SLOT_LEN]);
         validate_slot(&slot).map_err(|_| PolicyEngineError::InvalidOwnerSlot)?;
 
         let session_addr = *ctx.accounts.session.address();
@@ -5755,9 +6723,7 @@ mod policy_engine_program {
             .map_err(|_| PolicyEngineError::AuthFailed)?;
         let scheme = slot[0];
         require!(
-            scheme == SCHEME_ED25519
-                || scheme == SCHEME_SECP256K1
-                || scheme == SCHEME_SECP256R1,
+            scheme == SCHEME_ED25519 || scheme == SCHEME_SECP256K1 || scheme == SCHEME_SECP256R1,
             PolicyEngineError::UnsupportedScheme
         );
         verify_signature(VerifyInput {
@@ -5804,10 +6770,7 @@ mod policy_engine_program {
             PolicyEngineError::GenericError
         );
         let expires_at: i64 = ctx.accounts.session.expires_at.into();
-        require!(
-            current_ts < expires_at,
-            PolicyEngineError::SessionExpired
-        );
+        require!(current_ts < expires_at, PolicyEngineError::SessionExpired);
 
         let mc = ctx.accounts.session.member_count_snapshot;
         require!(
@@ -5817,16 +6780,11 @@ mod policy_engine_program {
 
         let bit = 1u16 << (member_index as u16);
         let bitmap: u16 = ctx.accounts.session.contributions_bitmap.into();
-        require!(
-            (bitmap & bit) == 0,
-            PolicyEngineError::GenericError
-        );
+        require!((bitmap & bit) == 0, PolicyEngineError::GenericError);
 
         let off = (member_index as usize) * MEMBER_SLOT_LEN;
         let mut slot = [0u8; MEMBER_SLOT_LEN];
-        slot.copy_from_slice(
-            &ctx.accounts.session.members_snapshot[off..off + MEMBER_SLOT_LEN],
-        );
+        slot.copy_from_slice(&ctx.accounts.session.members_snapshot[off..off + MEMBER_SLOT_LEN]);
         validate_slot(&slot).map_err(|_| PolicyEngineError::InvalidOwnerSlot)?;
         require!(
             slot[0] == SCHEME_WEBAUTHN,
@@ -5941,14 +6899,15 @@ mod policy_engine_program {
         let expires_at: i64 = ctx.accounts.session.expires_at.into();
         require!(current_ts < expires_at, PolicyEngineError::SessionExpired);
         require!(
-            ctx.accounts.session.contributions_count
-                >= ctx.accounts.session.threshold_snapshot,
+            ctx.accounts.session.contributions_count >= ctx.accounts.session.threshold_snapshot,
             PolicyEngineError::RecoveryQuorumNotReached
         );
 
         // Snapshot fields needed below before we borrow rule_pda mutably.
+        // (F9-SIGN: session.metadata_digest is no longer snapshotted — the Ika
+        // approve_message now uses a zero message_metadata_digest; the session's
+        // own challenge binding stays enforced via open/contribute.)
         let message_digest = ctx.accounts.session.message_digest;
-        let metadata_digest = ctx.accounts.session.metadata_digest;
         let user_pubkey = ctx.accounts.session.user_pubkey;
         let signature_scheme: u16 = ctx.accounts.session.signature_scheme.into();
         let message_approval_bump = ctx.accounts.session.message_approval_bump;
@@ -5965,17 +6924,12 @@ mod policy_engine_program {
             let mut allowed = false;
             for i in 0..dest_count {
                 let off = i * 32;
-                if &ctx.accounts.rule_pda.destinations[off..off + 32]
-                    == destination.as_slice()
-                {
+                if &ctx.accounts.rule_pda.destinations[off..off + 32] == destination.as_slice() {
                     allowed = true;
                     break;
                 }
             }
-            require!(
-                allowed,
-                PolicyEngineError::RecoveryDestinationNotAllowed
-            );
+            require!(allowed, PolicyEngineError::RecoveryDestinationNotAllowed);
         }
 
         // Daily-limit (state on RecoveryRule, shared across sessions).
@@ -6030,7 +6984,13 @@ mod policy_engine_program {
         invoke_ika_approve_message(
             &ctx.accounts.dwallet_program.to_account_view(),
             &ctx.accounts.cpi_authority.to_account_view(),
-            &ctx.accounts.caller_program.to_account_view(),
+            // F9-COORD: the Ika caller_program must be THIS program's id — Ika
+            // derives the signing authority as PDA(["__ika_cpi_authority"],
+            // caller_program) and requires it to sign. Use the `program`
+            // account (= policy-engine id, executable). The separate
+            // `caller_program` slot stays in the context (now unused) so the
+            // instruction account layout is unchanged.
+            &ctx.accounts.program.to_account_view(),
             cpi_authority_bump,
             &ctx.accounts.coordinator.to_account_view(),
             &ctx.accounts.message_approval.to_account_view(),
@@ -6038,7 +6998,13 @@ mod policy_engine_program {
             &ctx.accounts.payer.to_account_view(),
             &ctx.accounts.system_program.to_account_view(),
             message_digest,
-            metadata_digest,
+            // F9-SIGN: Ika message_metadata_digest = 0 (the signed message carries
+            // no Ika metadata). The Andromeda policy challenge (metadata_digest) is
+            // already enforced above via the request_metadata_digest match, so
+            // binding it into the Ika MessageApproval here is both redundant and
+            // breaks the Ika Sign step (the network derives the approval with empty
+            // metadata → otherwise "MessageApproval PDA not found").
+            [0u8; 32],
             user_pubkey,
             signature_scheme,
             message_approval_bump,
@@ -6138,8 +7104,7 @@ mod policy_engine_program {
             primary_slot[0] == SCHEME_WEBAUTHN,
             PolicyEngineError::UnsupportedScheme
         );
-        validate_slot(&primary_slot)
-            .map_err(|_| PolicyEngineError::InvalidOwnerSlot)?;
+        validate_slot(&primary_slot).map_err(|_| PolicyEngineError::InvalidOwnerSlot)?;
 
         // 2. WebAuthn payload bounds.
         let auth_len = webauthn_auth_data_len as usize;
@@ -6352,7 +7317,13 @@ mod policy_engine_program {
         invoke_ika_approve_message(
             &ctx.accounts.dwallet_program.to_account_view(),
             &ctx.accounts.cpi_authority.to_account_view(),
-            &ctx.accounts.caller_program.to_account_view(),
+            // F9-COORD: the Ika caller_program must be THIS program's id — Ika
+            // derives the signing authority as PDA(["__ika_cpi_authority"],
+            // caller_program) and requires it to sign. Use the `program`
+            // account (= policy-engine id, executable). The separate
+            // `caller_program` slot stays in the context (now unused) so the
+            // instruction account layout is unchanged.
+            &ctx.accounts.program.to_account_view(),
             cpi_authority_bump,
             &ctx.accounts.coordinator.to_account_view(),
             &ctx.accounts.message_approval.to_account_view(),
@@ -6360,7 +7331,13 @@ mod policy_engine_program {
             &ctx.accounts.payer.to_account_view(),
             &ctx.accounts.system_program.to_account_view(),
             message_digest,
-            metadata_digest,
+            // F9-SIGN: Ika message_metadata_digest = 0 (the signed message carries
+            // no Ika metadata). The Andromeda policy challenge (metadata_digest) is
+            // already enforced above via the request_metadata_digest match, so
+            // binding it into the Ika MessageApproval here is both redundant and
+            // breaks the Ika Sign step (the network derives the approval with empty
+            // metadata → otherwise "MessageApproval PDA not found").
+            [0u8; 32],
             user_pubkey,
             signature_scheme,
             message_approval_bump,
@@ -6461,12 +7438,12 @@ pub struct RequestSignature {
     pub system_program: Program<SystemProgram>,
     pub event_authority: EventAuthority,
     pub program: Program<PolicyEngineProgram>, // generated by #[program] mod policy_engine_program
-    // F8a: sub-PDAs for active rules travel as trailing `remaining_accounts`
-    // (read via `CtxWithRemaining::remaining_accounts()`). One account per
-    // active slot, in ascending `rule_index` order. Each account must be
-    // writable so kinds with runtime counters (Velocity, SessionKey, Recovery)
-    // can write back through `data_ptr()`. Read-only kinds (Allowlist, Oracle,
-    // TimeLock) simply don't mutate.
+                                               // F8a: sub-PDAs for active rules travel as trailing `remaining_accounts`
+                                               // (read via `CtxWithRemaining::remaining_accounts()`). One account per
+                                               // active slot, in ascending `rule_index` order. Each account must be
+                                               // writable so kinds with runtime counters (Velocity, SessionKey, Recovery)
+                                               // can write back through `data_ptr()`. Read-only kinds (Allowlist, Oracle,
+                                               // TimeLock) simply don't mutate.
 }
 
 #[derive(Accounts)]
@@ -6600,6 +7577,37 @@ pub struct UpdateRuleOracle {
 
 #[derive(Accounts)]
 #[instruction(init_authority_hash: Address, _expected_nonce: u64, rule_index: u8)]
+pub struct UpdateRuleSpendingUsd {
+    pub dwallet_account: UncheckedAccount,
+
+    #[account(mut, address = PolicyEngine::seeds(
+        dwallet_account.address(),
+        &init_authority_hash
+    ))]
+    pub engine: Account<PolicyEngine>,
+
+    #[account(mut, address = SpendingUsdRule::seeds(
+        engine.address(),
+        rule_index
+    ))]
+    pub rule_pda: Account<SpendingUsdRule>,
+
+    /// The Pyth adapter `FeedCache` PDA being registered. Read-only; only its
+    /// address + owner are checked (defense-in-depth, see disc 19).
+    pub feed_cache: UncheckedAccount,
+
+    #[account(mut)]
+    pub payer: Signer,
+
+    pub instructions_sysvar: UncheckedAccount,
+    pub clock: Sysvar<Clock>,
+    pub system_program: Program<SystemProgram>,
+    pub event_authority: EventAuthority,
+    pub program: Program<PolicyEngineProgram>,
+}
+
+#[derive(Accounts)]
+#[instruction(init_authority_hash: Address, _expected_nonce: u64, rule_index: u8)]
 pub struct AddRuleVelocity {
     pub dwallet_account: UncheckedAccount,
 
@@ -6633,14 +7641,14 @@ macro_rules! add_rule_accounts {
         pub struct $name {
             pub dwallet_account: UncheckedAccount,
             #[account(mut, address = PolicyEngine::seeds(
-                dwallet_account.address(),
-                &init_authority_hash
-            ))]
+                        dwallet_account.address(),
+                        &init_authority_hash
+                    ))]
             pub engine: Account<PolicyEngine>,
             #[account(init, payer = payer, address = $rule_ty::seeds(
-                engine.address(),
-                rule_index
-            ))]
+                        engine.address(),
+                        rule_index
+                    ))]
             pub rule_pda: Account<$rule_ty>,
             #[account(mut)]
             pub payer: Signer,
@@ -6688,6 +7696,7 @@ add_rule_accounts!(AddRuleOracle, OracleRule);
 add_rule_accounts!(AddRulePasskey, PasskeyRule);
 add_rule_accounts!(AddRuleFheGated, FheGatedRule);
 add_rule_accounts!(AddRuleSessionKey, SessionKeyRule);
+add_rule_accounts!(AddRuleSpendingUsd, SpendingUsdRule);
 
 #[derive(Accounts)]
 #[instruction(init_authority_hash: Address, _expected_nonce: u64, rule_index: u8)]
