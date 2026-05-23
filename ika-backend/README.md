@@ -49,6 +49,11 @@ ika-backend/
 │   │   ├── preprocess.ts           # Per-chain message/tx envelopes (EIP-191, Sui/IOTA intent, Tezos watermark, …)
 │   │   ├── digest.ts               # On-chain MessageApproval.message_digest — keccak256(message) for EVM + EdDSA (Solana/Sui scheme 5); sha256/double-sha256/blake2b kept only for the non-keccak ECDSA Bitcoin/Zcash schemes
 │   │   └── prepare.ts              # prepare-message = preprocessed bytes + on-chain digest
+│   ├── risk/                       # Transaction-risk advisory engine (consumed by the gateway)
+│   │   ├── decode.ts               # Per-chain calldata decode + EVM tx parse + structured effects
+│   │   ├── simulate.ts             # Real simulation (EVM eth_call + estimateGas / Solana simulateTransaction); digest binding
+│   │   ├── ssrf.ts                 # SSRF guard for client-provided RPC URLs
+│   │   └── types.ts                # AssetChange / ApprovalGrant / ContractCall / TransactionSimulation
 │   ├── clients/
 │   │   ├── ika/                    # transfer-ownership instruction codec
 │   │   └── policyEngine/           # Codecs + instructions + program PDA for PolicyEngine v3
@@ -99,6 +104,20 @@ Alpha 1; the response carries the disclaimer.
 - `POST /v1/dwallet/{dkg,sign,presign,future-sign,re-encrypt-share,make-share-public}/submit`
 - `POST /v1/dwallet/future-sign/complete/submit`
 - `GET  /v1/dwallet/presigns/:userPubkey` — `:userPubkey` is base64
+
+### Risk simulation (internal)
+
+Consumed only by the gateway's transaction-risk advisory (`/v1/policy/risk/evaluate`). Read-only,
+stateless, custody-free. Not mirrored as an MCP tool.
+
+| Route | Notes |
+|-------|-------|
+| `POST /v1/dwallet/simulate` | `{ chain_id, payload_hex, kind, expected_digest_hex, dwallet_public_key_hex?, rpc_url? }`. Recomputes the digest and **refuses to simulate** if it doesn't match `expected_digest_hex` (so the analysis always describes the exact tx being signed), then decodes + simulates. Returns `{ digest_matches, actual_digest_hex, destination, verified, effects_extracted, calldata_risk, simulation: { ok, will_revert, asset_changes, approvals, calls, estimated_gas, warnings }, ... }`. |
+
+- **EVM/Tron:** real `eth_call` (true revert) + `eth_estimateGas` against the client `rpc_url`, plus structured effects decoded from the calldata (native value, ERC-20 `transfer`/`transferFrom`, `approve`, `setApprovalForAll`). A real on-chain revert is told apart from an unreachable RPC.
+- **Solana:** real `simulateTransaction` against the client `rpc_url`.
+- **RPC comes from the client.** Andromeda does not host RPCs; the dev passes `rpc_url`. Without it, the analysis degrades to static calldata decode (no RPC call). The server's core Solana RPC is **never** used to simulate user transactions — it is reserved for internal use (Ika + our programs).
+- **SSRF guard (`src/risk/ssrf.ts`).** The client `rpc_url` is validated before any outbound call: http/https only; `localhost`, private/loopback/link-local/metadata/ULA targets rejected; every DNS-resolved IP checked; redirects disabled. Required because this engine runs on the private network next to sensitive services.
 
 ### Supported destination chains
 
