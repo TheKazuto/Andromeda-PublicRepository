@@ -25,9 +25,9 @@ type checkStatus struct {
 	LatencyMs int    `json:"latencyMs,omitempty"`
 	Error     string `json:"error,omitempty"`
 	Skipped   bool   `json:"skipped,omitempty"`
-	// Detail is a tiny structured payload some checks attach (e.g. gas
-	// sponsor balance). Kept generic so callers can surface specifics
-	// without bloating checkStatus per probe.
+	// Detail is a tiny structured payload a check may attach for ops.
+	// Keep it free of sensitive figures — /health/ready is public, so
+	// anything secret (e.g. the gas sponsor balance) goes on /metrics.
 	Detail map[string]any `json:"detail,omitempty"`
 }
 
@@ -156,16 +156,17 @@ func checkGasSponsor(ctx context.Context, s *Server) checkStatus {
 		// NOT leak the underlying RPC URL/host in the message.
 		return checkStatus{OK: false, Error: "balance probe failed", LatencyMs: latency}
 	}
-	detail := map[string]any{
-		"balance_lamports": bal,
-	}
+	// /health/ready is public, so the raw balance never goes in the response
+	// body — exposing it lets anyone time attacks for when the sponsor runs
+	// low. The figure is recorded on the admin-gated /metrics instead.
+	s.metrics.SetGasSponsorBalance(bal)
 	if !healthy {
 		return checkStatus{
-			OK: false, LatencyMs: latency, Detail: detail,
+			OK: false, LatencyMs: latency,
 			Error: "gas sponsor balance below minimum",
 		}
 	}
-	return checkStatus{OK: true, LatencyMs: latency, Detail: detail}
+	return checkStatus{OK: true, LatencyMs: latency}
 }
 
 func httpStatusText(code int) string {

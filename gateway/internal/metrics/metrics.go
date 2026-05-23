@@ -126,6 +126,11 @@ type Metrics struct {
 	// reached the chain (F5 submitted_unknown). The tx might have landed;
 	// each needs reconciliation by signature. Alert on any increase.
 	GasSponsorSendUnknownTotal prometheus.Counter
+	// GasSponsorBalanceLamports — last observed fee-payer balance. Sampled on
+	// each /health/ready probe (LBs hit it regularly). Lives here, on the
+	// admin-gated /metrics, instead of the public health body so the figure
+	// is not exposed to anonymous callers. Alert when it nears the minimum.
+	GasSponsorBalanceLamports prometheus.Gauge
 
 	// Oracle price-trigger monitor (F7.5) + oracle feed relay. Bounded labels
 	// only (no per-feed/per-tenant) to keep series count flat.
@@ -502,6 +507,10 @@ func New() (*Metrics, http.Handler) {
 		Namespace: "gateway", Subsystem: "gas_sponsor", Name: "send_unknown_total",
 		Help: "Sends that errored after the tx may have been broadcast (submitted_unknown) — reconcile by signature. Alert on increase.",
 	})
+	m.GasSponsorBalanceLamports = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "gateway", Subsystem: "gas_sponsor", Name: "balance_lamports",
+		Help: "Last observed gas sponsor fee-payer balance in lamports, sampled on /health/ready.",
+	})
 
 	m.RiskFeedDownloadFailuresTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "gateway", Subsystem: "risk", Name: "feed_download_failures_total",
@@ -573,6 +582,7 @@ func New() (*Metrics, http.Handler) {
 		m.GasSponsorRequests,
 		m.GasSponsorDuplicateSig,
 		m.GasSponsorSendUnknownTotal,
+		m.GasSponsorBalanceLamports,
 		m.OracleTriggerFiresTotal,
 		m.OracleTriggerExpiredTotal,
 		m.OracleMonitorErrorsTotal,
@@ -701,6 +711,16 @@ func (m *Metrics) RecordSendUnknown() {
 		return
 	}
 	m.GasSponsorSendUnknownTotal.Inc()
+}
+
+// SetGasSponsorBalance records the last observed fee-payer balance (lamports).
+// Called from the /health/ready probe so the figure stays on the admin-gated
+// /metrics rather than the public health body.
+func (m *Metrics) SetGasSponsorBalance(lamports uint64) {
+	if m == nil || m.GasSponsorBalanceLamports == nil {
+		return
+	}
+	m.GasSponsorBalanceLamports.Set(float64(lamports))
 }
 
 // --- audit.SignerObserver adapter ---
