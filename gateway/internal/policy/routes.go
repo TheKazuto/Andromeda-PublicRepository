@@ -65,6 +65,9 @@ type Service struct {
 	presignMetrics    PresignMetrics
 	resolveTenant     func(*http.Request) string
 	presignTTL        time.Duration
+	// presignMaxPerMinute caps sponsored presign dispatches per tenant per
+	// minute (F1 C). 0 disables the cap.
+	presignMaxPerMinute int
 	// presignSem bounds the number of in-flight background prefetch goroutines
 	// so a burst of challenges can't pile up unbounded goroutines (each lives
 	// up to presignDispatchTimeout). Non-blocking: when full, the prefetch is
