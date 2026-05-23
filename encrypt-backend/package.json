@@ -10,8 +10,8 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/server.js",
     "typecheck": "tsc --noEmit",
-    "lint": "echo 'lint not configured yet'",
-    "test": "node --import tsx --test src/routes/decision.test.ts"
+    "lint": "eslint src",
+    "test": "node --import tsx --test 'src/**/*.test.ts'"
   },
   "dependencies": {
     "@encrypt.xyz/pre-alpha-solana-client": "^0.1.1",
@@ -29,8 +29,10 @@
   },
   "devDependencies": {
     "@types/node": "^25.6.0",
+    "eslint": "^10.4.0",
     "tsx": "^4.21.0",
-    "typescript": "^6.0.3"
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.59.4"
   },
   "engines": {
     "node": ">=22.0.0"

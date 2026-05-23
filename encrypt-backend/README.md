@@ -214,10 +214,10 @@ npm run dev          # tsx watch src/server.ts — default port :3010
 | `npm run build` | `tsc` → `dist/`. |
 | `npm start` | Run the compiled server (`dist/server.js`). |
 | `npm run typecheck` | `tsc --noEmit`. |
-| `npm test` | Runs `src/routes/decision.test.ts` via `node --test` + `tsx`. Only the FHE decision canonical encoding is covered today; broader suite pending. |
-| `npm run lint` | Placeholder — no linter configured yet. |
+| `npm test` | Discovers and runs `src/**/*.test.ts` via `node --test` + `tsx`. |
+| `npm run lint` | ESLint (flat config, type-checked): correctness rules the compiler doesn't catch (no floating/misused promises) plus light hygiene. |
 
 ## Required post-deploy operation
 
 1. Register default graph bytecode via `POST /v1/graph/operations/register-bytes`.
-2. Set the active NEK via `POST /v1/nek/override` or the `ENCRYPT_NEK_PUBLIC_KEY_BASE64` env var.
+2. Set the active NEK via `POST /v1/nek/override` or the `ENCRYPT_NEK_PUBLIC_KEY_BASE64` env var. If neither is set, the service resolves the active `NetworkEncryptionKey` on-chain automatically (it requires exactly one active key; otherwise it errors and asks for an explicit override).
