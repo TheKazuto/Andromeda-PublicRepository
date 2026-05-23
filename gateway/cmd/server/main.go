@@ -332,7 +332,6 @@ func main() {
 	if policyV3Svc != nil {
 		// Instantiate the actual risk.Service with registered sources
 		// (blocklist, tenant denylist/allowlist, destination history).
-		// OnchainFreshness is deferred to RT4 (requires per-chain RPC clients).
 
 		// Adapter: converts between store.Store and risk package interfaces.
 		storeAdapter := policy.NewStoreAdapter(db)
@@ -343,7 +342,6 @@ func main() {
 		sources.Register(policy.NewTenantDenylistSource(storeAdapter))
 		sources.Register(policy.NewTenantAllowlistSource(storeAdapter))
 		sources.Register(policy.NewDestHistorySource(storeAdapter))
-		// NOTE: OnchainFreshnessSource deferred to RT4 (requires RPC client + chain detection).
 
 		// Create the core risk.Service with sources.
 		internalRiskSvc := policy.NewRiskService(storeAdapter, logger)
