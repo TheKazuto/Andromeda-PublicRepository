@@ -14,12 +14,14 @@ export const publicHealthRoutes = new Hono();
 
 publicHealthRoutes.get('/', (c) => c.json({ status: 'ok', service: 'encrypt-backend' }));
 
+// `/info` is public, so it omits the internal gRPC endpoint. The program id
+// is public on-chain, so it stays. The gRPC URL is only surfaced on the
+// auth-gated /health/deep/grpc probe below.
 publicHealthRoutes.get('/info', (c) =>
   c.json({
     service: 'encrypt-backend',
     version: '0.1.0',
     network: 'solana-devnet',
-    encryptGrpcUrl: config.ENCRYPT_GRPC_URL,
     encryptProgramId: config.ENCRYPT_PROGRAM_ID,
     cacheEnabled: isCacheEnabled,
   })
