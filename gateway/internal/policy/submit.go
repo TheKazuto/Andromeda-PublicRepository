@@ -633,6 +633,12 @@ type requestSignatureSubmitRequest struct {
 	// rule is active. `asset_index` is capped at MaxSpendingUsdFeeds-1.
 	Amount     uint64 `json:"amount,omitempty"`
 	AssetIndex uint8  `json:"asset_index,omitempty" validate:"max=15"`
+	// Update 6 (ABI V3): the Ika message_metadata_digest (keccak256 of the BCS
+	// signing metadata, from prepare-message). Optional — omit or all-zero for
+	// every chain without signing metadata (the MessageApproval is derived
+	// WITHOUT a metadata seed). Non-zero for Zcash; the gateway then derives the
+	// MessageApproval PDA with the matching metadata seed and forwards it on-chain.
+	IkaMsgMetadataDigestHex string `json:"ika_msg_metadata_digest_hex,omitempty" validate:"omitempty,hex_len=32"`
 }
 
 func (s *Service) requestSignatureSubmit(w http.ResponseWriter, r *http.Request) {
@@ -743,6 +749,11 @@ func (s *Service) assembleRequestSignatureIx(
 	metaDigest, _ := mustHex32(req.MetadataDigestHex)
 	userPK, _ := mustHex32(req.UserPubkeyHex)
 	dest, _ := mustHex32(req.DestinationHex)
+	// Update 6: optional Ika message_metadata_digest (zero when absent).
+	var ikaMetaDigest [32]byte
+	if req.IkaMsgMetadataDigestHex != "" {
+		ikaMetaDigest, _ = mustHex32(req.IkaMsgMetadataDigestHex)
+	}
 
 	ikaPK, err := decodeHex(req.IkaDWalletPubkey)
 	if err != nil || len(ikaPK) == 0 || len(ikaPK) > 96 {
@@ -759,7 +770,7 @@ func (s *Service) assembleRequestSignatureIx(
 		return nil, zero, zero, nil, &buildError{http.StatusInternalServerError, "pda_derivation_failed", err.Error()}
 	}
 	msgApproval, msgApprovalBump, err := MessageApprovalPDA(
-		req.IkaCurve, ikaPK, req.SignatureScheme, msgDigest[:],
+		req.IkaCurve, ikaPK, req.SignatureScheme, msgDigest[:], ikaMetaDigest[:],
 	)
 	if err != nil {
 		return nil, zero, zero, nil, &buildError{http.StatusInternalServerError, "pda_derivation_failed", err.Error()}
@@ -811,28 +822,29 @@ func (s *Service) assembleRequestSignatureIx(
 	callerProgram := solana.NewWallet().PublicKey()
 
 	mainIx, err := RequestSignature(RequestSignatureParams{
-		ProgramID:           s.ProgramID,
-		Engine:              engine,
-		DWallet:             dwallet,
-		Coordinator:         IkaCoordinator(), // Ika DWalletCoordinator PDA (approve_message CPI)
-		MessageApproval:     msgApproval,
-		Payer:               payer,
-		CPIAuthority:        cpiAuth,
-		CallerProgram:       callerProgram,
-		DWalletProgram:      IkaDwalletProgramID,
-		RulePDAs:            rulePDAs,
-		RuleAux:             ruleAux,
-		InitAuthorityHash:   initHash,
-		MessageDigest:       msgDigest,
-		MetadataDigest:      metaDigest,
-		UserPubkey:          userPK,
-		SignatureScheme:     req.SignatureScheme,
-		MessageApprovalBump: msgApprovalBump,
-		CPIAuthorityBump:    cpiBump,
-		Destination:         dest,
-		RulesGenerationSeen: req.RulesGeneration,
-		Amount:              req.Amount,
-		AssetIndex:          req.AssetIndex,
+		ProgramID:            s.ProgramID,
+		Engine:               engine,
+		DWallet:              dwallet,
+		Coordinator:          IkaCoordinator(), // Ika DWalletCoordinator PDA (approve_message CPI)
+		MessageApproval:      msgApproval,
+		Payer:                payer,
+		CPIAuthority:         cpiAuth,
+		CallerProgram:        callerProgram,
+		DWalletProgram:       IkaDwalletProgramID,
+		RulePDAs:             rulePDAs,
+		RuleAux:              ruleAux,
+		InitAuthorityHash:    initHash,
+		MessageDigest:        msgDigest,
+		MetadataDigest:       metaDigest,
+		UserPubkey:           userPK,
+		SignatureScheme:      req.SignatureScheme,
+		MessageApprovalBump:  msgApprovalBump,
+		CPIAuthorityBump:     cpiBump,
+		Destination:          dest,
+		RulesGenerationSeen:  req.RulesGeneration,
+		Amount:               req.Amount,
+		AssetIndex:           req.AssetIndex,
+		IkaMsgMetadataDigest: ikaMetaDigest,
 	})
 	if err != nil {
 		return nil, zero, zero, nil, &buildError{http.StatusInternalServerError, "build_failed", err.Error()}

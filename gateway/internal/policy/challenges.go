@@ -8,6 +8,8 @@ import (
 	"strconv"
 
 	"github.com/gagliardetto/solana-go"
+
+	"github.com/shinkalabs/andromeda-gateway/internal/humanfmt"
 )
 
 // Challenge domains (mirror of contracts/policy-engine/src/lib.rs §6.1).
@@ -229,11 +231,11 @@ func HumanMessageSpendingUsdAdd(maxPerTx, maxPerDay, maxPerWeek uint64, engine, 
 	buf.WriteString(" for dWallet ")
 	buf.WriteString(dwallet.String())
 	buf.WriteString(" maxPerTx ")
-	buf.WriteString(strconv.FormatUint(maxPerTx, 10))
+	buf.WriteString(humanfmt.FormatU64Shifted(maxPerTx, humanfmt.ValueDecimals1e8))
 	buf.WriteString(" maxPerDay ")
-	buf.WriteString(strconv.FormatUint(maxPerDay, 10))
+	buf.WriteString(humanfmt.FormatU64Shifted(maxPerDay, humanfmt.ValueDecimals1e8))
 	buf.WriteString(" maxPerWeek ")
-	buf.WriteString(strconv.FormatUint(maxPerWeek, 10))
+	buf.WriteString(humanfmt.FormatU64Shifted(maxPerWeek, humanfmt.ValueDecimals1e8))
 	return buf.Bytes()
 }
 
@@ -266,9 +268,9 @@ func HumanMessageOracleAddFeed(feedAccount, feedOwner solana.PublicKey, minQ64, 
 	buf.WriteString(" owner ")
 	buf.WriteString(feedOwner.String())
 	buf.WriteString(" min ")
-	buf.WriteString(strconv.FormatInt(minQ64, 10))
+	buf.WriteString(humanfmt.FormatI64Shifted(minQ64, humanfmt.ValueDecimals1e8))
 	buf.WriteString(" max ")
-	buf.WriteString(strconv.FormatInt(maxQ64, 10))
+	buf.WriteString(humanfmt.FormatI64Shifted(maxQ64, humanfmt.ValueDecimals1e8))
 	buf.WriteString(" on oracle policy ")
 	buf.WriteString(engine.String())
 	buf.WriteString(" for dWallet ")

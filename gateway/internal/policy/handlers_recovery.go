@@ -290,7 +290,7 @@ func (s *Service) deriveRecoverAsPrimary(
 		return nil, &httpError{http.StatusInternalServerError, "pda_derivation_failed", err.Error()}
 	}
 	msgApproval, msgApprovalBump, err := MessageApprovalPDA(
-		req.IkaCurve, ikaPK, req.SignatureScheme, msgDigest[:],
+		req.IkaCurve, ikaPK, req.SignatureScheme, msgDigest[:], nil, // recovery: no Ika signing metadata
 	)
 	if err != nil {
 		return nil, &httpError{http.StatusInternalServerError, "pda_derivation_failed", err.Error()}

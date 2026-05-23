@@ -168,6 +168,12 @@ type RequestSignatureParams struct {
 	// signs. 0/0 when no spending rule is active.
 	Amount     uint64
 	AssetIndex uint8
+	// Update 6 (ABI V3): the Ika message_metadata_digest forwarded to
+	// approve_message. Zero (the default) for every chain without signing
+	// metadata — reproduces the prior behaviour. Non-zero for Zcash
+	// (keccak256 of the BCS Blake2bMessageMetadata); the MessageApproval PDA
+	// MUST then be derived with the matching metadata seed (see MessageApprovalPDA).
+	IkaMsgMetadataDigest [32]byte
 }
 
 func RequestSignature(p RequestSignatureParams) (solana.Instruction, error) {
@@ -176,7 +182,7 @@ func RequestSignature(p RequestSignatureParams) (solana.Instruction, error) {
 		return nil, fmt.Errorf("derive event authority: %w", err)
 	}
 
-	data := make([]byte, 0, 1+32+32+32+32+32+2+1+1+32+4)
+	data := make([]byte, 0, 1+32+32+32+32+2+1+1+32+4+8+1+32)
 	data = append(data, DiscRequestSignature)
 	data = append(data, p.InitAuthorityHash[:]...)
 	data = append(data, p.MessageDigest[:]...)
@@ -195,6 +201,8 @@ func RequestSignature(p RequestSignatureParams) (solana.Instruction, error) {
 	binary.LittleEndian.PutUint64(amt[:], p.Amount)
 	data = append(data, amt[:]...)
 	data = append(data, p.AssetIndex)
+	// ABI V3 (Update 6): the Ika message_metadata_digest (32 bytes; zero = none).
+	data = append(data, p.IkaMsgMetadataDigest[:]...)
 
 	accounts := solana.AccountMetaSlice{
 		{PublicKey: p.DWallet, IsSigner: false, IsWritable: false},

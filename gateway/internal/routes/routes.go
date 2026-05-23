@@ -247,6 +247,13 @@ var All = []Route{
 	{Method: "GET", Path: "/v1/oracle/triggers", Upstream: UpstreamLocal, Local: true, Key: "oracle.triggers.list", RateClass: RateClassRead},
 	{Method: "GET", Path: "/v1/oracle/triggers/{id}", Upstream: UpstreamLocal, Local: true, Key: "oracle.triggers.get", RateClass: RateClassRead},
 	{Method: "DELETE", Path: "/v1/oracle/triggers/{id}", Upstream: UpstreamLocal, Local: true, Key: "oracle.triggers.cancel", Idempotent: true, RequiresIdempotencyKey: true, RateClass: RateClassTx},
+
+	// --- Utility (local; display-only helpers) --------------------------------
+	// format-amount renders a raw integer amount (base units) as a
+	// human-readable decimal, using the SAME canonical decimal-shift as the
+	// on-chain signed human messages. Display-only (never a signed message),
+	// no engine, no gas. Auto-registers as MCP tool `format_amount`.
+	{Method: "GET", Path: "/v1/util/format-amount", Upstream: UpstreamLocal, Local: true, Key: "util.format-amount", RateClass: RateClassRead},
 }
 
 // EffectiveRateClass returns r.RateClass with a default of "tx" when

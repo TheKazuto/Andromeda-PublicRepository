@@ -31,6 +31,7 @@ import (
 	"github.com/shinkalabs/andromeda-gateway/internal/store"
 	"github.com/shinkalabs/andromeda-gateway/internal/upstream"
 	"github.com/shinkalabs/andromeda-gateway/internal/usage"
+	"github.com/shinkalabs/andromeda-gateway/internal/util"
 	"github.com/shinkalabs/andromeda-gateway/internal/webhooks"
 )
 
@@ -412,6 +413,19 @@ func (s *Server) Router() http.Handler {
 			oraclerelay.MountRoutes(sub, oraclerelay.RouteOptions{Service: s.oracleRelay})
 		})
 	}
+
+	// ----- Utility helpers (local, display-only) -----
+	// `GET /v1/util/format-amount` renders raw amounts as human-readable
+	// decimals (same canonical shift as the on-chain human messages). No
+	// dependencies, no engine, no gas — always mounted. Read scope + quota
+	// like any cheap read; auto-registers as the MCP tool `format_amount`.
+	r.Group(func(sub chi.Router) {
+		sub.Use(s.requireAPIKey)
+		sub.Use(s.requireSubscription)
+		sub.Use(s.applyRateLimitFor(routes.RateClassRead))
+		sub.Use(s.chargeQuota("util.format-amount"))
+		util.MountRoutes(sub)
+	})
 
 	// ----- MCP -----
 	// Per-tool charging happens INSIDE the handler now — the charger

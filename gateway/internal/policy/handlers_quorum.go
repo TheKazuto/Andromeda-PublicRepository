@@ -108,7 +108,7 @@ func (s *Service) deriveQuorum(in *quorumCommonInputs) (*quorumDerived, *httpErr
 		return nil, &httpError{http.StatusInternalServerError, "pda_derivation_failed", err.Error()}
 	}
 	msgApproval, msgApprovalBump, err := MessageApprovalPDA(
-		in.IkaCurve, ikaPK, in.SignatureScheme, msgDigest[:],
+		in.IkaCurve, ikaPK, in.SignatureScheme, msgDigest[:], nil, // recovery: no Ika signing metadata
 	)
 	if err != nil {
 		return nil, &httpError{http.StatusInternalServerError, "pda_derivation_failed", err.Error()}

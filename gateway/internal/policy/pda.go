@@ -162,24 +162,27 @@ func IkaCoordinator() solana.PublicKey {
 }
 
 // MessageApprovalPDA derives the Ika MessageApproval PDA that
-// `approve_message` writes to. Layout mirrors the legacy `policies` helper
-// and `ika-pre-alpha/docs/src/reference/accounts.md`:
+// `approve_message` writes to. Layout mirrors `ika-pre-alpha` docs +
+// clear-msig (confirmed Update 6 F0):
 //
 //	seeds = ["dwallet", chunks_of(curve_u16_le || dwallet_pubkey),
-//	         "message_approval", scheme_u16_le, message_digest]
+//	         "message_approval", scheme_u16_le, message_digest,
+//	         [ika_msg_metadata_digest]]
 //
-// F9-SIGN: Andromeda signing never uses Ika *message* metadata — the on-chain
-// `request_signature` passes a zero `message_metadata_digest` to
-// `approve_message` (the policy challenge is bound separately, via the
-// request_metadata_digest validation). The Ika Sign step likewise submits empty
-// `message_metadata`, so the approval is always derived WITHOUT a metadata seed.
-// Binding a non-zero metadata here previously produced an address the Ika
-// network could not find at sign time ("MessageApproval PDA not found").
+// Update 6: the Ika `message_metadata_digest` is appended as the FINAL seed
+// ONLY when non-zero. For every chain WITHOUT signing metadata the caller
+// passes nil / 32 zero bytes, and the approval is derived WITHOUT a metadata
+// seed — the prior F9-SIGN behaviour, intact. For Zcash (and future sr25519)
+// the digest is non-zero (keccak256 of the BCS metadata) and the Ika Sign step
+// submits the matching `message_metadata`, so the network finds this exact PDA.
+// (Binding a non-zero metadata when the network expects none — or vice versa —
+// produces "MessageApproval PDA not found" at sign time.)
 func MessageApprovalPDA(
 	curve uint16,
 	dwalletPubkey []byte,
 	scheme uint16,
 	messageDigest []byte,
+	ikaMsgMetadataDigest []byte,
 ) (solana.PublicKey, uint8, error) {
 	const seedDwallet = "dwallet"
 	const seedMsgApproval = "message_approval"
@@ -193,7 +196,20 @@ func MessageApprovalPDA(
 	schemeBytes := []byte{byte(scheme), byte(scheme >> 8)}
 	seeds = append(seeds, schemeBytes)
 	seeds = append(seeds, messageDigest)
+	if len(ikaMsgMetadataDigest) == 32 && !isAllZero(ikaMsgMetadataDigest) {
+		seeds = append(seeds, ikaMsgMetadataDigest)
+	}
 	return solana.FindProgramAddress(seeds, IkaDwalletProgramID)
+}
+
+// isAllZero reports whether every byte in b is zero.
+func isAllZero(b []byte) bool {
+	for _, x := range b {
+		if x != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // chunkDwalletSeedPayload concatenates `curve_u16_le || pk` and splits it

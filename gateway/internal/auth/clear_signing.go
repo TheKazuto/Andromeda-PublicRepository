@@ -17,6 +17,8 @@ import (
 	"strconv"
 
 	"github.com/gagliardetto/solana-go"
+
+	"github.com/shinkalabs/andromeda-gateway/internal/humanfmt"
 )
 
 // MaxHumanMessageBytes mirrors `contracts/auth/src/human_message.rs::
@@ -287,13 +289,13 @@ func OracleUpdateBoundsMessage(minPrice, maxPrice int64, maxAgeSlots uint64, max
 	if err := w.writeStr(" min "); err != nil {
 		return "", err
 	}
-	if err := w.writeI64Dec(minPrice); err != nil {
+	if err := w.writeStr(humanfmt.FormatI64Shifted(minPrice, humanfmt.ValueDecimals1e8)); err != nil {
 		return "", err
 	}
 	if err := w.writeStr(" max "); err != nil {
 		return "", err
 	}
-	if err := w.writeI64Dec(maxPrice); err != nil {
+	if err := w.writeStr(humanfmt.FormatI64Shifted(maxPrice, humanfmt.ValueDecimals1e8)); err != nil {
 		return "", err
 	}
 	if err := w.writeStr(" maxAge "); err != nil {

@@ -328,7 +328,7 @@ func (s *Service) passkeyUseChallenge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	msgApproval, msgApprovalBump, err := MessageApprovalPDA(
-		req.IkaCurve, ikaPK, req.SignatureScheme, msgDigest[:],
+		req.IkaCurve, ikaPK, req.SignatureScheme, msgDigest[:], nil, // recovery: no Ika signing metadata
 	)
 	if err != nil {
 		httpx.WriteError(w, http.StatusInternalServerError, "pda_derivation_failed", err.Error())
@@ -421,7 +421,7 @@ func (s *Service) passkeyUseSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	msgApproval, msgApprovalBump, err := MessageApprovalPDA(
-		req.IkaCurve, ikaPK, req.SignatureScheme, msgDigest[:],
+		req.IkaCurve, ikaPK, req.SignatureScheme, msgDigest[:], nil, // recovery: no Ika signing metadata
 	)
 	if err != nil {
 		httpx.WriteError(w, http.StatusInternalServerError, "pda_derivation_failed", err.Error())
