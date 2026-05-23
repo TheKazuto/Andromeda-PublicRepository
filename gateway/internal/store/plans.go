@@ -66,4 +66,3 @@ func (s *pgStore) GetPlanByCode(ctx context.Context, code string) (*Plan, error)
 	}
 	return &p, nil
 }
-

@@ -393,7 +393,19 @@ type Store interface {
 	// gate the URI before minting the state cookie.
 	IsTenantOAuthRedirectAllowed(ctx context.Context, userID, redirectURI string) (bool, error)
 
+	// --- Risk Layer (F-RISK-0+) ---
+	RiskConfigStore
+	RiskTenantDefaultsStore
+	RiskDenylistStore
+	RiskAllowlistStore
+	RiskBlocklistStore
+	DestHistoryStore
+	RiskFeedRunStore
+
 	// --- Raw access ---
 	Pool() *pgxpool.Pool
 	Close()
 }
+
+// Conformance check: ensure pgStore implements the full Store interface.
+var _ Store = (*pgStore)(nil)
