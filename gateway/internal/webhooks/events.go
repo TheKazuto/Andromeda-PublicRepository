@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"fmt"
+	"log/slog"
 	"strings"
 )
 
@@ -161,8 +162,14 @@ func ParseEvent(b64 string, programID string, slot int64, signature string) (*Ca
 		ev.Policy = encodePub(payload[0:32])
 		ev.TS = int64(binary.LittleEndian.Uint64(payload[32:40]))
 	default:
-		// Unknown discriminator — Phase 3 candidate (Ika program emits its own
-		// events with different schemas; we skip them silently for now).
+		// Unknown Andromeda-template discriminator. Ika program events are
+		// already routed above (IkaEventTagLE prefix), so reaching here means a
+		// template emitted a discriminator this parser doesn't know yet —
+		// almost always our own schema drift (a new emit!() added to a contract
+		// without updating this switch). We skip it (forward-compat) but log so
+		// the drift is observable instead of silent.
+		slog.Default().Debug("webhook: skipping unknown template event discriminator",
+			"discriminator", disc, "payloadLen", len(payload))
 		return nil, nil
 	}
 	return ev, nil
