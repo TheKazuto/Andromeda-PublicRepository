@@ -22,7 +22,8 @@ type Feed struct {
 // Metrics disables emission). Implemented by *metrics.Metrics. Kept as an
 // interface so this package needs no direct prometheus dependency.
 type Metrics interface {
-	RecordOracleFeedRefresh(result string) // result: success|skipped|stale|error
+	RecordOracleFeedRefresh(result string)     // result: success|skipped|stale|error
+	RecordOracleRefreshRejected(reason string) // F3 reason: deviation|lag
 }
 
 // FeedSeed is the JSON shape accepted in PYTH_ADAPTER_FEEDS for bootstrap.

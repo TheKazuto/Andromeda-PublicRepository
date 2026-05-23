@@ -1,6 +1,10 @@
 package oraclemonitor
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+	"time"
+)
 
 func TestParseLatest(t *testing.T) {
 	body := []byte(`{
@@ -17,7 +21,7 @@ func TestParseLatest(t *testing.T) {
 	     "price":{"price":"notanumber","conf":"0","expo":-8,"publish_time":1700000004}}
 	  ]
 	}`)
-	got, err := parseLatest(body)
+	got, err := parseLatest(body, time.Now(), 0) // lag guard disabled
 	if err != nil {
 		t.Fatalf("parseLatest: %v", err)
 	}
@@ -37,7 +41,7 @@ func TestParseLatest(t *testing.T) {
 }
 
 func TestParseLatestEmpty(t *testing.T) {
-	got, err := parseLatest([]byte(`{"parsed":[]}`))
+	got, err := parseLatest([]byte(`{"parsed":[]}`), time.Now(), 0)
 	if err != nil {
 		t.Fatalf("parseLatest empty: %v", err)
 	}
@@ -47,7 +51,34 @@ func TestParseLatestEmpty(t *testing.T) {
 }
 
 func TestParseLatestMalformedJSON(t *testing.T) {
-	if _, err := parseLatest([]byte(`not json`)); err == nil {
+	if _, err := parseLatest([]byte(`not json`), time.Now(), 0); err == nil {
 		t.Fatal("expected error on malformed JSON")
+	}
+}
+
+// F3 lag guard: a price older than the budget is dropped (so the monitor skips
+// that trigger this tick); a fresh one is kept.
+func TestParseLatestLagGuard(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	fresh := now.Unix() - 10
+	stale := now.Unix() - 100
+	body := []byte(fmt.Sprintf(`{
+	  "parsed": [
+	    {"id":"aa00000000000000000000000000000000000000000000000000000000000001",
+	     "price":{"price":"100000000","conf":"0","expo":-8,"publish_time":%d}},
+	    {"id":"bb00000000000000000000000000000000000000000000000000000000000002",
+	     "price":{"price":"200000000","conf":"0","expo":-8,"publish_time":%d}}
+	  ]
+	}`, fresh, stale))
+
+	got, err := parseLatest(body, now, 60) // 60s budget
+	if err != nil {
+		t.Fatalf("parseLatest: %v", err)
+	}
+	if _, ok := got["aa00000000000000000000000000000000000000000000000000000000000001"]; !ok {
+		t.Fatal("fresh feed should be kept")
+	}
+	if _, ok := got["bb00000000000000000000000000000000000000000000000000000000000002"]; ok {
+		t.Fatal("stale feed should be dropped by the lag guard")
 	}
 }

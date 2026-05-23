@@ -34,6 +34,11 @@ type Metrics struct {
 	QuotaExceededTotal    *prometheus.CounterVec // labels: plan
 	RateLimitBlockedTotal *prometheus.CounterVec // labels: class (read|tx)
 
+	// BillingRefundFailedTotal — a charge was applied but the refund did not
+	// land (user charged, tokens not returned). The most expensive silent
+	// failure in billing; alert on any increase. Label surface = rest|mcp.
+	BillingRefundFailedTotal *prometheus.CounterVec
+
 	// Upstream — emitted by the proxy handler.
 	UpstreamRequestsTotal    *prometheus.CounterVec   // labels: upstream, status_class
 	UpstreamLatency          *prometheus.HistogramVec // labels: upstream
@@ -117,6 +122,10 @@ type Metrics struct {
 	GasSponsorLatency      *prometheus.HistogramVec // labels: result
 	GasSponsorRequests     *prometheus.CounterVec   // labels: result
 	GasSponsorDuplicateSig prometheus.Counter
+	// GasSponsorSendUnknownTotal — sends that errored after the bytes may have
+	// reached the chain (F5 submitted_unknown). The tx might have landed;
+	// each needs reconciliation by signature. Alert on any increase.
+	GasSponsorSendUnknownTotal prometheus.Counter
 
 	// Oracle price-trigger monitor (F7.5) + oracle feed relay. Bounded labels
 	// only (no per-feed/per-tenant) to keep series count flat.
@@ -125,10 +134,18 @@ type Metrics struct {
 	OracleMonitorErrorsTotal  *prometheus.CounterVec // labels: stage (tick|hermes|claim|reap)
 	OracleFeedRefreshTotal    *prometheus.CounterVec // labels: result (success|skipped|stale|error)
 	OracleArmedTriggers       prometheus.Gauge       // armed price triggers (sampled every 15s)
+	// OracleRefreshRejectedTotal — off-chain price reads the gateway refused to
+	// act on (F3), by reason (deviation|lag). Defensive guard; alert on spikes.
+	OracleRefreshRejectedTotal *prometheus.CounterVec // labels: reason
 
 	// Async presign prefetch (Update 2 Part A). Bounded labels only.
 	PresignPrefetchTotal *prometheus.CounterVec // labels: result (ok|error) — background presign dispatched at challenge time
 	PresignHarvestTotal  *prometheus.CounterVec // labels: result (hit|miss) — submit lookup of the prefetched presign
+	// PresignPrefetchLeakedTotal — presigns paid for but never used (F1 D). The
+	// abandonment leak (dispatched but never harvested) is derivable as
+	// dispatched_ok − harvest_hit; this counts the cases we observe directly,
+	// e.g. reason="stale_epoch" (dropped at harvest because the epoch advanced).
+	PresignPrefetchLeakedTotal *prometheus.CounterVec // labels: reason
 
 	// Risk blocklist ingestor (H4). Bounded labels only (no per-feed cardinality explosion).
 	RiskFeedDownloadFailuresTotal   *prometheus.CounterVec // labels: source
@@ -195,6 +212,14 @@ func New() (*Metrics, http.Handler) {
 			Name:      "blocked_total",
 			Help:      "429 rate_limited responses by bucket class.",
 		}, []string{"class"})
+
+	m.BillingRefundFailedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "gateway",
+			Subsystem: "billing",
+			Name:      "refund_failed_total",
+			Help:      "Token refunds that failed after a charge was applied, by surface (rest|mcp). User was charged but tokens were not returned — alert on any increase.",
+		}, []string{"surface"})
 
 	m.UpstreamRequestsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
@@ -448,6 +473,13 @@ func New() (*Metrics, http.Handler) {
 		Name:      "armed_triggers",
 		Help:      "Price triggers currently armed (sampled every 15s by the metrics scraper).",
 	})
+	m.OracleRefreshRejectedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "gateway",
+			Subsystem: "oracle_relay",
+			Name:      "refresh_rejected_total",
+			Help:      "Off-chain price reads the gateway refused to act on, by reason (deviation|lag).",
+		}, []string{"reason"})
 
 	m.PresignPrefetchTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "gateway", Subsystem: "presign_prefetch", Name: "dispatched_total",
@@ -457,10 +489,18 @@ func New() (*Metrics, http.Handler) {
 		Namespace: "gateway", Subsystem: "presign_prefetch", Name: "harvest_total",
 		Help: "Submit lookups of the prefetched presign, by result (hit|miss). hit/(hit+miss) = cache-hit rate.",
 	}, []string{"result"})
+	m.PresignPrefetchLeakedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "gateway", Subsystem: "presign_prefetch", Name: "leaked_total",
+		Help: "Presigns paid for but never used, by reason (e.g. stale_epoch). Sponsored gas wasted — alert on increase.",
+	}, []string{"reason"})
 
 	m.GasSponsorDuplicateSig = prometheus.NewCounter(prometheus.CounterOpts{
 		Namespace: "gateway", Subsystem: "gas_sponsor", Name: "duplicate_signature_total",
 		Help: "Cumulative count of Solana sendTransaction calls that returned duplicate-signature.",
+	})
+	m.GasSponsorSendUnknownTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "gateway", Subsystem: "gas_sponsor", Name: "send_unknown_total",
+		Help: "Sends that errored after the tx may have been broadcast (submitted_unknown) — reconcile by signature. Alert on increase.",
 	})
 
 	m.RiskFeedDownloadFailuresTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -487,6 +527,7 @@ func New() (*Metrics, http.Handler) {
 		m.QuotaConsumedTotal,
 		m.QuotaExceededTotal,
 		m.RateLimitBlockedTotal,
+		m.BillingRefundFailedTotal,
 		m.UpstreamRequestsTotal,
 		m.UpstreamLatency,
 		m.CircuitBreakerState,
@@ -517,6 +558,7 @@ func New() (*Metrics, http.Handler) {
 		m.RedisFailOpen,
 		m.PresignPrefetchTotal,
 		m.PresignHarvestTotal,
+		m.PresignPrefetchLeakedTotal,
 		m.AuditSignerLatency,
 		m.AuditAppendLatency,
 		m.AuditFailuresTotal,
@@ -530,11 +572,13 @@ func New() (*Metrics, http.Handler) {
 		m.GasSponsorLatency,
 		m.GasSponsorRequests,
 		m.GasSponsorDuplicateSig,
+		m.GasSponsorSendUnknownTotal,
 		m.OracleTriggerFiresTotal,
 		m.OracleTriggerExpiredTotal,
 		m.OracleMonitorErrorsTotal,
 		m.OracleFeedRefreshTotal,
 		m.OracleArmedTriggers,
+		m.OracleRefreshRejectedTotal,
 		m.RiskFeedDownloadFailuresTotal,
 		m.RiskFeedVariationSkipsTotal,
 		m.RiskFeedEntriesUpsertedTotal,
@@ -573,6 +617,15 @@ func (m *Metrics) RecordWebhookRateLimited() {
 		return
 	}
 	m.WebhookRateLimitedTotal.Inc()
+}
+
+// RecordRefundFailed increments billing_refund_failed_total{surface}.
+// surface is "rest" or "mcp".
+func (m *Metrics) RecordRefundFailed(surface string) {
+	if m == nil || m.BillingRefundFailedTotal == nil {
+		return
+	}
+	m.BillingRefundFailedTotal.WithLabelValues(surface).Inc()
 }
 
 // --- ratelimit.Observer adapter ---
@@ -631,6 +684,23 @@ func (m *Metrics) RecordPresignHarvest(hit bool) {
 		res = "hit"
 	}
 	m.PresignHarvestTotal.WithLabelValues(res).Inc()
+}
+
+// RecordPresignLeaked counts a paid-for-but-unused presign by reason.
+func (m *Metrics) RecordPresignLeaked(reason string) {
+	if m == nil || m.PresignPrefetchLeakedTotal == nil {
+		return
+	}
+	m.PresignPrefetchLeakedTotal.WithLabelValues(reason).Inc()
+}
+
+// RecordSendUnknown implements gasponsor.SendObserver — counts a gas-sponsored
+// send that errored in the submitted_unknown phase (F5).
+func (m *Metrics) RecordSendUnknown() {
+	if m == nil || m.GasSponsorSendUnknownTotal == nil {
+		return
+	}
+	m.GasSponsorSendUnknownTotal.Inc()
 }
 
 // --- audit.SignerObserver adapter ---
@@ -760,6 +830,15 @@ func (m *Metrics) SetOracleArmedTriggers(n int) {
 		return
 	}
 	m.OracleArmedTriggers.Set(float64(n))
+}
+
+// RecordOracleRefreshRejected implements oraclerelay.Metrics — reason is one of
+// deviation|lag.
+func (m *Metrics) RecordOracleRefreshRejected(reason string) {
+	if m == nil || m.OracleRefreshRejectedTotal == nil {
+		return
+	}
+	m.OracleRefreshRejectedTotal.WithLabelValues(reason).Inc()
 }
 
 // --- risk.IngestorMetrics adapter (H4) ---

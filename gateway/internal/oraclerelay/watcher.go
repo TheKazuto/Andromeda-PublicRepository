@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/big"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gagliardetto/solana-go"
@@ -46,6 +48,14 @@ type Options struct {
 	// still work; only the periodic loop is skipped. Re-enable for a feed read
 	// outside a signing tx (rare).
 	CrankEnabled bool
+
+	// F3 off-chain guards (defensive; on-chain remains authoritative). 0 = off.
+	//   - MaxDeviationBPS: skip a refresh whose new canonical price deviates
+	//     more than this (basis points) from the last pushed value.
+	//   - MaxPublishLagSeconds: skip a refresh whose publish_time is older than
+	//     this budget (don't push a stale price).
+	MaxDeviationBPS      int
+	MaxPublishLagSeconds int
 }
 
 // Service runs the leader-elected oracle-feed bootstrap and, when enabled, the
@@ -64,7 +74,21 @@ type Service struct {
 	logger       *slog.Logger
 	crankEnabled bool
 	metrics      Metrics
+
+	// F3 guards + the in-memory last-canonical-price baseline for the deviation
+	// check (the crank is leader-elected, so a single instance owns this).
+	maxDeviationBPS      int
+	maxPublishLagSeconds int
+	lastCanonMu          sync.Mutex
+	lastCanon            map[string]int64 // feedID → last accepted canonical price
+	rejectStreak         map[string]int   // feedID → consecutive deviation rejects
 }
+
+// maxDeviationRejectStreak caps how many consecutive ticks the deviation guard
+// rejects a feed before accepting the new price as a real (sustained) move. This
+// stops a legitimate large move from freezing a feed forever; a transient spike
+// (1-2 ticks) is still dropped.
+const maxDeviationRejectStreak = 3
 
 const confirmTimeout = 30 * time.Second
 
@@ -90,19 +114,23 @@ func NewService(o Options) (*Service, error) {
 		o.HermesURL = DefaultHermesURL
 	}
 	return &Service{
-		programID:    o.ProgramID,
-		configPDA:    cfgPDA,
-		cluster:      o.Cluster,
-		tick:         o.Tick,
-		seeds:        o.Seeds,
-		rpc:          o.RPC,
-		signer:       o.Signer,
-		store:        o.Store,
-		hermesURL:    strings.TrimRight(o.HermesURL, "/"),
-		httpClient:   &http.Client{Timeout: 15 * time.Second},
-		logger:       o.Logger,
-		crankEnabled: o.CrankEnabled,
-		metrics:      o.Metrics,
+		programID:            o.ProgramID,
+		configPDA:            cfgPDA,
+		cluster:              o.Cluster,
+		tick:                 o.Tick,
+		seeds:                o.Seeds,
+		rpc:                  o.RPC,
+		signer:               o.Signer,
+		store:                o.Store,
+		hermesURL:            strings.TrimRight(o.HermesURL, "/"),
+		httpClient:           &http.Client{Timeout: 15 * time.Second},
+		logger:               o.Logger,
+		crankEnabled:         o.CrankEnabled,
+		metrics:              o.Metrics,
+		maxDeviationBPS:      o.MaxDeviationBPS,
+		maxPublishLagSeconds: o.MaxPublishLagSeconds,
+		lastCanon:            make(map[string]int64),
+		rejectStreak:         make(map[string]int),
 	}, nil
 }
 
@@ -269,10 +297,52 @@ func (svc *Service) refreshFeed(ctx context.Context, f Feed) RefreshOutcome {
 		return errOutcome(fmt.Errorf("feed_id mismatch: account=%s configured=%s", got, f.PythFeedIDHex))
 	}
 
+	// F3 lag guard: don't push a price older than the budget. The on-chain
+	// adapter also enforces OracleStale, but this avoids a wasted tx and an
+	// alertable signal. 0 = disabled.
+	if svc.maxPublishLagSeconds > 0 {
+		if age := time.Now().Unix() - pu.PublishTime; age > int64(svc.maxPublishLagSeconds) {
+			svc.recordRejected("lag")
+			svc.logger.Warn("oracle refresh rejected: publish_time too old",
+				"feed", f.ID, "age_seconds", age, "budget_seconds", svc.maxPublishLagSeconds)
+			return RefreshOutcome{Result: resultStale}
+		}
+	}
+
 	// Freshness gate: skip when publish_time has not advanced (no wasted tx,
 	// and avoids the on-chain PublishTimeRegression revert).
 	if f.LastPublishTime != nil && pu.PublishTime <= f.LastPublishTime.Unix() {
 		return RefreshOutcome{Result: resultSkipped}
+	}
+
+	// Canonical price mirror (same logic as on-chain). Used for the F3 deviation
+	// guard below and for the success log. A mirror error (pathological
+	// exponent) is non-fatal: skip the deviation check and let on-chain decide.
+	newCanon, canErr := ToCanonicalI64(pu.Price, pu.Exponent)
+
+	// F3 deviation guard: refuse an absurd jump vs the last accepted value.
+	// 0 = disabled. Defensive — a too-tight band can freeze a legitimate move,
+	// so it is opt-in, auto-recovers after a sustained move (streak cap), and
+	// the on-chain price stays authoritative.
+	if svc.maxDeviationBPS > 0 && canErr == nil {
+		if last, ok := svc.lastCanonFor(f.ID); ok && deviatesBeyondBPS(last, newCanon, svc.maxDeviationBPS) {
+			if streak := svc.bumpRejectStreak(f.ID); streak < maxDeviationRejectStreak {
+				svc.recordRejected("deviation")
+				svc.logger.Warn("oracle refresh rejected: price deviation out of band",
+					"feed", f.ID, "last", last, "new", newCanon, "max_bps", svc.maxDeviationBPS, "streak", streak)
+				return RefreshOutcome{Result: resultSkipped}
+			}
+			// Sustained out-of-band move — accept it as real and fall through.
+			svc.logger.Warn("oracle deviation: accepting sustained out-of-band move after repeated rejects",
+				"feed", f.ID, "last", last, "new", newCanon)
+		}
+	}
+	// Price deemed valid (in-band, or accepted sustained move). Advance the
+	// baseline now — BEFORE the tx — so a later send/confirm failure can't
+	// freeze the feed against a stale baseline, and reset the reject streak.
+	if canErr == nil {
+		svc.setLastCanon(f.ID, newCanon)
+		svc.resetRejectStreak(f.ID)
 	}
 
 	cachePDA, _, err := FeedCachePDA(svc.programID, pu.FeedID)
@@ -297,17 +367,18 @@ func (svc *Service) refreshFeed(ctx context.Context, f Feed) RefreshOutcome {
 	// The on-chain refresh already normalised with identical logic and landed,
 	// so these mirrors should not error; if they ever do (Go/Rust drift on a
 	// pathological exponent), record success without a misleading price rather
-	// than logging a 0. The authoritative price is on-chain.
-	cp, perr := ToCanonicalI64(pu.Price, pu.Exponent)
+	// than logging a 0. The authoritative price is on-chain. newCanon was
+	// computed above for the deviation guard.
 	cc, cerr := ToCanonicalU64(pu.Conf, pu.Exponent)
-	if perr != nil || cerr != nil {
+	if canErr != nil || cerr != nil {
 		svc.logger.Warn("canonical mirror diverged from on-chain (price omitted from log)",
-			"feed", f.ID, "price_err", perr, "conf_err", cerr)
+			"feed", f.ID, "price_err", canErr, "conf_err", cerr)
 		return out
 	}
 	ccI := int64(cc)
-	out.PriceCanon = &cp
+	out.PriceCanon = &newCanon
 	out.ConfCanon = &ccI
+	// F3 baseline already advanced before the send (see the deviation guard).
 	return out
 }
 
@@ -352,6 +423,59 @@ func (svc *Service) record(ctx context.Context, feedID string, o RefreshOutcome)
 
 func errOutcome(err error) RefreshOutcome {
 	return RefreshOutcome{Result: resultError, Err: err.Error()}
+}
+
+// recordRejected emits the F3 rejection metric (nil-safe).
+func (svc *Service) recordRejected(reason string) {
+	if svc.metrics != nil {
+		svc.metrics.RecordOracleRefreshRejected(reason)
+	}
+}
+
+func (svc *Service) lastCanonFor(feedID string) (int64, bool) {
+	svc.lastCanonMu.Lock()
+	defer svc.lastCanonMu.Unlock()
+	v, ok := svc.lastCanon[feedID]
+	return v, ok
+}
+
+func (svc *Service) setLastCanon(feedID string, canon int64) {
+	svc.lastCanonMu.Lock()
+	svc.lastCanon[feedID] = canon
+	svc.lastCanonMu.Unlock()
+}
+
+// bumpRejectStreak increments and returns the post-increment consecutive
+// deviation-reject count for a feed.
+func (svc *Service) bumpRejectStreak(feedID string) int {
+	svc.lastCanonMu.Lock()
+	defer svc.lastCanonMu.Unlock()
+	svc.rejectStreak[feedID]++
+	return svc.rejectStreak[feedID]
+}
+
+func (svc *Service) resetRejectStreak(feedID string) {
+	svc.lastCanonMu.Lock()
+	delete(svc.rejectStreak, feedID)
+	svc.lastCanonMu.Unlock()
+}
+
+// deviatesBeyondBPS reports whether `now` differs from `last` by more than
+// `maxBPS` basis points (1 bp = 0.01%). A zero/negative baseline can't be
+// compared meaningfully → treated as no deviation. Uses big.Int so the
+// cross-multiplication (`diff*10000 > maxBPS*last`) is exact and never overflows
+// int64 on large canonical prices.
+func deviatesBeyondBPS(last, now int64, maxBPS int) bool {
+	if last <= 0 || maxBPS <= 0 {
+		return false
+	}
+	diff := now - last
+	if diff < 0 {
+		diff = -diff
+	}
+	lhs := new(big.Int).Mul(big.NewInt(diff), big.NewInt(10000))
+	rhs := new(big.Int).Mul(big.NewInt(int64(maxBPS)), big.NewInt(last))
+	return lhs.Cmp(rhs) > 0
 }
 
 func decodeFeedID(hexStr string) ([32]byte, error) {

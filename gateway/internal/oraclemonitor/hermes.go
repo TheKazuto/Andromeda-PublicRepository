@@ -23,6 +23,9 @@ const DefaultHermesURL = "https://hermes.pyth.network"
 type HermesClient struct {
 	baseURL    string
 	httpClient *http.Client
+	// maxPublishLagSeconds (F3): drop a Hermes price whose publish_time is older
+	// than this budget so a stale read never fires a trigger. 0 = disabled.
+	maxPublishLagSeconds int
 }
 
 // NewHermesClient returns a client for the given Hermes base URL (defaults to
@@ -35,6 +38,13 @@ func NewHermesClient(baseURL string) *HermesClient {
 		baseURL:    strings.TrimRight(baseURL, "/"),
 		httpClient: &http.Client{Timeout: 15 * time.Second},
 	}
+}
+
+// WithMaxPublishLag sets the staleness budget (seconds) for Hermes reads.
+// Returns the client for chaining. 0 (default) disables the guard.
+func (c *HermesClient) WithMaxPublishLag(seconds int) *HermesClient {
+	c.maxPublishLagSeconds = seconds
+	return c
 }
 
 type hermesLatestResponse struct {
@@ -80,7 +90,7 @@ func (c *HermesClient) LatestPrices(ctx context.Context, feedIDsHex []string) (m
 	if err != nil {
 		return nil, fmt.Errorf("read hermes latest: %w", err)
 	}
-	return parseLatest(body)
+	return parseLatest(body, time.Now(), c.maxPublishLagSeconds)
 }
 
 // parseLatest decodes the Hermes response and normalises each feed's price to
@@ -89,7 +99,12 @@ func (c *HermesClient) LatestPrices(ctx context.Context, feedIDsHex []string) (m
 // on-chain dispatch will see. Pure (no I/O) — unit-tested directly. Malformed,
 // negative, or positive-exponent feeds (the adapter rejects expo > 0) are
 // skipped rather than failing the whole batch.
-func parseLatest(body []byte) (map[string]int64, error) {
+//
+// F3 lag guard: when maxLagSeconds > 0, a feed whose publish_time is older than
+// the budget (relative to `now`) is dropped — an absent feed makes the monitor
+// skip that trigger this tick, which is the safe direction (never fire on a
+// stale price). 0 disables the guard.
+func parseLatest(body []byte, now time.Time, maxLagSeconds int) (map[string]int64, error) {
 	var resp hermesLatestResponse
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return nil, fmt.Errorf("decode hermes latest: %w", err)
@@ -103,6 +118,9 @@ func parseLatest(body []byte) (map[string]int64, error) {
 		}
 		if f.Price.Expo > 0 {
 			continue // the adapter rejects positive exponents
+		}
+		if maxLagSeconds > 0 && now.Unix()-f.Price.PublishTime > int64(maxLagSeconds) {
+			continue // stale read — skip so a trigger never fires on old data
 		}
 		canon, err := oraclerelay.ToCanonicalI64(raw, f.Price.Expo)
 		if err != nil {
