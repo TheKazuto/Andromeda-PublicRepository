@@ -93,5 +93,73 @@ export function buildEngineRouter(config: AppConfig): Router {
     }
   })
 
+  // Risk simulation endpoint: decode + simulate transaction, verify digest match.
+  // Internal use only (`X-Api-Key` required from gateway).
+  router.post('/simulate', async (req, res) => {
+    try {
+      const simulateSchema = z.object({
+        chain_id: z.string().min(1),
+        payload_hex: z.string().min(1),
+        kind: z.enum(['transaction', 'message']),
+        expected_digest_hex: z.string().length(64).regex(/^[a-fA-F0-9]+$/),
+        dwallet_public_key_hex: z.string().optional(),
+        // Client-provided RPC for the destination chain (the dev funds it). SSRF
+        // is validated downstream in simulateTransaction before any outbound call.
+        rpc_url: z.string().url().optional(),
+      })
+
+      const parsed = simulateSchema.parse(req.body)
+
+      const { simulateTransaction } = await import('../risk/simulate.js')
+      const result = await simulateTransaction(
+        {
+          chainId: parsed.chain_id,
+          payloadHex: parsed.payload_hex,
+          kind: parsed.kind,
+          expectedDigestHex: parsed.expected_digest_hex,
+          dwalletPublicKeyHex: parsed.dwallet_public_key_hex as string | undefined,
+        },
+        parsed.rpc_url,
+      )
+
+      // Convert response to snake_case for consistency
+      const snakeCaseResult = {
+        ok: result.ok,
+        digest_matches: result.digestMatches,
+        actual_digest_hex: result.actualDigestHex,
+        destination: result.destination,
+        verified: result.verified,
+        asset_changes: result.assetChanges,
+        approvals: result.approvals,
+        calls: result.calls,
+        effects_extracted: result.effectsExtracted,
+        calldata_risk: result.calldataRisk,
+        estimated_gas: result.estimatedGas,
+        solana_instructions: result.solanaInstructions,
+        will_revert: result.willRevert,
+        warnings: result.warnings,
+        // Nested simulation object: the gateway risk service reads
+        // `respMap["simulation"]` (deriveSimulationRisk → will_revert /
+        // approvals.amount / asset_changes.change), and the public
+        // POST /v1/policy/risk/evaluate surfaces it to the client.
+        simulation: {
+          ok: result.ok,
+          will_revert: result.willRevert,
+          asset_changes: result.assetChanges,
+          approvals: result.approvals,
+          calls: result.calls,
+          estimated_gas: result.estimatedGas,
+          warnings: result.warnings,
+        },
+      }
+
+      res.json(ok(snakeCaseResult))
+    } catch (err) {
+      const safe = sanitizeError('dwallet/simulate', err)
+      const status = err instanceof z.ZodError ? 400 : 500
+      res.status(status).json(fail(safe.message, safe.traceId))
+    }
+  })
+
   return router
 }

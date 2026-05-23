@@ -87,6 +87,22 @@ function runMiddleware(req: ReturnType<typeof fakeReq>, res: FakeRes, downstream
 const SUBMIT_PATH = '/v1/dwallet/dkg/submit'
 const ANON_HEADERS = (idemKey: string, apiKey = 'k1') => ({ 'idempotency-key': idemKey, 'x-api-key': apiKey })
 
+// A row shaped like reserveOrLookup's CTE result when WE win the reservation
+// (fresh insert/takeover): did_reserve=true, status in_progress, no response yet.
+function reserveWon(requestHash: string) {
+  return {
+    reservation_id: 'res-' + requestHash.slice(0, 8),
+    status: 'in_progress',
+    request_hash: requestHash,
+    status_code: null,
+    response_body: null,
+    response_headers: null,
+    reservation_until: new Date(Date.now() + 60_000),
+    expires_at: new Date(Date.now() + 3_600_000),
+    did_reserve: true,
+  }
+}
+
 describe('http/idempotency middleware', () => {
   beforeEach(() => {
     pool.query.mockReset()
@@ -145,16 +161,19 @@ describe('http/idempotency middleware', () => {
     expect(called).toBe(true)
   })
 
-  it('persists a 2xx response, then replays it on a retry with the same body (L1)', async () => {
+  it('finalizes a reserved 2xx, then replays it on a retry with the same body (L1)', async () => {
     const headers = ANON_HEADERS('replay-key-AAAA', 'apiR')
-    // first call → miss, downstream returns 200
+    // first call → we win the reservation (did_reserve:true), downstream returns 200
+    pool.query.mockResolvedValueOnce({ rows: [reserveWon(sha256Hex(Buffer.from('{"x":1}')))] })
     const req1 = fakeReq({ method: 'POST', path: SUBMIT_PATH, headers, rawBody: Buffer.from('{"x":1}') })
     const res1 = new FakeRes()
     await runMiddleware(req1, res1, () => { res1.status(200).json({ done: true }) })
     expect(res1.statusCode).toBe(200)
-    // L2 INSERT was attempted
-    const persistCall = pool.query.mock.calls.find((c) => (c[0] as { name?: string }).name === 'idempotency_persist')
-    expect(persistCall).toBeDefined()
+    // The reservation was finalized (UPDATE … status='completed').
+    const finalize = pool.query.mock.calls.find(
+      (c) => typeof c[0] === 'string' && (c[0] as string).includes("'completed'"),
+    )
+    expect(finalize).toBeDefined()
 
     // second call, same key + same body → L1 hit, replay, downstream NOT run
     pool.query.mockClear()
@@ -164,16 +183,19 @@ describe('http/idempotency middleware', () => {
     expect(res2.statusCode).toBe(200)
     expect(res2.getHeader(REPLAY_HEADER)).toBe('true')
     expect(JSON.parse(res2.body.toString())).toEqual({ done: true })
-    // L1 hit means no L2 lookup
+    // L1 hit means no DB round-trip at all.
     expect(pool.query).not.toHaveBeenCalled()
   })
 
   it('returns 422 when the same key is reused with a different body', async () => {
     const headers = ANON_HEADERS('collide-key-BBBB', 'apiC')
+    // first call wins the reservation and completes 200 → caches in L1.
+    pool.query.mockResolvedValueOnce({ rows: [reserveWon(sha256Hex(Buffer.from('{"a":1}')))] })
     const res1 = new FakeRes()
     await runMiddleware(fakeReq({ method: 'POST', path: SUBMIT_PATH, headers, rawBody: Buffer.from('{"a":1}') }), res1, () => { res1.status(200).json({ ok: true }) })
     expect(res1.statusCode).toBe(200)
 
+    // same key, different body → L1 hit with a mismatched request hash → 422.
     const res2 = new FakeRes()
     await runMiddleware(fakeReq({ method: 'POST', path: SUBMIT_PATH, headers, rawBody: Buffer.from('{"a":2}') }), res2, () => { throw new Error('downstream should not run') })
     expect(res2.statusCode).toBe(422)
@@ -195,21 +217,26 @@ describe('http/idempotency middleware', () => {
     expect(ranAgain).toBe(true)
   })
 
-  it('replays from L2 when the entry is not in L1, hydrating L1', async () => {
+  it('replays from the reservation lookup when the key is already completed (not in L1)', async () => {
     const headers = ANON_HEADERS('l2-key-DDDD', 'apiL2')
+    // reserveOrLookup finds an existing completed row (did_reserve:false).
     pool.query.mockResolvedValueOnce({
       rows: [
         {
+          reservation_id: 'someone-else',
+          status: 'completed',
+          did_reserve: false,
           status_code: 201,
           response_body: Buffer.from('{"from":"l2"}'),
           response_headers: { 'content-type': 'application/json' },
           request_hash: sha256Hex(Buffer.from('{"z":9}')),
+          reservation_until: null,
           expires_at: new Date(Date.now() + 3600_000),
         },
       ],
     })
     const res = new FakeRes()
-    await runMiddleware(fakeReq({ method: 'POST', path: SUBMIT_PATH, headers, rawBody: Buffer.from('{"z":9}') }), res, () => { throw new Error('downstream should not run on L2 replay') })
+    await runMiddleware(fakeReq({ method: 'POST', path: SUBMIT_PATH, headers, rawBody: Buffer.from('{"z":9}') }), res, () => { throw new Error('downstream should not run on replay') })
     expect(res.statusCode).toBe(201)
     expect(res.getHeader(REPLAY_HEADER)).toBe('true')
     expect(JSON.parse(res.body.toString())).toEqual({ from: 'l2' })
