@@ -47,7 +47,7 @@ ika-backend/
 │   │   ├── chains.ts               # CAIP-2 namespace → { curve, scheme }
 │   │   ├── address.ts              # Chain-native address derivation per family
 │   │   ├── preprocess.ts           # Per-chain message/tx envelopes (EIP-191, Sui/IOTA intent, Tezos watermark, …)
-│   │   ├── digest.ts               # On-chain MessageApproval.message_digest — keccak256(message) for EVM + EdDSA (Solana/Sui scheme 5); sha256/double-sha256/blake2b kept only for the non-keccak ECDSA Bitcoin/Zcash schemes
+│   │   ├── digest.ts               # On-chain MessageApproval.message_digest = keccak256(message) for EVERY scheme (Update 6 M1-fix); the network applies the scheme's own hash (sha256/blake2b/…) at sign time
 │   │   └── prepare.ts              # prepare-message = preprocessed bytes + on-chain digest
 │   ├── risk/                       # Transaction-risk advisory engine (consumed by the gateway)
 │   │   ├── decode.ts               # Per-chain calldata decode + EVM tx parse + structured effects
@@ -97,7 +97,7 @@ Alpha 1; the response carries the disclaimer.
 | `POST /v1/dwallet/presign` | `presign` | Allocates a presign session → returns `presignSessionIdHex` + `epoch` (the presign is single-use and epoch-bound). |
 | `POST /v1/dwallet/sign` | `sign_message` | Signs a message using an approval + presign → returns `signatureBase64`. |
 | `GET /v1/dwallet/addresses/:dwalletAddress` | `dwallet_addresses` | Read-only: every chain-native address the dWallet's curve can hold (see "Supported destination chains"). No gas, no passphrase. |
-| `POST /v1/dwallet/prepare-message` | `prepare_message` | Stateless: `{ chainId, payloadHex, kind }` → `{ curve, scheme, preprocessedHex, digestHex }`. Single source of truth for the bytes to sign (`preprocessedHex` → `/sign`) and the on-chain digest (`digestHex` → request-signature). |
+| `POST /v1/dwallet/prepare-message` | `prepare_message` | Stateless: `{ chainId, payloadHex, kind }` → `{ curve, scheme, preprocessedHex, digestHex, messageMetadataHex, ikaMsgMetadataDigestHex }`. Single source of truth for the bytes to sign (`preprocessedHex` → `/sign`) and the on-chain digest (`digestHex` → request-signature). For `zcash:*` chains, pass structured `zcash` tx fields instead of `payloadHex` (see Zcash section); the response carries non-empty `messageMetadataHex` + `ikaMsgMetadataDigestHex`. |
 
 ### MPC engine — low-level (prepare → submit)
 - `POST /v1/dwallet/dkg/prepare` — `{ curve, userPublicKeyBase58 }` → returns the BCS `SignedRequestData` (base64) to sign, plus `sessionPreimageBase64`, `epoch` and `intendedChainSenderBase58`
@@ -126,7 +126,7 @@ The `chain/` layer maps a CAIP-2 chain id to the right curve + signature scheme,
 
 | Curve | Families |
 |-------|----------|
-| Secp256k1 | EVM (`eip155`), Tron, Bitcoin, Cosmos, Filecoin (`fil`), VeChain, Avalanche X/P |
+| Secp256k1 | EVM (`eip155`), Tron, Bitcoin, Cosmos, Filecoin (`fil`), VeChain, Avalanche X/P, Zcash transparent (`zcash`) |
 | Curve25519 (ed25519) | Solana, Sui, TON, Stellar, Algorand, Aptos, MultiversX (`mvx`), Casper, Tezos, IOTA, NEAR, Substrate/Polkadot (`polkadot`) |
 
 > NEAR uses **implicit accounts** (lowercase hex of the ed25519 key). Substrate is supported via **ed25519 accounts** (SS58, Polkadot prefix); **sr25519** — the Polkadot wallet default — needs Schnorrkel/Ristretto and is deferred like Bitcoin Taproot.
@@ -146,6 +146,31 @@ Bitcoin uses the Secp256k1 curve. Three address/signing modes share one dWallet 
 `GET /v1/dwallet/addresses` returns both the segwit (`p2wpkh`) and legacy (`p2pkh`) addresses for a Secp256k1 dWallet. Legacy and segwit share the ECDSA presign, so both sign through the standard flow (pass the matching `signature_scheme` to the gateway's request-signature step).
 
 > **Taproot will be activated once Ika leaves devnet.** Taproot requires a Schnorr presign (signature algorithm `Taproot`, value 2) and, because MPC cannot tweak the internal key, a script-path P2TR construction. None of this can be validated end-to-end while the network runs the pre-alpha mock signer, so Taproot stays disabled until the real distributed signer ships on the post-devnet network.
+
+#### Zcash (transparent)
+
+Zcash **transparent** (t-address) signing only — `secp256k1` + scheme `4` (`EcdsaBlake2b256`). Shielded (z-address, zk-SNARKs) is out of scope: the Ika network only signs the transparent ECDSA path.
+
+Zcash signs `BLAKE2b-256(preimage, personal = "ZcashSigHash" || consensus_branch_id)`. The personalization is delivered to the network via the Ika `message_metadata` field (built automatically by `prepare-message`), and the on-chain MessageApproval is keyed by `keccak256(preimage)` like every other chain. The gateway derives the MessageApproval PDA with the extra metadata seed and forwards the `ika_msg_metadata_digest` on-chain.
+
+Because the ZIP-243 preimage is built from the whole transaction, `prepare-message` for a `zcash:*` chain takes **structured tx fields** instead of `payloadHex` (the dev never implements ZIP-243):
+
+```jsonc
+POST /v1/dwallet/prepare-message
+{
+  "chainId": "zcash:main",
+  "zcash": {
+    "inputs":  [{ "txidHex": "<32-byte txid, ZIP-243 wire order>", "vout": 0, "sequence": 4294967295 }],
+    "outputs": [{ "value": "100000", "scriptPubKeyHex": "76a914…88ac" }],
+    "signTarget": { "inputIndex": 0, "scriptCodeHex": "76a914…88ac", "amount": "200000" },
+    "lockTime": 0, "expiryHeight": 0, "branchId": 3267656372  // NU5 (0xc2d6d0b4); omit for default
+  }
+}
+```
+
+The response adds `messageMetadataHex` (pass to `/sign` as `messageMetadataHex`) and `ikaMsgMetadataDigestHex` (pass to the gateway request-signature submit as `ika_msg_metadata_digest_hex`) alongside `preprocessedHex` + `digestHex`.
+
+> **Pre-alpha:** the mock signer does not verify the Zcash sighash, so the signature is not validated end-to-end live. The ZIP-243 preimage is asserted by unit tests; validate against an official ZIP-243 test vector + a Zcash node before any real use. Devnet only — no real funds.
 
 ### Login Social — OIDC pre-flow
 
