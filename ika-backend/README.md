@@ -94,7 +94,7 @@ Alpha 1; the response carries the disclaimer.
 |-------|----------|-------|
 | `POST /v1/dwallet/create` | `create_dwallet` | `passphrase` (≥12), optional `curve` (`Curve25519`/`Secp256k1`/`Secp256r1`), optional `attachPolicyEngine: true` (deploys a fresh PolicyEngine v3 and delegates the dWallet's authority in the same call). Returns `dwalletPublicKeyHex` (the curve-specific key destination addresses derive from). |
 | `POST /v1/dwallet/transfer-ownership` | `transfer_ownership` | Delegates dWallet authority to a new account (e.g. a PolicyEngine v3 CPI authority PDA). |
-| `POST /v1/dwallet/presign` | `presign` | Allocates a presign session. |
+| `POST /v1/dwallet/presign` | `presign` | Allocates a presign session → returns `presignSessionIdHex` + `epoch` (the presign is single-use and epoch-bound). |
 | `POST /v1/dwallet/sign` | `sign_message` | Signs a message using an approval + presign → returns `signatureBase64`. |
 | `GET /v1/dwallet/addresses/:dwalletAddress` | `dwallet_addresses` | Read-only: every chain-native address the dWallet's curve can hold (see "Supported destination chains"). No gas, no passphrase. |
 | `POST /v1/dwallet/prepare-message` | `prepare_message` | Stateless: `{ chainId, payloadHex, kind }` → `{ curve, scheme, preprocessedHex, digestHex }`. Single source of truth for the bytes to sign (`preprocessedHex` → `/sign`) and the on-chain digest (`digestHex` → request-signature). |
