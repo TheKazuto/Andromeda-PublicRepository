@@ -103,6 +103,10 @@ Capabilities beyond the core Ika and Encrypt primitives: the surrounding product
 - **IDL-aware Solana listener.** Websocket subscription that parses the 6 canonical Andromeda events and 4 Anchor self-CPI events from Ika, fanning out to per-tenant webhooks.
 - **HMAC-signed webhook system.** Replay-protected (5-minute window), retries with backoff, dead-letter queue.
 
+### Pre-sign safety (advisory)
+- **Transaction simulation (multi-chain).** Before signing, simulate against the destination chain and get the real effects back. EVM/Tron run a real `eth_call` (true revert) + `eth_estimateGas`; Solana runs `simulateTransaction`. Structured effects (native/token transfers, approvals, contract calls) are decoded from the transaction. The developer supplies their own destination-chain RPC per request — Andromeda hosts none — and the analysis degrades honestly to static calldata decoding when no RPC is given. That static decoding spans EVM/Tron, Solana, and eight more families (Cosmos, Bitcoin, VeChain, NEAR, Aptos, MultiversX, Algorand, Filecoin); a family with no decoder returns an explicit "cannot verify" instead of a false "safe".
+- **Risk scoring.** A risk level (none → critical) with reasons, from a self-hosted scam-address blocklist (MetaMask eth-phishing + OpenChain), a per-tenant denylist/allowlist, this dWallet's destination history, and calldata heuristics (unlimited approvals, `setApprovalForAll`, drainer patterns). **Advisory only**: it never blocks or refuses a signature — the on-chain policies stay the hard protection. The analysis is bound to the digest you sign, and the client RPC is SSRF-validated server-side.
+
 ### API surface
 - **API key management with scopes and IP allowlist.** Granular permissions (read, write, admin, wildcard), CIDR allowlist per key, SHA-256 hashing, async last-used tracking.
 
@@ -114,7 +118,6 @@ Capabilities beyond the core Ika and Encrypt primitives: the surrounding product
 
 ### Operational excellence
 - **Idempotency-Key.** Safe retries on every mutating endpoint, byte-identical replay, body-collision detection (422).
-- **Dry-run / Simulate.** Uses Solana simulateTransaction and returns a structured diagnostic with would-succeed flag, failure boundary, estimated compute units, emitted events, and full logs.
 - **Auto-batching of signatures.** Pack up to 64 signature requests into K Solana transactions (greedy packing, 1180-byte cap, max 16 per tx).
 
 ### Compliance + KMS
