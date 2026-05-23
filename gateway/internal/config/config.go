@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/joho/godotenv"
+
+	"github.com/shinkalabs/andromeda-gateway/internal/networks"
 )
 
 type Config struct {
@@ -21,6 +23,13 @@ type Config struct {
 	RedisURL    string
 
 	RateLimitFailOpen bool
+
+	// IdempotencyFailClosed makes the idempotency middleware reject with 503
+	// (instead of passing through) when Redis is unavailable on a route that
+	// REQUIRES an Idempotency-Key (destructive mutating routes). Defaults to
+	// true in production, false in dev. The DB token_ledger still catches
+	// duplicate charges either way; this just refuses the unprotected window.
+	IdempotencyFailClosed bool
 
 	// PresignPrefetchEnabled turns on async presign prefetch on the signing
 	// challenge (Update 2 Part A). Default off — pre-alpha's mock signer makes
@@ -107,6 +116,24 @@ type Config struct {
 	// OracleMonitorTick is how often the managed price-trigger watcher (F7.5)
 	// scans armed triggers and reads Hermes.
 	OracleMonitorTick time.Duration
+
+	// Oracle off-chain guards (Update 5 / F3). Defensive, not authoritative —
+	// the on-chain adapter remains the source of truth. Both 0 = disabled.
+	//   - OracleMaxDeviationBPS: the crank refuses to push a refresh whose new
+	//     canonical price deviates more than this (basis points) from the last
+	//     pushed value — catches bad prints / manipulated spikes.
+	//   - OracleMaxPublishLagSeconds: the crank refuses to push, and the monitor
+	//     drops, a price whose publish_time is older than this budget.
+	OracleMaxDeviationBPS      int
+	OracleMaxPublishLagSeconds int
+
+	// Multi-network scaffolding (Update 5 / F4). Off by default; the request hot
+	// path still uses the single-network fields above. When enabled,
+	// ANDROMEDA_NETWORKS (CSV of extra network names) plus suffixed env blocks
+	// (e.g. SOLANA_RPC_URL_TESTNET) define additional networks.
+	MultiNetworkEnabled bool
+	DefaultNetwork      string
+	ExtraNetworks       []string
 
 	// Base URL for SDK artifacts published by the build-sdk GitHub Action
 	// (e.g. https://github.com/shinkalabs/andromeda/releases/download).
@@ -238,6 +265,15 @@ func Load() *Config {
 		PythAdapterCrankEnabled: getenvBool("PYTH_ADAPTER_CRANK_ENABLED", false),
 		OracleMonitorTick:       time.Duration(getenvInt("ORACLE_MONITOR_TICK_SECONDS", 10)) * time.Second,
 
+		// Oracle off-chain guards (Update 5 / F3). Both 0 = disabled (the
+		// on-chain adapter still validates staleness + confidence as backstop).
+		OracleMaxDeviationBPS:      getenvInt("ORACLE_MAX_DEVIATION_BPS", 0),
+		OracleMaxPublishLagSeconds: getenvInt("ORACLE_MAX_PUBLISH_LAG_SECONDS", 0),
+
+		MultiNetworkEnabled: getenvBool("MULTI_NETWORK_ENABLED", false),
+		DefaultNetwork:      getenv("NETWORK_NAME", "devnet"),
+		ExtraNetworks:       splitCSV(getenv("ANDROMEDA_NETWORKS", "")),
+
 		SDKBaseURL:       strings.TrimRight(getenv("ANDROMEDA_SDK_BASE_URL", ""), "/"),
 		SDKVersionTag:    getenv("ANDROMEDA_SDK_VERSION_TAG", "sdk-v0.1.0"),
 		DashboardBaseURL: strings.TrimRight(getenv("ANDROMEDA_DASHBOARD_BASE_URL", ""), "/"),
@@ -263,10 +299,47 @@ func Load() *Config {
 		RiskFailMode:          getenv("RISK_FAIL_MODE", "open"),
 	}
 
+	// Default fail-closed in production: a Redis outage on a destructive
+	// mutating route then returns 503 rather than silently dropping the
+	// idempotency guard. Operators can still override with the env var.
+	cfg.IdempotencyFailClosed = getenvBool("IDEMPOTENCY_FAIL_CLOSED", cfg.Env == "production")
+
 	if err := cfg.validate(); err != nil {
 		log.Fatalf("config: %v", err)
 	}
 	return cfg
+}
+
+// Networks returns the inputs for the network registry (Update 5 / F4): the
+// default network built from the single-network fields, plus any extras parsed
+// from suffixed env blocks (e.g. SOLANA_RPC_URL_TESTNET) when MultiNetworkEnabled.
+func (c *Config) Networks() (networks.Network, []networks.Network) {
+	def := networks.Network{
+		Name:                  c.DefaultNetwork,
+		SolanaRPCURL:          c.SolanaRPCURL,
+		IkaUpstreamURL:        c.IkaUpstreamURL,
+		EncryptUpstreamURL:    c.EncryptUpstreamURL,
+		IkaProgramID:          c.IkaProgramID,
+		PolicyEngineProgramID: c.PolicyEngineProgramID,
+		GasSponsorKeypairJSON: c.GasSponsorKeypairJSON,
+	}
+	if !c.MultiNetworkEnabled {
+		return def, nil
+	}
+	var extras []networks.Network
+	for _, name := range c.ExtraNetworks {
+		suffix := "_" + strings.ToUpper(strings.TrimSpace(name))
+		extras = append(extras, networks.Network{
+			Name:                  name,
+			SolanaRPCURL:          strings.TrimRight(getenv("SOLANA_RPC_URL"+suffix, ""), "/"),
+			IkaUpstreamURL:        strings.TrimRight(getenv("IKA_UPSTREAM_URL"+suffix, ""), "/"),
+			EncryptUpstreamURL:    strings.TrimRight(getenv("ENCRYPT_UPSTREAM_URL"+suffix, ""), "/"),
+			IkaProgramID:          getenv("IKA_PROGRAM_ID"+suffix, ""),
+			PolicyEngineProgramID: getenv("ANDROMEDA_POLICY_ENGINE_PROGRAM_ID"+suffix, ""),
+			GasSponsorKeypairJSON: getenv("ANDROMEDA_GAS_SPONSOR_KEYPAIR"+suffix, ""),
+		})
+	}
+	return def, extras
 }
 
 func (c *Config) validate() error {

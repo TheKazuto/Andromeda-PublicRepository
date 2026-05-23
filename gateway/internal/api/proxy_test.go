@@ -40,7 +40,7 @@ func (f *fakeStore) TouchAPIKeyUsed(context.Context, string) error {
 	atomic.AddInt32(&f.touched, 1)
 	return nil
 }
-func (f *fakeStore) ConsumeTokensV2(_ context.Context, subID string, cost int) (*store.ConsumptionResult, error) {
+func (f *fakeStore) ConsumeTokensV2(_ context.Context, subID string, cost int, _ string) (*store.ConsumptionResult, error) {
 	atomic.AddInt32(&f.consumed, 1)
 	if f.consumeFn != nil {
 		return f.consumeFn(subID, cost)
@@ -51,7 +51,7 @@ func (f *fakeStore) ConsumeTokensV2(_ context.Context, subID string, cost int) (
 		Subscription: sub,
 	}, nil
 }
-func (f *fakeStore) RefundTokensV2(context.Context, string, store.ConsumptionResult) error {
+func (f *fakeStore) RefundTokensV2(context.Context, string, store.ConsumptionResult, string) error {
 	atomic.AddInt32(&f.refunded, 1)
 	return nil
 }

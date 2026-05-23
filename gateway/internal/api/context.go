@@ -14,6 +14,7 @@ const (
 	ctxKeyRoute
 	ctxKeyCost
 	ctxKeyConsumption
+	ctxKeyOpID
 )
 
 type authedRequest struct {
@@ -57,5 +58,17 @@ func withConsumption(r *http.Request, c *store.ConsumptionResult) *http.Request 
 
 func consumptionFrom(r *http.Request) *store.ConsumptionResult {
 	v, _ := r.Context().Value(ctxKeyConsumption).(*store.ConsumptionResult)
+	return v
+}
+
+// withOpID stashes the billing op id used to charge this request so the
+// proxy's refund() reverses the exact same ledger operation (idempotent +
+// clamped). Set by chargeQuota alongside the consumption breakdown.
+func withOpID(r *http.Request, opID string) *http.Request {
+	return r.WithContext(context.WithValue(r.Context(), ctxKeyOpID, opID))
+}
+
+func opIDFrom(r *http.Request) string {
+	v, _ := r.Context().Value(ctxKeyOpID).(string)
 	return v
 }

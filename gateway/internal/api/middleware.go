@@ -5,11 +5,13 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5/middleware"
 
 	"github.com/shinkalabs/andromeda-gateway/internal/auth"
+	"github.com/shinkalabs/andromeda-gateway/internal/idempotency"
 	"github.com/shinkalabs/andromeda-gateway/internal/mcp"
 	"github.com/shinkalabs/andromeda-gateway/internal/ratelimit"
 	"github.com/shinkalabs/andromeda-gateway/internal/routes"
@@ -235,9 +237,24 @@ func (s *Server) chargeQuota(routeKey string) func(http.Handler) http.Handler {
 				cost = 1
 			}
 
+			// opID ties the charge to its eventual refund so both hit the
+			// ledger as one idempotent operation. Prefer the client's
+			// Idempotency-Key (stable across the client's own retries), else
+			// chi's per-request id. Scope it by (subscription, route, key) — the
+			// same granularity as the HTTP idempotency layer — so the same
+			// Idempotency-Key on a different route or from a different tenant is
+			// a DISTINCT billing op. Without the scope a client could reuse one
+			// key to dodge charges across routes (or collide with another
+			// tenant's op_id and read a foreign breakdown).
+			idemKey := strings.TrimSpace(r.Header.Get(idempotency.HeaderName))
+			if idemKey == "" {
+				idemKey = requestIDFromCtx(r)
+			}
+			opID := a.Subscription.ID + ":" + routeKey + ":" + idemKey
+
 			ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 			defer cancel()
-			result, err := s.store.ConsumeTokensV2(ctx, a.Subscription.ID, cost)
+			result, err := s.store.ConsumeTokensV2(ctx, a.Subscription.ID, cost, opID)
 			switch {
 			case err == nil:
 			case errors.Is(err, store.ErrQuotaExceeded):
@@ -283,9 +300,12 @@ func (s *Server) chargeQuota(routeKey string) func(http.Handler) http.Handler {
 				}
 			}
 
-			ctxR := withConsumption(
-				withCost(withRoute(r, &routedRequest{Key: routeKey}), cost),
-				result,
+			ctxR := withOpID(
+				withConsumption(
+					withCost(withRoute(r, &routedRequest{Key: routeKey}), cost),
+					result,
+				),
+				opID,
 			)
 			next.ServeHTTP(w, ctxR)
 		})

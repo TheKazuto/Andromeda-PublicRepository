@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/shinkalabs/andromeda-gateway/internal/mcp"
 	"github.com/shinkalabs/andromeda-gateway/internal/store"
 )
@@ -36,12 +38,18 @@ func (c *mcpCharger) Charge(ctx context.Context, r *http.Request, toolKey string
 		cost = 1
 	}
 
+	// Stable op id for this tool call so the charge and its eventual refund
+	// hit the ledger as one idempotent operation. MCP has no client-supplied
+	// idempotency key, so a per-call uuid is the stable handle (charge +
+	// refund are paired in-process via the returned mcpRefund).
+	opID := uuid.NewString()
+
 	// Bound the consume the same way the REST chargeQuota middleware does —
 	// the inbound ctx is the request context and may be cancelled by the
 	// MCP client mid-call.
 	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	result, err := c.srv.store.ConsumeTokensV2(cctx, a.Subscription.ID, cost)
+	result, err := c.srv.store.ConsumeTokensV2(cctx, a.Subscription.ID, cost, opID)
 	switch {
 	case err == nil:
 	case errors.Is(err, store.ErrQuotaExceeded):
@@ -75,6 +83,7 @@ func (c *mcpCharger) Charge(ctx context.Context, r *http.Request, toolKey string
 		srv:            c.srv,
 		subscriptionID: a.Subscription.ID,
 		consumption:    result,
+		opID:           opID,
 	}, nil
 }
 
@@ -82,6 +91,7 @@ type mcpRefund struct {
 	srv            *Server
 	subscriptionID string
 	consumption    *store.ConsumptionResult
+	opID           string
 }
 
 func (r *mcpRefund) Refund(ctx context.Context) {
@@ -94,10 +104,13 @@ func (r *mcpRefund) Refund(ctx context.Context) {
 	// same posture as the REST proxy's refund().
 	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
 	defer cancel()
-	if err := r.srv.store.RefundTokensV2(rctx, r.subscriptionID, *r.consumption); err != nil {
+	if err := r.srv.store.RefundTokensV2(rctx, r.subscriptionID, *r.consumption, r.opID); err != nil {
 		r.srv.logger.Warn("mcp refund failed",
 			"err", err, "subscription", r.subscriptionID,
 			"from_monthly", r.consumption.FromMonthly,
 			"from_overage", r.consumption.FromOverage)
+		if r.srv.metrics != nil {
+			r.srv.metrics.RecordRefundFailed("mcp")
+		}
 	}
 }

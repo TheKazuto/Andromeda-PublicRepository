@@ -12,17 +12,83 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/rpc"
+	"github.com/gagliardetto/solana-go/rpc/jsonrpc"
 )
+
+// SendObserver is the optional metrics hook for SignAndSend. Implemented in the
+// metrics package; keeps gasponsor free of a prometheus dependency.
+type SendObserver interface {
+	// RecordSendUnknown counts a send that errored after the bytes may have
+	// reached the chain (TxPhaseSubmittedUnknown) — needs reconciliation.
+	RecordSendUnknown()
+}
 
 // Signer wraps the gas-sponsor keypair plus a Solana RPC client.
 type Signer struct {
 	priv      solana.PrivateKey
 	publicKey solana.PublicKey
 	rpc       *rpc.Client
+	observer  SendObserver
+}
+
+// TxPhase classifies how far a sponsored send got before failing, so callers
+// know whether the inputs are safe to roll back / reuse.
+type TxPhase string
+
+const (
+	// TxPhasePreflight — the failure happened before the tx could land on-chain
+	// (blockhash/build/sign failed, or the RPC rejected it at preflight without
+	// broadcasting). Safe to roll back and reuse the inputs.
+	TxPhasePreflight TxPhase = "preflight"
+	// TxPhaseSubmittedUnknown — the send errored after the bytes may already
+	// have been broadcast (transport error, deadline). The tx might have
+	// landed: do NOT reuse single-use inputs (e.g. a presign); reconcile by
+	// signature instead.
+	TxPhaseSubmittedUnknown TxPhase = "submitted_unknown"
+)
+
+// TxSendError carries the phase of a failed SignAndSend plus the locally-signed
+// transaction signature (best-effort) so a reconcile job can look it up.
+type TxSendError struct {
+	Phase     TxPhase
+	Signature solana.Signature // locally computed at sign time; zero if we failed before signing
+	Err       error
+}
+
+func (e *TxSendError) Error() string {
+	return fmt.Sprintf("gasponsor send (%s): %v", e.Phase, e.Err)
+}
+func (e *TxSendError) Unwrap() error { return e.Err }
+
+// SafeToRetry reports whether the inputs can be rolled back / reused. Only the
+// preflight phase guarantees the transaction never landed.
+func (e *TxSendError) SafeToRetry() bool { return e.Phase == TxPhasePreflight }
+
+// classifySendError maps a SendTransactionWithOpts error to a phase. A
+// structured JSON-RPC error normally means the node rejected the request before
+// broadcasting (preflight simulation failed, bad params, stale blockhash) —
+// safe to roll back. The exception is an "already processed" / duplicate error:
+// that means the tx DID land, so it is submitted_unknown (do not reuse
+// single-use inputs). Non-RPC errors (transport timeout, reset, deadline) may
+// also have landed — be conservative.
+func classifySendError(err error) TxPhase {
+	var rpcErr *jsonrpc.RPCError
+	if errors.As(err, &rpcErr) {
+		msg := strings.ToLower(rpcErr.Message)
+		if strings.Contains(msg, "already processed") ||
+			strings.Contains(msg, "already been processed") ||
+			strings.Contains(msg, "already in block") {
+			return TxPhaseSubmittedUnknown
+		}
+		return TxPhasePreflight
+	}
+	return TxPhaseSubmittedUnknown
 }
 
 // New parses a JSON byte-array keypair (64 bytes: 32 secret + 32 public)
@@ -54,6 +120,13 @@ func New(keypairJSON string, rpcClient *rpc.Client) (*Signer, error) {
 		publicKey: priv.PublicKey(),
 		rpc:       rpcClient,
 	}, nil
+}
+
+// WithObserver attaches the optional metrics hook. Returns the signer for
+// chaining. Safe to skip — a nil observer just means no metric.
+func (s *Signer) WithObserver(o SendObserver) *Signer {
+	s.observer = o
+	return s
 }
 
 // PublicKey returns the gas sponsor's public key (used as fee payer in
@@ -111,17 +184,23 @@ func (s *Signer) PartialSignTx(tx *solana.Transaction) error {
 
 // SignAndSend builds a v0 Solana transaction with the gas sponsor as fee
 // payer, signs it, sends it via RPC, and returns `(txSignature, error)`.
+//
+// On failure the error is a *TxSendError carrying the phase (preflight vs
+// submitted_unknown): callers that depend on rolling back / reusing single-use
+// inputs must only do so when err.SafeToRetry() (i.e. preflight). In the
+// submitted_unknown phase the tx may have landed — the error also carries the
+// locally-signed signature for reconciliation.
 func (s *Signer) SignAndSend(ctx context.Context, ixs []solana.Instruction) (solana.Signature, error) {
 	if len(ixs) == 0 {
-		return solana.Signature{}, errors.New("gasponsor.SignAndSend: empty instruction list")
+		return solana.Signature{}, &TxSendError{Phase: TxPhasePreflight, Err: errors.New("gasponsor.SignAndSend: empty instruction list")}
 	}
 	bh, err := s.rpc.GetLatestBlockhash(ctx, rpc.CommitmentConfirmed)
 	if err != nil {
-		return solana.Signature{}, fmt.Errorf("get latest blockhash: %w", err)
+		return solana.Signature{}, &TxSendError{Phase: TxPhasePreflight, Err: fmt.Errorf("get latest blockhash: %w", err)}
 	}
 	tx, err := solana.NewTransaction(ixs, bh.Value.Blockhash, solana.TransactionPayer(s.publicKey))
 	if err != nil {
-		return solana.Signature{}, fmt.Errorf("build tx: %w", err)
+		return solana.Signature{}, &TxSendError{Phase: TxPhasePreflight, Err: fmt.Errorf("build tx: %w", err)}
 	}
 	if _, err := tx.Sign(func(key solana.PublicKey) *solana.PrivateKey {
 		if key.Equals(s.publicKey) {
@@ -129,14 +208,28 @@ func (s *Signer) SignAndSend(ctx context.Context, ixs []solana.Instruction) (sol
 		}
 		return nil
 	}); err != nil {
-		return solana.Signature{}, fmt.Errorf("sign tx: %w", err)
+		return solana.Signature{}, &TxSendError{Phase: TxPhasePreflight, Err: fmt.Errorf("sign tx: %w", err)}
+	}
+	// The first signature slot is the fee payer's — deterministic from the
+	// signed bytes, so we have it even when the send call errors.
+	var localSig solana.Signature
+	if len(tx.Signatures) > 0 {
+		localSig = tx.Signatures[0]
 	}
 	sig, err := s.rpc.SendTransactionWithOpts(ctx, tx, rpc.TransactionOpts{
 		SkipPreflight:       false,
 		PreflightCommitment: rpc.CommitmentConfirmed,
 	})
 	if err != nil {
-		return solana.Signature{}, fmt.Errorf("send tx: %w", err)
+		phase := classifySendError(err)
+		if phase == TxPhaseSubmittedUnknown {
+			slog.Warn("gas sponsor tx submitted but status unknown — reconcile by signature",
+				"signature", localSig.String(), "err", err)
+			if s.observer != nil {
+				s.observer.RecordSendUnknown()
+			}
+		}
+		return solana.Signature{}, &TxSendError{Phase: phase, Signature: localSig, Err: fmt.Errorf("send tx: %w", err)}
 	}
 	return sig, nil
 }

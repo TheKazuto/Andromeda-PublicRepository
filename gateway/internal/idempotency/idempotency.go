@@ -67,6 +67,11 @@ type MiddlewareOptions struct {
 	// recovery primary submit, DKG submit, future-sign submit) cannot be
 	// retried without a key.
 	RequireKey func(*http.Request) bool
+	// FailClosed, when true, makes a Redis outage reject RequireKey routes
+	// with 503 instead of passing them through unprotected. Non-RequireKey
+	// routes always fail open (idempotency is best-effort there). The DB
+	// token_ledger is the last line of defence regardless.
+	FailClosed bool
 }
 
 // New returns a chi-style middleware. When Redis is nil it returns a no-op
@@ -98,12 +103,13 @@ func handle(w http.ResponseWriter, r *http.Request, next http.Handler, opts Midd
 		next.ServeHTTP(w, r)
 		return
 	}
+	required := opts.RequireKey != nil && opts.RequireKey(r)
 	key := strings.TrimSpace(r.Header.Get(HeaderName))
 	if key == "" {
 		// Hard-fail when the route requires the header. Keeps dashboard
 		// retries from accidentally submitting the same destructive
 		// mutation twice on a transient network blip.
-		if opts.RequireKey != nil && opts.RequireKey(r) {
+		if required {
 			writeJSONError(w, http.StatusBadRequest, "missing_idempotency_key",
 				"Idempotency-Key header is required for this route")
 			return
@@ -163,6 +169,12 @@ func handle(w http.ResponseWriter, r *http.Request, next http.Handler, opts Midd
 		}
 		opts.Logger.Warn("idempotency cache decode failed; ignoring", "err", jerr)
 	} else if !errors.Is(err, redis.Nil) {
+		if opts.FailClosed && required {
+			opts.Logger.Warn("idempotency redis get failed; failing closed", "err", err)
+			writeJSONError(w, http.StatusServiceUnavailable, "idempotency_unavailable",
+				"idempotency backend unavailable — retry shortly")
+			return
+		}
 		opts.Logger.Warn("idempotency redis get failed; failing open", "err", err)
 		next.ServeHTTP(w, r)
 		return
@@ -171,6 +183,12 @@ func handle(w http.ResponseWriter, r *http.Request, next http.Handler, opts Midd
 	// Acquire lock for concurrent-request detection.
 	acquired, err := opts.Redis.SetNX(ctx, lockKey, bodyHash, lockTTL).Result()
 	if err != nil {
+		if opts.FailClosed && required {
+			opts.Logger.Warn("idempotency lock acquire failed; failing closed", "err", err)
+			writeJSONError(w, http.StatusServiceUnavailable, "idempotency_unavailable",
+				"idempotency backend unavailable — retry shortly")
+			return
+		}
 		opts.Logger.Warn("idempotency lock acquire failed; failing open", "err", err)
 		next.ServeHTTP(w, r)
 		return

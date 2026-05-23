@@ -195,10 +195,11 @@ func (s *Server) recordUsage(r *http.Request, routeKey string, status int, laten
 }
 
 // refund undoes the consumption charge attached to the request when an
-// upstream 5xx happens. It uses the bucket-aware ConsumptionResult
-// stored in context — refunds monthly and overage; credits are NOT
-// refunded (schema does not track per-row credit debits — see
-// store/consume.go RefundTokensV2 godoc).
+// upstream 5xx happens. It uses the bucket-aware ConsumptionResult stored
+// in context and reverses ALL buckets that paid — credits, monthly and
+// overage (RefundTokensV2 walks CreditDebits to undo each credit row). The
+// refund is keyed by the same opID used for the charge, so it is applied at
+// most once and clamped to what was actually consumed.
 func (s *Server) refund(r *http.Request) {
 	a := authFrom(r)
 	if a == nil || a.Subscription == nil {
@@ -212,11 +213,14 @@ func (s *Server) refund(r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	if err := s.store.RefundTokensV2(ctx, a.Subscription.ID, *consumption); err != nil {
+	if err := s.store.RefundTokensV2(ctx, a.Subscription.ID, *consumption, opIDFrom(r)); err != nil {
 		s.logger.Warn("refund failed",
 			"err", err,
 			"subscription", a.Subscription.ID,
 			"from_monthly", consumption.FromMonthly,
 			"from_overage", consumption.FromOverage)
+		if s.metrics != nil {
+			s.metrics.RecordRefundFailed("rest")
+		}
 	}
 }

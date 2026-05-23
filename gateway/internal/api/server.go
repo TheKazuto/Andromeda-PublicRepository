@@ -109,6 +109,9 @@ func NewServer(d Deps) *Server {
 		// predicate matches by method + literal path *prefix* (handles chi's
 		// `{param}` placeholders by stripping the trailing segment match).
 		RequireKey: routes.RequiresIdempotencyKeyForRequest,
+		// F2 (Update 5): on those RequireKey routes, reject with 503 when
+		// Redis is down instead of passing through unprotected.
+		FailClosed: d.Config != nil && d.Config.IdempotencyFailClosed,
 	}
 	if d.Audit != nil {
 		idemOpts.OnReplay = func(r *http.Request, key string, status int) {
