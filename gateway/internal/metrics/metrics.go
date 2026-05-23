@@ -11,6 +11,7 @@ package metrics
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
@@ -128,6 +129,12 @@ type Metrics struct {
 	// Async presign prefetch (Update 2 Part A). Bounded labels only.
 	PresignPrefetchTotal *prometheus.CounterVec // labels: result (ok|error) — background presign dispatched at challenge time
 	PresignHarvestTotal  *prometheus.CounterVec // labels: result (hit|miss) — submit lookup of the prefetched presign
+
+	// Risk blocklist ingestor (H4). Bounded labels only (no per-feed cardinality explosion).
+	RiskFeedDownloadFailuresTotal   *prometheus.CounterVec // labels: source
+	RiskFeedVariationSkipsTotal     *prometheus.CounterVec // labels: source
+	RiskFeedEntriesUpsertedTotal    *prometheus.CounterVec // labels: source
+	RiskFeedLastSuccessSecondsGauge *prometheus.GaugeVec   // labels: source (unix ts of last success per feed)
 }
 
 // New builds and registers every collector. Returns the Metrics bundle
@@ -456,6 +463,23 @@ func New() (*Metrics, http.Handler) {
 		Help: "Cumulative count of Solana sendTransaction calls that returned duplicate-signature.",
 	})
 
+	m.RiskFeedDownloadFailuresTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "gateway", Subsystem: "risk", Name: "feed_download_failures_total",
+		Help: "Risk blocklist feed download failures by source.",
+	}, []string{"source"})
+	m.RiskFeedVariationSkipsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "gateway", Subsystem: "risk", Name: "feed_variation_skips_total",
+		Help: "Risk blocklist feed updates skipped due to variation threshold by source.",
+	}, []string{"source"})
+	m.RiskFeedEntriesUpsertedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "gateway", Subsystem: "risk", Name: "feed_entries_upserted_total",
+		Help: "Risk blocklist entries successfully upserted by source.",
+	}, []string{"source"})
+	m.RiskFeedLastSuccessSecondsGauge = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: "gateway", Subsystem: "risk", Name: "feed_last_success_timestamp_seconds",
+		Help: "Unix timestamp of the last successful ingestion per feed source.",
+	}, []string{"source"})
+
 	reg.MustRegister(
 		m.HTTPRequestsTotal,
 		m.HTTPRequestDuration,
@@ -511,6 +535,10 @@ func New() (*Metrics, http.Handler) {
 		m.OracleMonitorErrorsTotal,
 		m.OracleFeedRefreshTotal,
 		m.OracleArmedTriggers,
+		m.RiskFeedDownloadFailuresTotal,
+		m.RiskFeedVariationSkipsTotal,
+		m.RiskFeedEntriesUpsertedTotal,
+		m.RiskFeedLastSuccessSecondsGauge,
 	)
 
 	handler := promhttp.HandlerFor(reg, promhttp.HandlerOpts{
@@ -732,6 +760,40 @@ func (m *Metrics) SetOracleArmedTriggers(n int) {
 		return
 	}
 	m.OracleArmedTriggers.Set(float64(n))
+}
+
+// --- risk.IngestorMetrics adapter (H4) ---
+
+// RecordRiskFeedDownloadFailure implements risk.IngestorMetrics.
+func (m *Metrics) RecordRiskFeedDownloadFailure(source string) {
+	if m == nil || m.RiskFeedDownloadFailuresTotal == nil {
+		return
+	}
+	m.RiskFeedDownloadFailuresTotal.WithLabelValues(source).Inc()
+}
+
+// RecordRiskFeedVariationSkip implements risk.IngestorMetrics.
+func (m *Metrics) RecordRiskFeedVariationSkip(source string) {
+	if m == nil || m.RiskFeedVariationSkipsTotal == nil {
+		return
+	}
+	m.RiskFeedVariationSkipsTotal.WithLabelValues(source).Inc()
+}
+
+// RecordRiskFeedEntriesUpserted implements risk.IngestorMetrics.
+func (m *Metrics) RecordRiskFeedEntriesUpserted(source string) {
+	if m == nil || m.RiskFeedEntriesUpsertedTotal == nil {
+		return
+	}
+	m.RiskFeedEntriesUpsertedTotal.WithLabelValues(source).Inc()
+}
+
+// RecordRiskFeedLastSuccessSeconds implements risk.IngestorMetrics — sets the unix ts.
+func (m *Metrics) RecordRiskFeedLastSuccessSeconds(source string) {
+	if m == nil || m.RiskFeedLastSuccessSecondsGauge == nil {
+		return
+	}
+	m.RiskFeedLastSuccessSecondsGauge.WithLabelValues(source).Set(float64(time.Now().Unix()))
 }
 
 // StatusClass converts an HTTP status into a coarse class label

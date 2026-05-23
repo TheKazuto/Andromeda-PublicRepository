@@ -98,6 +98,7 @@ func (g Generator) tags() []Document {
 		{"name": "ika", "description": "MPC engine: dWallet creation, signing, recovery, Login Social (OIDC)."},
 		{"name": "encrypt", "description": "FHE engine: ciphertexts, graph execution, decrypt, NEK."},
 		{"name": "policy-engine", "description": "Unified policy program (v3): single Quasar program that hosts allowlist / velocity / time-lock / oracle / passkey / fhe-gated / session-key / recovery rules per dWallet."},
+		{"name": "risk", "description": "Transaction risk advisory (off-chain, opt-in, never blocks): destination scoring + optional EVM/Solana simulation against a client-provided RPC."},
 		{"name": "pricing", "description": "Public pricing — plans, route costs, estimator."},
 		{"name": "me", "description": "Authenticated user — balance and usage."},
 		{"name": "gifts", "description": "Gift card preview, redeem, and Stripe checkout."},

@@ -47,6 +47,11 @@ type Service struct {
 	auditAppender AuditAppender
 	resolveAPIKey func(*http.Request) (string, error)
 
+	// RT2: optional tenant resolver for risk routes. Resolves the API key ID
+	// from the request context. Used by /v1/policy/risk/* CRUD endpoints
+	// to determine the tenant scope. Wired via WithTenantResolver.
+	tenantResolver func(*http.Request) (string, error)
+
 	// oracleRefresher (optional) prepends a refresh_feed to the gas-sponsored
 	// request_signature for each sponsored FeedCache the tx reads, so the price
 	// is fresh at signing time. Wired in main with the Pyth adapter program id.
@@ -65,6 +70,20 @@ type Service struct {
 	// up to presignDispatchTimeout). Non-blocking: when full, the prefetch is
 	// dropped (best-effort) and /sign allocates the presign inline.
 	presignSem chan struct{}
+
+	// RT2: optional risk scoring service for transaction risk gating.
+	// When set, evaluates destination risk before signing. Wired via
+	// WithRiskService in main.
+	riskService RiskService
+
+	// RT2: optional config service for managing risk policies.
+	// Wired via WithRiskConfigService in main.
+	riskConfigService RiskConfigService
+
+	// RT2: optional HTTP client for internal ika-backend simulation endpoint.
+	// Used to verify digest matches before risk evaluation. Wired via
+	// WithIkaSimulateClient in main with circuit breaker.
+	ikaSimulateClient IkaSimulateClient
 }
 
 // OracleRefresher builds refresh_feed instructions to prepend to a
@@ -76,11 +95,69 @@ type OracleRefresher interface {
 	RefreshIxs(ctx context.Context, feedCaches []solana.PublicKey) ([]solana.Instruction, error)
 }
 
+// RiskService is the minimal contract for RT2 risk scoring.
+// Evaluates transaction risk and returns a score with action.
+// Declared here to avoid import cycles from internal/risk.
+type RiskService interface {
+	Evaluate(ctx context.Context, input interface{}) (interface{}, error)
+}
+
+// RiskConfigService is the minimal contract for RT2 policy management.
+// Handles CRUD operations on dWallet and tenant risk configurations.
+// Risk Layer is advisory-only: only warn_level is configurable.
+// Declared here to avoid import cycles from internal/risk.
+type RiskConfigService interface {
+	UpsertDWalletConfig(ctx context.Context, dwalletAddress, tenantID, warnLevel string, simulationEnabled bool) (interface{}, error)
+	GetDWalletConfig(ctx context.Context, dwalletAddress string) (interface{}, error)
+	DeleteDWalletConfig(ctx context.Context, dwalletAddress string) error
+	UpsertTenantDefaults(ctx context.Context, tenantID, warnLevel string) (interface{}, error)
+	GetTenantDefaults(ctx context.Context, tenantID string) (interface{}, error)
+	AddToDenylist(ctx context.Context, tenantID, destination, reason string) error
+	RemoveFromDenylist(ctx context.Context, tenantID, destination string) error
+	AddToAllowlist(ctx context.Context, tenantID, destination, reason string) error
+	RemoveFromAllowlist(ctx context.Context, tenantID, destination string) error
+}
+
+// IkaSimulateClient is the minimal contract for calling ika-backend simulation.
+// Used to verify digest matches before risk evaluation.
+type IkaSimulateClient interface {
+	SimulateTransaction(ctx context.Context, req interface{}) (interface{}, error)
+}
+
 // WithOracleRefresher wires refresh-on-sign for the gas-sponsored
 // request_signature path. Optional; without it, signing relies on the managed
 // crank / permissionless refresh for freshness.
 func (s *Service) WithOracleRefresher(r OracleRefresher) *Service {
 	s.oracleRefresher = r
+	return s
+}
+
+// WithRiskService wires RT2 risk scoring for transaction evaluation.
+// Optional; when set, evaluates destination risk before signing.
+func (s *Service) WithRiskService(rs RiskService) *Service {
+	s.riskService = rs
+	return s
+}
+
+// WithRiskConfigService wires RT2 policy management.
+// Optional; when set, enables /v1/policy/risk/* CRUD endpoints.
+func (s *Service) WithRiskConfigService(rcs RiskConfigService) *Service {
+	s.riskConfigService = rcs
+	return s
+}
+
+// WithIkaSimulateClient wires RT2 digest verification via internal ika-backend.
+// Optional; when set (along with riskService), verifies digest before risk evaluation.
+func (s *Service) WithIkaSimulateClient(ic IkaSimulateClient) *Service {
+	s.ikaSimulateClient = ic
+	return s
+}
+
+// WithTenantResolver wires RT2 tenant resolution for risk CRUD routes.
+// The resolver callback extracts the tenant ID from the authenticated request context.
+// Used by /v1/policy/risk/* endpoints to scope dWallet and policy operations.
+func (s *Service) WithTenantResolver(f func(*http.Request) (string, error)) *Service {
+	s.tenantResolver = f
 	return s
 }
 
@@ -209,6 +286,12 @@ func (s *Service) MountRoutes(r chi.Router) {
 	r.Post("/v1/policy/passkey/use/challenge", s.passkeyUseChallenge)
 	r.Post("/v1/policy/passkey/use/submit", s.passkeyUseSubmit)
 	r.Post("/v1/policy/passkey/session/close", s.passkeyClose)
+
+	// RT2: Risk configuration management (CRUD operations).
+	// Mounted only if riskConfigService is wired.
+	if s.riskConfigService != nil {
+		s.mountRiskRoutes(r)
+	}
 }
 
 // ─── DTOs ───────────────────────────────────────────────────────────────────
@@ -730,6 +813,13 @@ type requestSignatureChallengeRequest struct {
 	AssetIndex uint8  `json:"asset_index,omitempty" validate:"max=15"`
 }
 
+// riskAdvisory represents optional advisory information about transaction risk.
+// Attached to challenge/submit responses when Risk Layer evaluates risk.
+type riskAdvisory struct {
+	Level   string   `json:"level"`   // "none" | "low" | "medium" | "high" | "critical"
+	Reasons []string `json:"reasons"` // sanitized risk factors (advisory only)
+}
+
 type requestSignatureChallengeResponse struct {
 	EngineAddress  string `json:"engine_address"`
 	MetadataDigest string `json:"metadata_digest_hex"`
@@ -767,6 +857,7 @@ func (s *Service) requestSignatureChallenge(w http.ResponseWriter, r *http.Reque
 	}
 	pre := in.Preimage()
 	digest := in.Hash()
+
 	// Update 2 Part A: kick off the presign now (during the human review/sign
 	// window), keyed by the metadata digest the submit will replay. Non-fatal.
 	s.firePresignPrefetch(r, req.DwalletAddress, hex.EncodeToString(digest[:]))

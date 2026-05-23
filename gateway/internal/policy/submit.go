@@ -3,6 +3,7 @@ package policy
 import (
 	"context"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -76,18 +77,9 @@ func (f signedSubmitFields) decode() (sig []byte, authData []byte, cdj []byte, e
 
 // txSignatureResponse — every /submit endpoint returns this on success.
 type txSignatureResponse struct {
-	TxSignature   string `json:"tx_signature"`
-	EngineAddress string `json:"engine_address"`
-	// ApprovalSlot is the slot the request_signature tx landed in — pass it as
-	// `approvalSlot` to POST /v1/dwallet/sign (the Ika ApprovalProof). Omitted
-	// when confirmation timed out; the client then fetches it from the tx
-	// signature via any Solana RPC. Only set by the signing submits.
-	ApprovalSlot uint64 `json:"approval_slot,omitempty"`
-	// PresignSessionIdHex is the presign prefetched during the challenge window
-	// (Update 2 Part A), ready for the client to pass straight to
-	// POST /v1/dwallet/sign. Omitted when prefetch is off, missed, or N/A —
-	// the /sign fallback then allocates a presign inline. Additive: existing
-	// submit responses that don't set it serialize exactly as before.
+	TxSignature         string `json:"tx_signature"`
+	EngineAddress       string `json:"engine_address"`
+	ApprovalSlot        uint64 `json:"approval_slot,omitempty"`
 	PresignSessionIdHex string `json:"presign_session_id_hex,omitempty"`
 }
 
@@ -679,9 +671,7 @@ func (s *Service) requestSignatureSubmit(w http.ResponseWriter, r *http.Request)
 	extra := fmt.Sprintf(`{"signature_scheme":%d,"rules_generation":%d}`,
 		req.SignatureScheme, req.RulesGeneration)
 	s.appendAuditSubmit(r, "request-signature", engine.String(), dwallet.String(), sigOut.String(), extra)
-	// Update 2 Part A: hand the client the presign prefetched at challenge time
-	// (keyed by the same metadata digest), so /sign skips the inline allocation.
-	// approval_slot is the slot this tx landed in — needed by /v1/dwallet/sign.
+
 	httpx.WriteJSON(w, http.StatusOK, txSignatureResponse{
 		TxSignature:         sigOut.String(),
 		EngineAddress:       engine.String(),
@@ -1054,6 +1044,152 @@ func buildCredentialPrecompile(
 		return nil, err
 	}
 	return ix, nil
+}
+
+// evaluateRiskAdvisory is the helper behind the dedicated POST /v1/policy/risk/evaluate
+// endpoint. The signing flow (challenge/submit) does NOT call it — risk is an opt-in,
+// read-only tool. It evaluates transaction risk and returns advisory + simulation + digest_verified.
+// (best-effort, never blocks). Parameters:
+//   - rawTxB64: base64-encoded transaction (optional)
+//   - chainID: CAIP-2 chain identifier (optional, paired with rawTxB64)
+//   - destinationHex: hex-encoded destination address (optional)
+//   - expectedDigestHex: message_digest_hex that the client obtained from challenge (for verification, optional)
+//   - rpcURL: destination-chain RPC the client funds (optional; enables real EVM simulation; SSRF-checked in ika-backend)
+//   - dwallet: dWallet public key (can be zero if not provided)
+//
+// Returns (advisory, simulation, digestVerified). Both advisory and error are always nil
+// (best-effort); on errors the function logs and returns nil advisory, nil simulation, false.
+func (s *Service) evaluateRiskAdvisory(ctx context.Context, r *http.Request,
+	rawTxB64, chainID, destinationHex, expectedDigestHex, rpcURL string, dwallet solana.PublicKey,
+) (*riskAdvisory, interface{}, bool) {
+	if s.riskService == nil {
+		return nil, nil, false // risk service not configured
+	}
+
+	// Parse the raw transaction and call ika-backend simulate endpoint if provided.
+	var simulationResult interface{}
+	var calldataRisk interface{}
+	digestVerified := false
+
+	if rawTxB64 != "" {
+		// Decode base64 raw_transaction.
+		txBytes, err := base64.StdEncoding.DecodeString(rawTxB64)
+		if err != nil {
+			// Client sent invalid base64; best-effort: log and proceed without simulation.
+			slog.Warn("evaluateRiskAdvisory: invalid raw_transaction base64", "dwallet", dwallet.String(), "err", err)
+			return nil, nil, false
+		}
+
+		// Call internal ika-backend simulate endpoint to verify digest matches.
+		// This guards against the client trying to submit a different transaction
+		// than what they requested a digest for.
+		if s.ikaSimulateClient != nil {
+			simReq := map[string]interface{}{
+				"chain_id":               chainID,
+				"payload_hex":            hex.EncodeToString(txBytes),
+				"kind":                   "transaction",
+				"expected_digest_hex":    expectedDigestHex,
+				"dwallet_public_key_hex": dwallet.String(),
+			}
+			// Forward the client-funded RPC for real (EVM) simulation; ika-backend
+			// validates it against SSRF before any outbound call.
+			if rpcURL != "" {
+				simReq["rpc_url"] = rpcURL
+			}
+
+			simResp, err := s.ikaSimulateClient.SimulateTransaction(ctx, simReq)
+			if err != nil {
+				// Digest verification failed; return advisory but proceed (not a blocker).
+				slog.Warn("evaluateRiskAdvisory: digest verification failed", "dwallet", dwallet.String(), "err", err)
+				return &riskAdvisory{
+					Level:   "high",
+					Reasons: []string{"transaction could not be verified (digest mismatch); proceeding without simulation"},
+				}, nil, false
+			}
+
+			// Check the response for digest match and extract simulation data.
+			if respMap, ok := simResp.(map[string]interface{}); ok {
+				if digestMatches, ok := respMap["digest_matches"].(bool); ok {
+					if !digestMatches {
+						// Digest does not match; return advisory but proceed (not a blocker).
+						return &riskAdvisory{
+							Level:   "high",
+							Reasons: []string{"transaction could not be verified (digest mismatch); proceeding without simulation"},
+						}, nil, false
+					}
+					digestVerified = true // digest matched
+				}
+
+				// Extract simulation and calldata risk (optional fields) from response.
+				if sim, ok := respMap["simulation"]; ok {
+					simulationResult = sim
+				}
+				if cdRisk, ok := respMap["calldata_risk"]; ok {
+					calldataRisk = cdRisk
+				}
+			}
+		}
+	}
+
+	// Resolve tenant_id from the authenticated request context.
+	var tenantID string
+	if s.tenantResolver != nil {
+		if tid, err := s.tenantResolver(r); err == nil && tid != "" {
+			tenantID = tid
+		}
+	}
+
+	// Extract request_id from middleware context if available.
+	var requestID string
+	if reqIDVal := r.Context().Value("request_id"); reqIDVal != nil {
+		if rid, ok := reqIDVal.(string); ok {
+			requestID = rid
+		}
+	}
+
+	// Construct the EvaluateInput for risk.Service.
+	evalInput := map[string]interface{}{
+		"dwallet_address": dwallet.String(),
+		"destination":     destinationHex,
+		"tenant_id":       tenantID,
+		"request_id":      requestID,
+		"simulation":      simulationResult,
+		"calldata_risk":   calldataRisk,
+	}
+
+	// Evaluate risk using the risk service.
+	// Risk service returns (*Score, error) — we convert to riskAdvisory.
+	scoreResp, err := s.riskService.Evaluate(ctx, evalInput)
+	if err != nil {
+		// Best-effort: on error, proceed without advisory.
+		slog.Warn("evaluateRiskAdvisory: risk evaluation error (proceeding)", "dwallet", dwallet.String(), "err", err)
+		return nil, simulationResult, digestVerified
+	}
+
+	if scoreResp == nil {
+		return nil, simulationResult, digestVerified
+	}
+
+	// Convert map[string]interface{} to riskAdvisory (only attach if level != "none").
+	scoreMap, ok := scoreResp.(map[string]interface{})
+	if !ok {
+		return nil, simulationResult, digestVerified
+	}
+
+	levelVal, ok := scoreMap["level"].(string)
+	if !ok || levelVal == "none" {
+		return nil, simulationResult, digestVerified
+	}
+
+	var reasons []string
+	if reasonsVal, ok := scoreMap["reasons"].([]string); ok {
+		reasons = reasonsVal
+	}
+
+	return &riskAdvisory{
+		Level:   levelVal,
+		Reasons: reasons,
+	}, simulationResult, digestVerified
 }
 
 // Avoid an unused-import warning when context is referenced only by the

@@ -104,6 +104,96 @@ func extraEndpoints() []Extra {
 				"200": Document{"description": "Stream open. Connection stays alive until closed by either side."},
 			},
 		}},
+
+		// ---- Transaction risk (advisory; opt-in, never blocks) ----
+		{Path: "/v1/policy/risk/evaluate", Method: "POST", Operation: Document{
+			"operationId": "evaluateRisk",
+			"summary":     "Advisory transaction risk + optional simulation. Opt-in per request, always 200, never blocks signing. All fields optional: destination_hex, raw_transaction (base64) + chain_id (CAIP-2), message_digest_hex (binding), and rpc_url — the dev's own destination-chain RPC that enables a real EVM (eth_call + estimateGas) or Solana simulation (SSRF-validated server-side). Without rpc_url the simulation degrades to static calldata analysis.",
+			"tags":        []string{"risk"},
+			"requestBody": passthroughBody(),
+			"responses":   standardResponses(),
+		}},
+		{Path: "/v1/policy/risk/config/{dwalletAddress}", Method: "GET", Operation: Document{
+			"operationId": "getRiskConfig",
+			"summary":     "Get the per-dWallet risk configuration.",
+			"tags":        []string{"risk"},
+			"parameters":  []Document{dwalletPathParam()},
+			"responses":   standardResponses(),
+		}},
+		{Path: "/v1/policy/risk/config/{dwalletAddress}", Method: "PUT", Operation: Document{
+			"operationId": "updateRiskConfig",
+			"summary":     "Create or update the per-dWallet risk configuration (warn level, simulation toggle).",
+			"tags":        []string{"risk"},
+			"parameters":  []Document{dwalletPathParam()},
+			"requestBody": passthroughBody(),
+			"responses":   standardResponses(),
+		}},
+		{Path: "/v1/policy/risk/config/{dwalletAddress}", Method: "DELETE", Operation: Document{
+			"operationId": "deleteRiskConfig",
+			"summary":     "Delete the per-dWallet risk configuration (revert to tenant defaults).",
+			"tags":        []string{"risk"},
+			"parameters":  []Document{dwalletPathParam()},
+			"responses":   standardResponses(),
+		}},
+		{Path: "/v1/policy/risk/defaults", Method: "GET", Operation: Document{
+			"operationId": "getRiskDefaults",
+			"summary":     "Get the tenant-level default risk policy.",
+			"tags":        []string{"risk"},
+			"responses":   standardResponses(),
+		}},
+		{Path: "/v1/policy/risk/defaults", Method: "PUT", Operation: Document{
+			"operationId": "updateRiskDefaults",
+			"summary":     "Update the tenant-level default risk policy.",
+			"tags":        []string{"risk"},
+			"requestBody": passthroughBody(),
+			"responses":   standardResponses(),
+		}},
+		{Path: "/v1/policy/risk/denylist", Method: "POST", Operation: Document{
+			"operationId": "addRiskDenylist",
+			"summary":     "Add a destination to the tenant denylist.",
+			"tags":        []string{"risk"},
+			"requestBody": passthroughBody(),
+			"responses":   standardResponses(),
+		}},
+		{Path: "/v1/policy/risk/denylist/{destination}", Method: "DELETE", Operation: Document{
+			"operationId": "removeRiskDenylist",
+			"summary":     "Remove a destination from the tenant denylist.",
+			"tags":        []string{"risk"},
+			"parameters":  []Document{destinationPathParam()},
+			"responses":   standardResponses(),
+		}},
+		{Path: "/v1/policy/risk/allowlist", Method: "POST", Operation: Document{
+			"operationId": "addRiskAllowlist",
+			"summary":     "Add a destination to the tenant allowlist (false-positive override).",
+			"tags":        []string{"risk"},
+			"requestBody": passthroughBody(),
+			"responses":   standardResponses(),
+		}},
+		{Path: "/v1/policy/risk/allowlist/{destination}", Method: "DELETE", Operation: Document{
+			"operationId": "removeRiskAllowlist",
+			"summary":     "Remove a destination from the tenant allowlist.",
+			"tags":        []string{"risk"},
+			"parameters":  []Document{destinationPathParam()},
+			"responses":   standardResponses(),
+		}},
+	}
+}
+
+// dwalletPathParam is the {dwalletAddress} path parameter shared by the
+// per-dWallet risk config endpoints.
+func dwalletPathParam() Document {
+	return Document{
+		"name": "dwalletAddress", "in": "path", "required": true,
+		"schema": Document{"type": "string"}, "description": "Base58 dWallet address.",
+	}
+}
+
+// destinationPathParam is the {destination} path parameter shared by the
+// risk denylist/allowlist delete endpoints.
+func destinationPathParam() Document {
+	return Document{
+		"name": "destination", "in": "path", "required": true,
+		"schema": Document{"type": "string"}, "description": "Normalized destination address.",
 	}
 }
 
