@@ -16,6 +16,7 @@ import (
 	"github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/rpc"
 	"github.com/google/uuid"
+	"github.com/sony/gobreaker/v2"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	"github.com/shinkalabs/andromeda-gateway/internal/api"
@@ -33,6 +34,7 @@ import (
 	"github.com/shinkalabs/andromeda-gateway/internal/pricing"
 	"github.com/shinkalabs/andromeda-gateway/internal/ratelimit"
 	"github.com/shinkalabs/andromeda-gateway/internal/redisclient"
+	"github.com/shinkalabs/andromeda-gateway/internal/risk"
 	"github.com/shinkalabs/andromeda-gateway/internal/store"
 	"github.com/shinkalabs/andromeda-gateway/internal/upstream"
 	"github.com/shinkalabs/andromeda-gateway/internal/usage"
@@ -322,6 +324,91 @@ func main() {
 		logger.Info("policy-engine v3 disabled — set ANDROMEDA_POLICY_ENGINE_PROGRAM_ID to enable")
 	}
 
+	// --- RT2: Risk assessment layer (always available as advisory) ---
+	// Evaluates transaction risk before signing based on destination, history,
+	// on-chain freshness, and custom denylist/allowlist. Integrates with
+	// ika-backend simulation for digest verification. Advisory-only: never blocks.
+	// Opt-in per-request via raw_transaction presence in challenge/submit.
+	if policyV3Svc != nil {
+		// Instantiate the actual risk.Service with registered sources
+		// (blocklist, tenant denylist/allowlist, destination history).
+		// OnchainFreshness is deferred to RT4 (requires per-chain RPC clients).
+
+		// Adapter: converts between store.Store and risk package interfaces.
+		storeAdapter := policy.NewStoreAdapter(db)
+
+		// Create and register pluggable risk sources.
+		sources := policy.NewRiskRegistry()
+		sources.Register(policy.NewBlocklistSource(storeAdapter))
+		sources.Register(policy.NewTenantDenylistSource(storeAdapter))
+		sources.Register(policy.NewTenantAllowlistSource(storeAdapter))
+		sources.Register(policy.NewDestHistorySource(storeAdapter))
+		// NOTE: OnchainFreshnessSource deferred to RT4 (requires RPC client + chain detection).
+
+		// Create the core risk.Service with sources.
+		internalRiskSvc := policy.NewRiskService(storeAdapter, logger)
+		// Register all sources.
+		for _, src := range sources.All() {
+			internalRiskSvc.RegisterSource(src)
+		}
+
+		// Create the config service.
+		internalRiskConfigSvc := policy.NewRiskConfigService(storeAdapter)
+
+		// Wrap both in policy layer adapters (map[string]interface{} ↔ typed).
+		riskSvc := policy.NewRiskServiceAdapter(internalRiskSvc)
+		riskConfigSvc := policy.NewRiskConfigServiceAdapter(internalRiskConfigSvc)
+
+		// Create the internal ika-backend HTTP client with circuit breaker.
+		// Only instantiate if IkaUpstreamURL and InternalAPIKey are both set
+		// (for digest verification). Without them, calldata/simulation are unavailable,
+		// but risk evaluation of destination still works.
+		var ikaClient policy.IkaSimulateClient
+		if cfg.IkaUpstreamURL != "" && cfg.InternalAPIKey != "" {
+			ikaClientSettings := gobreaker.Settings{
+				Name:        "ika-simulate",
+				MaxRequests: 1,
+				Interval:    60 * time.Second,
+				Timeout:     30 * time.Second,
+				ReadyToTrip: func(c gobreaker.Counts) bool {
+					if c.ConsecutiveFailures >= 5 {
+						return true
+					}
+					if c.Requests >= 20 {
+						ratio := float64(c.TotalFailures) / float64(c.Requests)
+						return ratio >= 0.5
+					}
+					return false
+				},
+			}
+
+			ic, err := policy.NewIkaSimulateClient(
+				cfg.IkaUpstreamURL,
+				cfg.InternalAPIKey,
+				ikaClientSettings,
+				15*time.Second, // timeout for simulate calls
+			)
+			if err != nil {
+				logger.Warn("RT2: ika-backend client init failed (continuing without digest verification)", "err", err)
+			} else {
+				ikaClient = ic
+			}
+			logger.Info("RT2: risk assessment layer with digest verification enabled",
+				"ika_url", cfg.IkaUpstreamURL,
+				"sources", len(sources.All()))
+		} else {
+			logger.Info("RT2: risk assessment layer enabled (digest verification disabled — set IKA_UPSTREAM_URL + INTERNAL_API_KEY to enable)",
+				"sources", len(sources.All()))
+		}
+
+		// Wire all three into policyV3Svc.
+		policyV3Svc.WithRiskService(riskSvc)
+		policyV3Svc.WithRiskConfigService(riskConfigSvc)
+		if ikaClient != nil {
+			policyV3Svc.WithIkaSimulateClient(ikaClient)
+		}
+	}
+
 	// --- Refresh-on-sign (optional) ---
 	// When the Pyth adapter program id is configured, the gas-sponsored
 	// request_signature prepends a refresh_feed for each sponsored FeedCache it
@@ -439,6 +526,80 @@ func main() {
 	// Billing migrated to backend (M1 of architecture split). Gateway
 	// no longer boots a Stripe service or overage worker — those live
 	// in `backend/cmd/server`.
+
+	// RISK INGEST (RT3): Periodic blocklist feed ingestion with leader election.
+	// Only runs when feeds are configured via RISK_BLOCKLIST_FEEDS.
+	if len(cfg.RiskBlocklistFeeds) > 0 {
+		feedSources := make([]risk.FeedSource, 0, len(cfg.RiskBlocklistFeeds))
+		feedURLs := make([]string, 0, len(cfg.RiskBlocklistFeeds))
+
+		// C1: Parse feed config using pipe (|) separator to avoid collision with https:// scheme.
+		// Format: "https://example.com/list.json|metamask-phishing|phishing|Apache-2.0"
+		for _, feedSpec := range cfg.RiskBlocklistFeeds {
+			parts := strings.Split(feedSpec, "|")
+			if len(parts) < 3 {
+				logger.Warn("risk feed format invalid, skipping",
+					"feed", feedSpec, "expected", "url|source|category|[license]")
+				continue
+			}
+
+			url := strings.TrimSpace(parts[0])
+			source := strings.TrimSpace(parts[1])
+			category := strings.TrimSpace(parts[2])
+			license := ""
+			if len(parts) > 3 {
+				license = strings.TrimSpace(parts[3])
+			}
+
+			if url == "" || source == "" || category == "" {
+				logger.Warn("risk feed has empty fields, skipping", "feed", feedSpec)
+				continue
+			}
+
+			feedSources = append(feedSources, risk.FeedSource{
+				URL:      url,
+				Source:   source,
+				Category: category,
+				License:  license,
+			})
+			feedURLs = append(feedURLs, url)
+		}
+
+		if len(feedSources) > 0 {
+			// C2: Seed feeds in database at boot so ClaimDueFeedRuns has something to work with
+			if err := db.SeedFeedRuns(bootCtx, feedURLs); err != nil {
+				logger.Error("seed risk feeds failed", "err", err)
+			} else {
+				logger.Info("risk feeds seeded", "count", len(feedURLs))
+			}
+
+			ingestor := risk.NewIngestor(risk.IngestorOptions{
+				Store:                     db,
+				FeedRuns:                  db,
+				Logger:                    logger,
+				URLGuard:                  urlGuard,
+				Feeds:                     feedSources,
+				TickInterval:              cfg.RiskIngestTickSec,
+				HTTPTimeout:               30 * time.Second,
+				VariationThresholdPercent: 30,
+			})
+
+			// H1 + H5: Wrap ingestor in leader election to ensure single-replica ingestion
+			// and proper graceful shutdown via rootCtx.
+			spawn("risk-ingestor-leader", (&leader.Runner{
+				Pool:   db.Pool(),
+				Name:   "risk-ingestor",
+				LockID: leader.RiskIngestorLockID,
+				Func: func(ctx context.Context) {
+					ingestor.Start(ctx)
+					<-ctx.Done()
+				},
+				Logger: logger,
+			}).Start)
+			logger.Info("risk blocklist ingestor running (leader-elected)",
+				"feeds", len(feedSources), "tick", cfg.RiskIngestTickSec)
+		}
+	}
 
 	// --- HTTP server ---
 	srv := api.NewServer(api.Deps{
@@ -663,6 +824,14 @@ func stateToFloat(state string) float64 {
 	default:
 		return 0
 	}
+}
+
+// safeGet safely accesses a slice element by index with a default fallback.
+func safeGet(s []string, idx int, def string) string {
+	if idx < len(s) {
+		return s[idx]
+	}
+	return def
 }
 
 func parseLevel(s string) slog.Level {

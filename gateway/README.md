@@ -100,6 +100,7 @@ production, `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, `Per
 | **PolicyEngine v3 — admin** | `policy/init/{challenge,submit}`, `policy/rules/add/{challenge,submit}`, `policy/rules/{ruleIndex}/items/add/{challenge,submit}` — challenge → owner-signs → submit. Admin scope, Idempotency-Key MANDATORY on every submit. | admin | local |
 | **PolicyEngine v3 — recovery** | `policy/recover-as-primary/{challenge,submit}` (single-tx primary) · `policy/quorum/session/{open,contribute}/{challenge,submit}` · `policy/quorum/session/{finalize,close}` · `policy/passkey/session/open/{challenge,submit}` · `policy/passkey/use/{challenge,submit}` · `policy/passkey/session/close` | write | local |
 | **PolicyEngine v3 — request signature** | `policy/request-signature/{challenge,submit}` — runtime metadata digest (V2: binds `amount` + `asset_index` for `KIND_SPENDING_USD`) + on-chain dispatch loop across every active rule slot + CPI Ika `approve_message`. `signature_scheme` accepts 0..6 (incl. EdDSA=5 for Solana/Sui). | write | local |
+| **Transaction risk (advisory)** | `policy/risk/evaluate` (opt-in advisory simulation + risk score; the dev passes their own `rpc_url`) · `GET/PUT/DELETE policy/risk/config/{dwalletAddress}` · `GET/PUT policy/risk/defaults` · `POST/DELETE policy/risk/{denylist,allowlist}` | read / write | local + ika-backend |
 | **Login Social — OIDC pre-flow** | `POST oidc/{nonce,validate}` — canonical OAuth `nonce` builder + provider JWKS pre-validation of `id_token`s. 8 KiB body cap on `/validate` (carries a JWT). | write / read | proxied to ika-backend |
 | **OAuth broker (Login Social)** | `GET oauth/{authorize,callback}`, `POST oauth/token-exchange` — gateway-hosted Andromeda OAuth client (Google + Apple, `scope=openid` only). Authorization Code + PKCE. Free (no token cost). | write | gateway |
 | **Private TX** | `private-tx/submit`, `GET private-tx/status/{signature}` | write / read | proxied to encrypt-backend |
@@ -185,6 +186,33 @@ Solana / passkey), and POST it back to `/submit`. The gateway pays the Solana fe
 flat, two string fields, uniform across `/v1/policy/*`, `/v1/webhooks/*`, `/v1/audit/*`,
 `/v1/future-sign/*` and the proxy layer. (Errors *forwarded* from an engine keep that engine's body
 verbatim. The `/mcp` endpoint speaks JSON-RPC and uses its own error object.)
+
+### Transaction risk (advisory)
+
+An **off-chain, opt-in** safety layer that runs **before** signing to warn about a transaction. It is
+**advisory only**: it never blocks or refuses a signature, never changes a policy decision, and always
+responds `200`. The on-chain policies remain the hard protection of funds — this layer is prevention,
+not custody.
+
+`POST /v1/policy/risk/evaluate` — every field is optional; the dev sends what they have:
+
+| Field | Purpose |
+|-------|---------|
+| `destination_hex` | Score the destination against the global blocklist + tenant denylist/allowlist + per-dWallet history. Works with no RPC. |
+| `raw_transaction` (base64) + `chain_id` (CAIP-2) | Decode the calldata and (with an RPC) simulate it. |
+| `message_digest_hex` | Binds the analysis to the exact tx that will be signed — the engine recomputes the digest and refuses to simulate a different transaction. |
+| `rpc_url` | **The dev's own destination-chain RPC.** Andromeda does not host RPCs. With it, the engine runs a **real simulation** — EVM/Tron via `eth_call` (true revert) + `eth_estimateGas`, Solana via `simulateTransaction` — and extracts structured effects (native/token transfers, approvals, contract call). Without it, the analysis degrades honestly to static calldata decoding. |
+
+The RPC is forwarded to the `ika-backend` (which performs the decode/simulation) and is **SSRF-validated
+there** before any outbound call: http/https only; localhost, private/loopback/link-local/metadata/ULA
+targets are rejected, every DNS-resolved IP is checked, and redirects are disabled. The gateway's own
+paid Solana RPC is never used to simulate user transactions.
+
+Response: `{ "risk": { "level": "none|low|medium|high|critical", "reasons": [...] }, "simulation": { ... } | null, "digest_verified": bool }`.
+
+Per-dWallet config (`GET/PUT/DELETE /v1/policy/risk/config/{dwalletAddress}`), tenant defaults
+(`GET/PUT /v1/policy/risk/defaults`) and the destination denylist/allowlist
+(`POST/DELETE /v1/policy/risk/{denylist,allowlist}`) tune the `warn` level and false-positive overrides.
 
 ## MCP server (`/mcp`)
 
