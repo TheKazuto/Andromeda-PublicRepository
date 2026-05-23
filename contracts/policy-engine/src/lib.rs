@@ -1590,6 +1590,13 @@ mod policy_engine_program {
         // no spending rule is active.
         amount: u64,
         asset_index: u8,
+        // Update 6 (ABI V3): the Ika `message_metadata_digest` forwarded to
+        // `approve_message`. Opaque 32 bytes — the program does NOT interpret it
+        // (Zcash BLAKE2b personal, future sr25519 context, etc. all live
+        // off-chain). `[0u8; 32]` (the default for every chain without signing
+        // metadata) reproduces the prior behaviour. NOT bound to the Andromeda
+        // `metadata_digest` above — they are independent bindings.
+        ika_msg_metadata_digest: [u8; 32],
     ) -> Result<(), ProgramError> {
         let current_ts: i64 = ctx.accounts.clock.unix_timestamp.into();
         let engine_addr = *ctx.accounts.engine.address();
@@ -2441,13 +2448,14 @@ mod policy_engine_program {
             &ctx.accounts.payer.to_account_view(),
             &ctx.accounts.system_program.to_account_view(),
             message_digest,
-            // F9-SIGN: Ika message_metadata_digest = 0 (the signed message carries
-            // no Ika metadata). The Andromeda policy challenge (metadata_digest) is
-            // already enforced above via the request_metadata_digest match, so
-            // binding it into the Ika MessageApproval here is both redundant and
-            // breaks the Ika Sign step (the network derives the approval with empty
-            // metadata → otherwise "MessageApproval PDA not found").
-            [0u8; 32],
+            // Update 6 (ABI V3): forward the caller-supplied Ika
+            // message_metadata_digest. `[0u8; 32]` (the default for every chain
+            // without signing metadata) keeps the prior F9-SIGN behaviour — the
+            // network derives the MessageApproval WITHOUT a metadata seed. For
+            // Zcash (and future sr25519) it is non-zero, and the gateway derived
+            // the MessageApproval PDA with the matching metadata seed. This is
+            // independent of the Andromeda policy `metadata_digest` enforced above.
+            ika_msg_metadata_digest,
             user_pubkey,
             signature_scheme,
             message_approval_bump,
