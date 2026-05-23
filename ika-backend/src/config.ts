@@ -272,6 +272,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   // (used by /v1/dwallet/transfer-ownership). Boot continues without it,
   // and the route throws a clear error on first call.
 
+  // Risk layer: the EVM RPC for simulation is provided per-request by the
+  // client (the dev funds their own RPC); there is no server-side RPC config.
+
   if (errors.length > 0) throw new ConfigError(errors)
 
   return {
