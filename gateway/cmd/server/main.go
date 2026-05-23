@@ -27,6 +27,7 @@ import (
 	"github.com/shinkalabs/andromeda-gateway/internal/leader"
 	gwmetrics "github.com/shinkalabs/andromeda-gateway/internal/metrics"
 	"github.com/shinkalabs/andromeda-gateway/internal/netsafety"
+	"github.com/shinkalabs/andromeda-gateway/internal/networks"
 	"github.com/shinkalabs/andromeda-gateway/internal/observability"
 	"github.com/shinkalabs/andromeda-gateway/internal/oraclemonitor"
 	"github.com/shinkalabs/andromeda-gateway/internal/oraclerelay"
@@ -141,6 +142,22 @@ func main() {
 	// --- Metrics (Prometheus) ---
 	metrics, metricsHandler := gwmetrics.New()
 	logger.Info("metrics registry ready")
+
+	// --- Network registry (Update 5 / F4 scaffolding) ---
+	// Built + validated at boot so a misconfigured multi-network setup fails
+	// fast. NOT wired into the request hot path yet — devnet behaviour is
+	// unchanged; the registry always has the single default network unless
+	// MULTI_NETWORK_ENABLED + per-network env blocks are set.
+	defNet, extraNets := cfg.Networks()
+	netRegistry, err := networks.NewRegistry(defNet, extraNets)
+	if err != nil {
+		logger.Error("network registry init failed", "err", err)
+		os.Exit(1)
+	}
+	logger.Info("network registry ready",
+		"default", netRegistry.Default().Name,
+		"networks", netRegistry.Names(),
+		"multi_network", cfg.MultiNetworkEnabled)
 
 	// Attach observers now that metrics exist — the rate limiter exports
 	// Redis eval latency + error/fail-open counters via this hook.
@@ -311,6 +328,8 @@ func main() {
 					logger.Error("gas sponsor init failed", "err", err)
 					os.Exit(1)
 				}
+				// F5: count submitted_unknown sends for reconciliation alerting.
+				sponsor.WithObserver(metrics)
 				policyV3Svc.WithGasSponsor(sponsor)
 				logger.Info("gas sponsor ready", "public_key", sponsor.PublicKey().String())
 			} else {
@@ -446,6 +465,7 @@ func main() {
 			logger.Error("pyth adapter: authority key init failed", "err", err)
 			os.Exit(1)
 		}
+		relaySigner.WithObserver(metrics)
 		var seeds []oraclerelay.FeedSeed
 		if cfg.PythAdapterFeedsJSON != "" {
 			if err := json.Unmarshal([]byte(cfg.PythAdapterFeedsJSON), &seeds); err != nil {
@@ -465,6 +485,9 @@ func main() {
 			Logger:       logger,
 			CrankEnabled: cfg.PythAdapterCrankEnabled,
 			Metrics:      metrics,
+			// F3 off-chain guards (default 0 = off).
+			MaxDeviationBPS:      cfg.OracleMaxDeviationBPS,
+			MaxPublishLagSeconds: cfg.OracleMaxPublishLagSeconds,
 		})
 		if err != nil {
 			logger.Error("pyth adapter: oracle relay init failed", "err", err)
@@ -499,7 +522,7 @@ func main() {
 	if policyV3Svc != nil && cfg.GasSponsorKeypairJSON != "" && cfg.SolanaRPCURL != "" {
 		omWatcher := oraclemonitor.NewWatcher(oraclemonitor.WatcherOptions{
 			Store:     omStore,
-			Prices:    oraclemonitor.NewHermesClient(cfg.PythHermesURL),
+			Prices:    oraclemonitor.NewHermesClient(cfg.PythHermesURL).WithMaxPublishLag(cfg.OracleMaxPublishLagSeconds),
 			Firer:     policyV3Svc,
 			Publisher: whPublisher,
 			Metrics:   metrics,

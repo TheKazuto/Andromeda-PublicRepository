@@ -36,6 +36,7 @@ gateway/
 │   ├── oauth/              # OAuth broker handlers (Login Social — Google + Apple, Authorization Code + PKCE)
 │   ├── routes/             # Route catalogue (REST + MCP source of truth)
 │   ├── upstream/           # Reverse-proxy to ika + encrypt engines
+│   ├── networks/           # Multi-network registry (F4 scaffolding; X-Network header, built+validated at boot, not yet wired to the hot path)
 │   ├── pricing/            # Token cost cache (pricer worker)
 │   ├── ratelimit/          # Redis sliding window
 │   ├── idempotency/        # Idempotency-Key store
@@ -259,6 +260,8 @@ Every route has a token cost (1 / 5 / 25 / 50 / 125). Plans hold a monthly allow
 
 Consumption order (atomic): `credits → monthly → overage`. Refund on upstream 5xx reverses each bucket.
 
+Both charge and refund are idempotent at the database level via the `token_ledger` table, keyed by an op id scoped as `subscription:route:key` (the same granularity as the HTTP idempotency layer). A retried or replayed request never double-charges, the refund is applied at most once and clamped to what the charge consumed, and the same op id can't collide across routes or tenants. A refund that fails *after* a charge landed increments `gateway_billing_refund_failed_total{surface}` (`surface` = `rest`/`mcp`) — alert on it: the user was charged but the tokens were not returned. `IDEMPOTENCY_FAIL_CLOSED` controls whether a Redis outage on a destructive route is rejected (503) or passed through (the ledger still catches duplicates either way).
+
 ## Background workers
 
 | Worker | Cadence | Purpose | Enabled when | Multi-replica |
@@ -366,6 +369,8 @@ Worker tunables (env, optional): `AUDIT_SIGNER_BATCH=100`, `AUDIT_SIGNER_TICK_MS
 | `PYTH_HERMES_URL` | `https://hermes.pyth.network` | Pyth Hermes endpoint — used by `GET /v1/oracle/catalog` and by the price-trigger monitor's live-price reads. |
 | `PYTH_ADAPTER_CRANK_ENABLED` | `false` | Periodic refresh crank. **Retired by default (F7.5)** — refresh-on-sign + the monitor keep feeds fresh on demand. Set `true` only if a feed must stay warm for reads outside a signing tx. Bootstrap + admin routes run regardless. |
 | `ORACLE_MONITOR_TICK_SECONDS` | `10` | How often the managed price-trigger monitor scans armed triggers + reads Hermes. The monitor runs only when the policy-engine + gas sponsor (`ANDROMEDA_GAS_SPONSOR_KEYPAIR`) + `SOLANA_RPC_URL` are all configured. |
+| `ORACLE_MAX_DEVIATION_BPS` | `0` (off) | Off-chain deviation guard (F3): the crank refuses to push a refresh whose new canonical price deviates more than this (basis points) from the last accepted value (e.g. `2000` = 20%). Auto-recovers after a sustained out-of-band move. Defensive only — the on-chain adapter stays authoritative; a too-tight band can freeze a legitimate move, so calibrate per asset. |
+| `ORACLE_MAX_PUBLISH_LAG_SECONDS` | `0` (off) | Off-chain staleness budget (F3): the crank refuses to push, and the Hermes monitor drops, a price whose `publish_time` is older than this. The on-chain `OracleStale` check remains the backstop. |
 
 The price-trigger monitor (`/v1/oracle/triggers`) and refresh-on-sign reuse the PolicyEngine signing wiring (`ANDROMEDA_POLICY_ENGINE_PROGRAM_ID`, `ANDROMEDA_GAS_SPONSOR_KEYPAIR`, `SOLANA_RPC_URL`); the gas sponsor pays both the refresh and the fired `request_signature`, so a dev needs no SOL.
 
@@ -380,6 +385,7 @@ The managed monitor + feed relay export (bounded labels, no per-feed/per-tenant 
 | `gateway_oracle_monitor_errors_total{stage}` | counter | loop errors by `stage` (`tick`/`hermes`/`claim`/`reap`) |
 | `gateway_oracle_monitor_armed_triggers` | gauge | armed triggers (sampled every 15s) |
 | `gateway_oracle_relay_feed_refresh_total{result}` | counter | FeedCache refresh outcomes (`success`/`skipped`/`stale`/`error`) |
+| `gateway_oracle_relay_refresh_rejected_total{reason}` | counter | off-chain reads refused by the F3 guards (`reason` = `deviation`/`lag`) |
 
 Recommended alerts (PromQL):
 
@@ -411,7 +417,21 @@ Each upload is recorded in the `audit_snapshot_log` table — point-in-time look
 | `SOLANA_RPC_URL` | Enables the on-chain event listener. Also required by the PolicyEngine v3 `/submit` endpoints — the gateway builds the Solana tx in-process, signs as gas sponsor, and broadcasts via this RPC. Empty → admin/recover submits return `503 no_rpc`. |
 | `IKA_PROGRAM_ID` | Ika dWallet program (must match the ika-backend's). Referenced by the `KIND_RECOVERY` / `KIND_PASSKEY` dispatchers when building the CPI to `approve_message`. |
 | `ANDROMEDA_POLICY_ENGINE_PROGRAM_ID` | Deployed `policy-engine` Quasar program. Devnet: `ARfJadMTH8mvAWprE8oMoRGNamKVDX9GV3URvudYyXgL`. Empty → the local `/v1/policy/*` routes are not mounted. |
-| `ANDROMEDA_GAS_SPONSOR_KEYPAIR` | JSON byte array (64 B, `solana-keygen` format). Gateway pays gas for every PolicyEngine v3 Solana tx so users never need a Solana wallet. Empty → `/submit` endpoints return `503 no_gas_sponsor`. Never commit it; keep it funded. |
+| `ANDROMEDA_GAS_SPONSOR_KEYPAIR` | JSON byte array (64 B, `solana-keygen` format). Gateway pays gas for every PolicyEngine v3 Solana tx so users never need a Solana wallet. Empty → `/submit` endpoints return `503 no_gas_sponsor`. Never commit it; keep it funded. A send that fails after the tx may already have been broadcast (transport error / deadline) is classified `submitted_unknown`, logged with its signature for reconciliation, and counted by `gateway_gas_sponsor_send_unknown_total` (alert on it); a clean preflight rejection is safe to retry. |
+
+### Multi-network (F4 scaffolding)
+
+Andromeda is devnet-only today; the request path uses the single-network vars above. A network
+registry is built and validated at boot from them (and any extras), behind a flag, so a misconfigured
+multi-network setup fails fast. It is **not** wired into the proxy / gas sponsor yet — resolving the
+per-request `X-Network` header into the active network is the remaining step for when a second network
+exists. With the flag off, only the default network exists and behaviour is unchanged.
+
+| Var | Default | Notes |
+|-----|---------|-------|
+| `MULTI_NETWORK_ENABLED` | `false` | Enable the multi-network registry (extras parsing). |
+| `NETWORK_NAME` | `devnet` | Name of the default network (built from the single-network vars above). |
+| `ANDROMEDA_NETWORKS` | empty | CSV of extra network names. Each `<NET>` reads suffixed blocks: `SOLANA_RPC_URL_<NET>`, `IKA_UPSTREAM_URL_<NET>`, `ENCRYPT_UPSTREAM_URL_<NET>`, `IKA_PROGRAM_ID_<NET>`, `ANDROMEDA_POLICY_ENGINE_PROGRAM_ID_<NET>`, `ANDROMEDA_GAS_SPONSOR_KEYPAIR_<NET>`. |
 
 ### OAuth broker — Login Social (opt-in)
 
@@ -440,12 +460,13 @@ Mounts `GET /v1/oauth/authorize`, `GET /v1/oauth/callback` and `POST /v1/oauth/t
 | Var | Default | Notes |
 |-----|---------|-------|
 | `RATE_LIMIT_FAIL_OPEN` | `true` (dev) | When Redis is unreachable: `true` allows requests through, `false` rejects with `503`. **Must be `false` in production** (see *Required in production*). |
+| `IDEMPOTENCY_FAIL_CLOSED` | `false` (dev) / `true` (prod) | On routes that require an `Idempotency-Key` (destructive mutations), reject with `503` when Redis is down instead of passing through unprotected. The `token_ledger` still catches duplicate charges either way; this just closes the unprotected window. |
 | `DEFAULT_REQUEST_COST` | `1` | Fallback token cost for route keys not in `request_costs` (must be ≥ 1). |
 | `PRICING_REFRESH_SECONDS` | `60` | Pricer cache refresh interval. |
 | `UPSTREAM_TIMEOUT_SECONDS` | `30` | Default upstream timeout (per-route overrides exist for heavy MPC ops — DKG, sign, quorum finalize: 90–120s). |
 | `GATEWAY_MAX_BODY_BYTES` | `10485760` | Global body cap (10 MiB). Per-route caps (1 MiB for signing/mutating) still apply at the handler. |
 | `TRUSTED_PROXY_CIDRS` | empty | CIDRs of reverse proxies whose `X-Forwarded-For` / `X-Real-IP` may be trusted for API-key IP allowlists. Empty = trust only the socket peer. **Required behind an edge proxy** (see *Required in production*); a malformed CIDR is fatal in production, a warning in dev. |
-| `IKA_PRESIGN_PREFETCH_ENABLED` | `false` | Async presign prefetch (Update 2 Part A): the signing challenge (`request-signature` / `recover-as-primary`) fires the presign in the background; the matching submit returns it as `presign_session_id_hex` for `/v1/dwallet/sign` to reuse. Single-use, tenant-scoped, short TTL — not a pool. Fully non-fatal (the `/sign` inline allocation is the fallback). Keep `false` in pre-alpha (mock signer = no latency to hide); flip on at Alpha. Needs `REDIS_URL` + the ika upstream. |
+| `IKA_PRESIGN_PREFETCH_ENABLED` | `false` | Async presign prefetch (Update 2 Part A): the signing challenge (`request-signature` / `recover-as-primary`) fires the presign in the background; the matching submit returns it as `presign_session_id_hex` for `/v1/dwallet/sign` to reuse. Single-use, tenant-scoped, short TTL — not a pool. Fully non-fatal (the `/sign` inline allocation is the fallback). Keep `false` in pre-alpha (mock signer = no latency to hide); flip on at Alpha. Needs `REDIS_URL` + the ika upstream. **F1 hardening:** dispatch is idempotent per (tenant, challenge) via a Redis lock and bounded per tenant/minute; the cached presign carries its `epoch` and a harvest past that epoch is dropped (client allocates inline); presigns paid for but never used increment `gateway_presign_prefetch_leaked_total{reason}`. |
 | `IKA_PRESIGN_PREFETCH_TTL_SECONDS` | `120` | TTL of the ephemeral presign cache (align to challenge validity). |
 
 #### Postgres pool
