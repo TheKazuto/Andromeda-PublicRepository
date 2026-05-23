@@ -45,6 +45,7 @@ import {
   requestDkg,
   requestPresign,
   requestSign,
+  resolveEpoch,
   sessionIdentifierFromAttestation,
   deriveDwalletAddress,
   Curve,
@@ -382,18 +383,25 @@ export async function transferDwalletOwnership(opts: {
 /**
  * Allocate one single-use global presign for the dWallet's curve. No passphrase
  * needed — it only reads the record's metadata (curve + owner pubkey).
+ *
+ * Also returns the Ika `epoch` the presign was allocated in. Presigns are
+ * epoch-bound and single-use; the gateway uses the epoch to drop a cached
+ * presign once the network has moved past it (so it never hands a dead presign
+ * to /sign). `resolveEpoch` is cached (30s) and was already warmed by
+ * `requestPresign`, so this adds no extra gRPC round-trip.
  */
 export async function allocatePresign(opts: {
   ownerRef: string
   dwalletAddress: string
-}): Promise<{ presignSessionId: Uint8Array }> {
+}): Promise<{ presignSessionId: Uint8Array; epoch: bigint }> {
   const meta = await getWalletKeyMeta(opts)
   const presignSessionId = await requestPresign({
     curve: curveNameFromId(meta.curve),
     senderPubkey: meta.signerPubkey,
     sessionIdentifier: sessionIdentifierFromAttestation(meta.attestationData),
   })
-  return { presignSessionId }
+  const epoch = await resolveEpoch(meta.signerPubkey)
+  return { presignSessionId, epoch }
 }
 
 export interface WalletAddressesResult {

@@ -247,8 +247,10 @@ export function mountMcpWalletRoutes(router: Router, config: AppConfig): void {
     try {
       const ownerRef = ownerRefOf(req.header('x-andromeda-user-id'))
       const body = presignSchema.parse(req.body)
-      const { presignSessionId } = await allocatePresign({ ownerRef, dwalletAddress: body.dwalletAddress })
-      res.json(ok({ presignSessionIdHex: Buffer.from(presignSessionId).toString('hex') }))
+      const { presignSessionId, epoch } = await allocatePresign({ ownerRef, dwalletAddress: body.dwalletAddress })
+      // `epoch` is string-encoded (uint64) so the gateway can drop the presign
+      // once the network epoch advances past it. Additive — older clients ignore it.
+      res.json(ok({ presignSessionIdHex: Buffer.from(presignSessionId).toString('hex'), epoch: epoch.toString() }))
     } catch (err) {
       respondErr(res, 'mcp/dwallet/presign', err)
     }
