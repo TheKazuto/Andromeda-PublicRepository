@@ -31,6 +31,16 @@ use solana_address::Address;
 /// SBF stack usage. Reduce only after CU profiling shows headroom.
 pub const MAX_HUMAN_MESSAGE_BYTES: usize = 768;
 
+/// Decimal shift applied when rendering monetary values in signed human
+/// messages (Update 6 M2b). Oracle price bounds and USD spending caps are both
+/// carried in canonical 1e8 base units, so the approver reads `0.01` / `3000`
+/// instead of `1000000` / `300000000000`. MUST mirror byte-for-byte the same
+/// constant in `gateway/internal/policy/challenges.go`,
+/// `gateway/internal/auth/clear_signing.go`,
+/// `ika-backend/src/clients/policyEngine/challenges.ts` and
+/// `tools/gen_policy_engine_fixtures.py`. Changing it is an ABI break.
+pub const VALUE_DECIMALS_1E8: u8 = 8;
+
 /// Bitcoin / Solana base58 alphabet (no `0`, `O`, `I`, `l`).
 const B58_ALPHABET: &[u8; 58] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 
@@ -146,6 +156,54 @@ impl<'a> MsgWriter<'a> {
             self.write_u64_dec(abs)
         } else {
             self.write_u64_dec(v as u64)
+        }
+    }
+
+    /// Append `v` shifted right by `decimals` places as a human-readable decimal:
+    /// the integer part, then (only if the fraction is non-zero) `.` followed by
+    /// the fractional digits with trailing zeros trimmed. An exact integer has no
+    /// decimal point. Mirrors `humanfmt.FormatAmountPlain` (Go),
+    /// `formatAmountPlain` (TS) and the Python fixture generator byte-for-byte
+    /// (Update 6 M2b). `decimals` must be ≤ 19.
+    pub fn write_decimal_u64(&mut self, v: u64, decimals: u8) -> Result<(), HumanMessageError> {
+        if decimals == 0 {
+            return self.write_u64_dec(v);
+        }
+        // 10^decimals fits in u128 for decimals ≤ 19 (callers use 8).
+        let mut scale: u128 = 1;
+        for _ in 0..decimals {
+            scale *= 10;
+        }
+        let val = v as u128;
+        self.write_u64_dec((val / scale) as u64)?;
+        let frac = val % scale;
+        if frac > 0 {
+            self.push_byte(b'.')?;
+            // Render `frac` zero-padded to `decimals` digits, trim trailing zeros.
+            let mut buf = [0u8; 20];
+            let mut tmp = frac;
+            for i in (0..decimals as usize).rev() {
+                buf[i] = b'0' + ((tmp % 10) as u8);
+                tmp /= 10;
+            }
+            let mut end = decimals as usize;
+            while end > 0 && buf[end - 1] == b'0' {
+                end -= 1;
+            }
+            self.push_bytes(&buf[..end])?;
+        }
+        Ok(())
+    }
+
+    /// Signed variant of [`write_decimal_u64`]: `-` prefix for negatives, then
+    /// the shifted absolute value. Used for oracle price bounds (i64, 1e8).
+    pub fn write_decimal_i64(&mut self, v: i64, decimals: u8) -> Result<(), HumanMessageError> {
+        if v < 0 {
+            self.push_byte(b'-')?;
+            let abs = (v as i128).unsigned_abs() as u64;
+            self.write_decimal_u64(abs, decimals)
+        } else {
+            self.write_decimal_u64(v as u64, decimals)
         }
     }
 
@@ -285,6 +343,32 @@ mod tests {
         let mut w = MsgWriter::new(&mut buf);
         w.write_i64_dec(i64::MIN).unwrap();
         assert_eq!(w.as_bytes(), b"-9223372036854775808");
+    }
+
+    #[test]
+    fn write_decimal_u64_cases() {
+        let cases: &[(u64, u8, &[u8])] = &[
+            (5_000_000_000, 8, b"50"),    // exact integer → no point
+            (300_050_000_000, 8, b"3000.5"), // trailing zeros trimmed
+            (1_000_000, 8, b"0.01"),      // pure fraction
+            (1, 8, b"0.00000001"),        // smallest unit
+            (0, 8, b"0"),
+            (1234, 0, b"1234"),           // decimals=0 → raw
+        ];
+        for &(v, d, want) in cases {
+            let mut buf = [0u8; MAX_HUMAN_MESSAGE_BYTES];
+            let mut w = MsgWriter::new(&mut buf);
+            w.write_decimal_u64(v, d).unwrap();
+            assert_eq!(w.as_bytes(), want, "u64 {v} @ {d}");
+        }
+    }
+
+    #[test]
+    fn write_decimal_i64_signed() {
+        let mut buf = [0u8; MAX_HUMAN_MESSAGE_BYTES];
+        let mut w = MsgWriter::new(&mut buf);
+        w.write_decimal_i64(-1_000_000, 8).unwrap();
+        assert_eq!(w.as_bytes(), b"-0.01");
     }
 
     #[test]
@@ -956,9 +1040,9 @@ pub fn oracle_update_bounds_message(
     w.write_str(" for dWallet ")?;
     w.write_base58_32(dwallet.as_array())?;
     w.write_str(" min ")?;
-    w.write_i64_dec(min_price)?;
+    w.write_decimal_i64(min_price, VALUE_DECIMALS_1E8)?;
     w.write_str(" max ")?;
-    w.write_i64_dec(max_price)?;
+    w.write_decimal_i64(max_price, VALUE_DECIMALS_1E8)?;
     w.write_str(" maxAge ")?;
     w.write_u64_dec(max_age_slots)?;
     w.write_str(" maxConfidence ")?;
@@ -987,9 +1071,9 @@ pub fn oracle_add_feed_message(
     w.write_str(" owner ")?;
     w.write_base58_32(feed_owner)?;
     w.write_str(" min ")?;
-    w.write_i64_dec(min_price)?;
+    w.write_decimal_i64(min_price, VALUE_DECIMALS_1E8)?;
     w.write_str(" max ")?;
-    w.write_i64_dec(max_price)?;
+    w.write_decimal_i64(max_price, VALUE_DECIMALS_1E8)?;
     w.write_str(" on oracle policy ")?;
     w.write_base58_32(policy.as_array())?;
     w.write_str(" for dWallet ")?;
@@ -1015,11 +1099,11 @@ pub fn spending_usd_add_message(
     w.write_str(" for dWallet ")?;
     w.write_base58_32(dwallet.as_array())?;
     w.write_str(" maxPerTx ")?;
-    w.write_u64_dec(max_per_tx_usd)?;
+    w.write_decimal_u64(max_per_tx_usd, VALUE_DECIMALS_1E8)?;
     w.write_str(" maxPerDay ")?;
-    w.write_u64_dec(max_per_day_usd)?;
+    w.write_decimal_u64(max_per_day_usd, VALUE_DECIMALS_1E8)?;
     w.write_str(" maxPerWeek ")?;
-    w.write_u64_dec(max_per_week_usd)?;
+    w.write_decimal_u64(max_per_week_usd, VALUE_DECIMALS_1E8)?;
     Ok(w.len())
 }
 
