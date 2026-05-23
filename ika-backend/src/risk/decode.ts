@@ -2,8 +2,11 @@
  * Transaction decoding and calldata risk heuristics per chain family.
  *
  * Solana: desserializes versioned transactions and decodes SPL Token instructions.
- * EVM: parses calldata selectors and common patterns (approve, setApprovalForAll, etc).
- * Others: falls back to `effectsExtracted: false` with explicit reason.
+ * EVM/Tron: parses calldata selectors and common patterns (approve, setApprovalForAll, etc).
+ * Other families: routed to a pluggable decoder (see `decoders/`) — Cosmos,
+ * Bitcoin, VeChain, NEAR, Aptos, MultiversX, Algorand, Filecoin. Families with
+ * no registered decoder fall back to `effectsExtracted: false` with an explicit
+ * reason (honest "cannot verify").
  */
 
 import { VersionedTransaction } from '@solana/web3.js'
@@ -17,7 +20,8 @@ import type {
   ApprovalGrant,
   ContractCall,
 } from './types.js'
-import { resolveChainParams } from '../chain/chains.js'
+import { parseChainId, resolveChainParams } from '../chain/chains.js'
+import { getDecoder } from './decoders/index.js'
 
 // SPL Token program address on Solana
 const SPL_TOKEN_PROGRAM_ID = 'TokenkegQfeZyiNwAJsyFbPVwwQQfaju6cn5WQqTo9'
@@ -139,7 +143,7 @@ export function decodeEvmCalldata(payloadHex: string): CalldataRisk {
       reasons: signals.length > 0 ? signals : ['calldata decoded (no high-risk patterns detected)'],
       effectsExtracted: true,
     }
-  } catch (err) {
+  } catch {
     return {
       level: 'high',
       reasons: ['EVM calldata parse error; unable to verify'],
@@ -495,22 +499,19 @@ export function decodeForChain(
         }
       }
 
-      case 'Cosmos':
-      case 'Bitcoin':
-      case 'Filecoin':
-      case 'Stellar':
-      case 'Algorand':
-      case 'Aptos':
-      case 'MultiversX':
-      case 'TON':
-      case 'Casper':
-      case 'Tezos':
-      case 'IOTA':
-      case 'NEAR':
-      case 'Substrate':
-      case 'VeChain':
-      case 'Avalanche':
-        // No decoder implemented; mark as unverifiable (honest MVP)
+      default: {
+        // Pluggable decoders (Cosmos, Bitcoin, …). Families without one fall
+        // back to the honest "cannot verify" path. Note: Avalanche C-Chain is
+        // CAIP-2 `eip155` and is handled by the EVM case above; only the
+        // Avalanche X/P-chain namespace reaches here.
+        const decoder = getDecoder(params.chainFamily)
+        if (decoder) {
+          return decoder.decode(payloadHex, kind, {
+            chainId,
+            namespace: params.namespace,
+            reference: parseChainId(chainId).reference,
+          })
+        }
         return {
           level: 'critical',
           reasons: [
@@ -518,13 +519,7 @@ export function decodeForChain(
           ],
           effectsExtracted: false,
         }
-
-      default:
-        return {
-          level: 'critical',
-          reasons: ['unsupported chain for risk scoring'],
-          effectsExtracted: false,
-        }
+      }
     }
   } catch (err) {
     return {

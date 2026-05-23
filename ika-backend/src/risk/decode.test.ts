@@ -97,12 +97,20 @@ describe('Chain-specific decoding', () => {
     expect(result.level).toBe('medium')
   })
 
-  it('returns critical for Cosmos without decoder', () => {
+  it('returns critical for an undecodable Cosmos payload', () => {
     const result = decodeForChain('cosmos:cosmoshub-4', '0xaabbccdd', 'transaction')
 
     expect(result.effectsExtracted).toBe(false)
     expect(result.level).toBe('critical')
-    expect(result.reasons[0]).toContain('Decoder not implemented for Cosmos')
+    expect(result.reasons[0]).toContain('failed to decode Cosmos transaction')
+  })
+
+  it('returns critical for a family without a decoder', () => {
+    const result = decodeForChain('stellar:pubnet', '0xaabbccdd', 'transaction')
+
+    expect(result.effectsExtracted).toBe(false)
+    expect(result.level).toBe('critical')
+    expect(result.reasons[0]).toContain('Decoder not implemented for Stellar')
   })
 
   it('rejects invalid chain ID', () => {
