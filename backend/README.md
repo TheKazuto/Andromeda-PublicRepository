@@ -101,6 +101,7 @@ JWT-gated operator console with TOTP MFA and audit log.
 | `ALLOWED_ORIGINS` | Comma-separated CORS allowlist (dashboard origin). |
 | `ENV` | `production` or `development`. |
 | `ADMIN_JWT_SECRET` | `openssl rand -hex 32`. Required for `/admin/*`. |
+| `ADMIN_TOKEN` | `openssl rand -hex 32` (≥32 bytes). Bearer secret that gates `GET /metrics` — the backend is publicly reachable so `/metrics` is not open. Configure the Prometheus scraper with `Authorization: Bearer <ADMIN_TOKEN>`. Unset → `/metrics` returns 404 in production (open with a warning in development). |
 | `REDIS_URL` | Backs OAuth state replay (`SET NX EX` per nonce) and the auth rate limiter (token bucket cross-replica). Service refuses to boot in production without it — multi-replica deploys can otherwise be brute-forced because per-replica memory doesn't share state. |
 
 ### Bootstrap admin (first deploy only)
