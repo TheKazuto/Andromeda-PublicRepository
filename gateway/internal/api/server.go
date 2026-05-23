@@ -147,6 +147,11 @@ func NewServer(d Deps) *Server {
 	if d.PolicyV3Service != nil && d.Audit != nil {
 		d.PolicyV3Service.WithAuditRecorder(policyEngineAuditBridge{rec: d.Audit}, resolveAPIKeyIDString)
 	}
+	// Wire tenant resolver for RT2 risk CRUD routes (/v1/policy/risk/*).
+	// Uses the same API key ID resolver as audit.
+	if d.PolicyV3Service != nil {
+		d.PolicyV3Service.WithTenantResolver(resolveAPIKeyIDString)
+	}
 	// Update 2 Part A: async presign prefetch on the signing challenge. Opt-in
 	// via IKA_PRESIGN_PREFETCH_ENABLED (off in pre-alpha); needs Redis + the ika
 	// upstream. Fully non-fatal — when off, /sign allocates the presign inline.

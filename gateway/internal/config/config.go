@@ -126,6 +126,14 @@ type Config struct {
 	// Google/Apple OAuth and return short-lived id_tokens to tenant apps.
 	OAuthBroker OAuthBrokerConfig
 
+	// Risk scoring layer (F-RISK-0+). Always enabled as advisory (never blocks).
+	// RISK_ENABLED env var is deprecated and ignored.
+	RiskBlocklistFeeds    []string      // RISK_BLOCKLIST_FEEDS (CSV of feed URLs)
+	RiskIngestTickSec     time.Duration // RISK_INGEST_TICK_SECONDS (default 3600)
+	RiskDefaultWarnLevel  string        // RISK_DEFAULT_WARN_LEVEL (default "high")
+	RiskDefaultBlockLevel string        // RISK_DEFAULT_BLOCK_LEVEL (default "critical")
+	RiskFailMode          string        // RISK_FAIL_MODE (default "open")
+
 	// Admin envs (ADMIN_JWT_SECRET, ANDROMEDA_BOOTSTRAP_ADMIN_*) moved
 	// to the backend service in M4. Gateway only keeps ADMIN_TOKEN as a
 	// shared-secret guard for /metrics. SMTP and Stripe envs likewise
@@ -247,6 +255,12 @@ func Load() *Config {
 			AppleKeyID:         getenv("OAUTH_BROKER_APPLE_KEY_ID", ""),
 			ApplePrivateKey:    getenv("OAUTH_BROKER_APPLE_PRIVATE_KEY", ""),
 		},
+
+		RiskBlocklistFeeds:    splitCSV(getenv("RISK_BLOCKLIST_FEEDS", "")),
+		RiskIngestTickSec:     time.Duration(getenvInt("RISK_INGEST_TICK_SECONDS", 3600)) * time.Second,
+		RiskDefaultWarnLevel:  getenv("RISK_DEFAULT_WARN_LEVEL", "high"),
+		RiskDefaultBlockLevel: getenv("RISK_DEFAULT_BLOCK_LEVEL", "critical"),
+		RiskFailMode:          getenv("RISK_FAIL_MODE", "open"),
 	}
 
 	if err := cfg.validate(); err != nil {
@@ -331,6 +345,9 @@ func (c *Config) validate() error {
 	if err := c.validateOAuthBroker(); err != nil {
 		return err
 	}
+	if err := c.validateRiskLayer(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -371,6 +388,39 @@ func (c *Config) validateOAuthBroker() error {
 	if c.RedisURL == "" {
 		return fmt.Errorf("OAUTH_BROKER_ENABLED=true requires REDIS_URL (the short-lived code↔id_token store needs Redis)")
 	}
+	return nil
+}
+
+func (c *Config) validateRiskLayer() error {
+	// Risk layer is always available (advisory-only); validate configuration
+	// parameters if they are non-empty.
+
+	// Validate RISK_FAIL_MODE if non-empty
+	if c.RiskFailMode != "" {
+		switch c.RiskFailMode {
+		case "open", "closed":
+			// Valid
+		default:
+			return fmt.Errorf("RISK_FAIL_MODE must be 'open' or 'closed' (got %q)", c.RiskFailMode)
+		}
+	}
+
+	// Validate RISK_DEFAULT_WARN_LEVEL if non-empty
+	validRiskLevel := map[string]bool{"none": true, "low": true, "medium": true, "high": true, "critical": true}
+	if c.RiskDefaultWarnLevel != "" && !validRiskLevel[c.RiskDefaultWarnLevel] {
+		return fmt.Errorf("RISK_DEFAULT_WARN_LEVEL must be one of: none, low, medium, high, critical (got %q)", c.RiskDefaultWarnLevel)
+	}
+
+	// Validate RISK_DEFAULT_BLOCK_LEVEL if non-empty
+	if c.RiskDefaultBlockLevel != "" && !validRiskLevel[c.RiskDefaultBlockLevel] {
+		return fmt.Errorf("RISK_DEFAULT_BLOCK_LEVEL must be one of: none, low, medium, high, critical (got %q)", c.RiskDefaultBlockLevel)
+	}
+
+	// Validate RISK_INGEST_TICK_SECONDS is positive if set
+	if c.RiskIngestTickSec <= 0 {
+		return fmt.Errorf("RISK_INGEST_TICK_SECONDS must be positive (got %v)", c.RiskIngestTickSec)
+	}
+
 	return nil
 }
 
