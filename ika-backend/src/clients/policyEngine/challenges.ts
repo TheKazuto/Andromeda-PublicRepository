@@ -9,6 +9,15 @@
 import { createHash } from 'node:crypto'
 import { getAddressEncoder, type Address } from '@solana/kit'
 import { MEMBER_SLOT_LEN } from './program.js'
+import { formatAmountPlain } from '../../format/amount.js'
+
+/**
+ * Canonical decimal shift for monetary values in signed human messages (oracle
+ * price bounds, USD spending caps — 1e8 base units). MUST mirror byte-for-byte
+ * `VALUE_DECIMALS_1E8` (Rust auth) + `humanfmt.ValueDecimals1e8` (Go) + the
+ * Python fixture generator. Changing it is an ABI break (Update 6 M2b).
+ */
+const VALUE_DECIMALS_1E8 = 8
 
 const enc = new TextEncoder()
 const addrEncoder = getAddressEncoder()
@@ -296,7 +305,7 @@ export function humanMessageSpendingUsdAdd(
   dwallet: Address,
 ): Uint8Array {
   return enc.encode(
-    `Add USD spending limit policy ${engine} for dWallet ${dwallet} maxPerTx ${maxPerTx} maxPerDay ${maxPerDay} maxPerWeek ${maxPerWeek}`,
+    `Add USD spending limit policy ${engine} for dWallet ${dwallet} maxPerTx ${formatAmountPlain(maxPerTx, VALUE_DECIMALS_1E8)} maxPerDay ${formatAmountPlain(maxPerDay, VALUE_DECIMALS_1E8)} maxPerWeek ${formatAmountPlain(maxPerWeek, VALUE_DECIMALS_1E8)}`,
   )
 }
 

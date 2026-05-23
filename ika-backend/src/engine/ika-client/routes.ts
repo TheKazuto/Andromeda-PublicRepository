@@ -38,7 +38,7 @@ import {
   transferDwalletOwnership,
   deriveWalletAddresses,
 } from './wallet.js'
-import { prepareMessage } from '../../chain/index.js'
+import { prepareMessage, prepareZcashMessage, parseChainId } from '../../chain/index.js'
 
 const HEX = /^[0-9a-fA-F]*$/
 
@@ -97,14 +97,43 @@ const signSchema = z.object({
 // while bounding the keccak/blake2b work a single request can trigger (DoS).
 const PAYLOAD_HEX_MAX = 256 * 1024
 
+// Zcash transparent (ZIP-243) structured tx fields. The ika-backend builds the
+// preimage from these (Update 6 M1) — the dev never has to implement ZIP-243.
+const zcashInputSchema = z.object({
+  txidHex: z.string().regex(HEX).refine((s) => s.length === 64, 'txidHex must be 32 bytes (64 hex chars), ZIP-243 wire byte order'),
+  vout: z.number().int().min(0).max(0xffffffff),
+  sequence: z.number().int().min(0).max(0xffffffff).optional(),
+})
+const zcashOutputSchema = z.object({
+  value: z.coerce.bigint().nonnegative(),
+  scriptPubKeyHex: z.string().regex(HEX).refine((s) => s.length % 2 === 0, 'scriptPubKeyHex must be even-length hex'),
+})
+const zcashFieldsSchema = z.object({
+  inputs: z.array(zcashInputSchema).min(1),
+  outputs: z.array(zcashOutputSchema),
+  signTarget: z.object({
+    inputIndex: z.number().int().min(0),
+    scriptCodeHex: z.string().regex(HEX).refine((s) => s.length % 2 === 0 && s.length > 0, 'scriptCodeHex must be non-empty even-length hex'),
+    amount: z.coerce.bigint().nonnegative(),
+  }),
+  lockTime: z.number().int().min(0).max(0xffffffff).optional(),
+  expiryHeight: z.number().int().min(0).max(0xffffffff).optional(),
+  branchId: z.number().int().min(0).max(0xffffffff).optional(),
+  hashType: z.number().int().min(0).max(0xffffffff).optional(),
+})
+
 const prepareMessageSchema = z.object({
   chainId: z.string().min(3).max(128),
+  // Required for every chain EXCEPT Zcash (which uses `zcash` structured fields).
   payloadHex: z
     .string()
     .regex(HEX)
     .max(PAYLOAD_HEX_MAX, 'payloadHex too large')
-    .refine((s) => s.length % 2 === 0 && s.length > 0, 'payloadHex must be non-empty even-length hex'),
-  kind: z.enum(['transaction', 'message']),
+    .refine((s) => s.length % 2 === 0, 'payloadHex must be even-length hex')
+    .optional(),
+  kind: z.enum(['transaction', 'message']).optional(),
+  /** Zcash transparent tx fields — required when chainId is a `zcash:*` chain. */
+  zcash: zcashFieldsSchema.optional(),
 })
 
 function ownerRefOf(headerValue: string | undefined): string {
@@ -323,7 +352,25 @@ export function mountMcpWalletRoutes(router: Router, config: AppConfig): void {
   router.post('/prepare-message', (req, res) => {
     try {
       const body = prepareMessageSchema.parse(req.body)
-      const result = prepareMessage(body.chainId, hexToBytes(body.payloadHex), body.kind)
+      const { namespace } = parseChainId(body.chainId)
+      let result
+      if (namespace === 'zcash') {
+        if (!body.zcash) {
+          res.status(400).json(fail('zcash chains require the "zcash" structured tx fields (inputs/outputs/signTarget)'))
+          return
+        }
+        result = prepareZcashMessage(body.chainId, body.zcash)
+      } else {
+        if (!body.payloadHex || body.payloadHex.length === 0) {
+          res.status(400).json(fail('payloadHex is required (non-empty) for non-Zcash chains'))
+          return
+        }
+        if (!body.kind) {
+          res.status(400).json(fail('kind is required for non-Zcash chains'))
+          return
+        }
+        result = prepareMessage(body.chainId, hexToBytes(body.payloadHex), body.kind)
+      }
       res.json(ok(result))
     } catch (err) {
       respondErr(res, 'mcp/dwallet/prepare-message', err)

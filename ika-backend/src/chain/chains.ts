@@ -69,6 +69,11 @@ const CHAIN_FAMILIES: Record<string, Omit<ChainSigningParams, 'namespace'>> = {
   fil: { curve: 'Secp256k1', scheme: SignatureScheme.EcdsaBlake2b256, chainFamily: 'Filecoin' },
   // VeChain Thor also hashes with blake2b-256 → scheme 4; address is EVM-style.
   vechain: { curve: 'Secp256k1', scheme: SignatureScheme.EcdsaBlake2b256, chainFamily: 'VeChain' },
+  // Zcash TRANSPARENT (t-address): secp256k1 + blake2b-256 → scheme 4. The
+  // network applies a PERSONALIZED blake2b ("ZcashSigHash"||branch_id) delivered
+  // via Sign.message_metadata (see chain/metadata.ts + chain/zcash.ts). Shielded
+  // (z-address) is out of scope (zk-SNARKs, not ECDSA). Update 6 M1.
+  zcash: { curve: 'Secp256k1', scheme: SignatureScheme.EcdsaBlake2b256, chainFamily: 'Zcash' },
   // Avalanche X/P-chain signs secp256k1 over sha256 → scheme 1. (C-chain is eip155.)
   avalanche: { curve: 'Secp256k1', scheme: SignatureScheme.EcdsaSha256, chainFamily: 'Avalanche' },
   // ed25519 families (sign the message with ed25519 → scheme 5).

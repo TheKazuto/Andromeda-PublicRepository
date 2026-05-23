@@ -14,5 +14,13 @@ export {
 export { type MessageKind, preProcessForChain } from './preprocess.js'
 export { type DerivedAccount, deriveAddress, deriveAccountsForCurve } from './address.js'
 export { schemeDigest } from './digest.js'
-export { type PreparedMessage, prepareMessage } from './prepare.js'
+export { type PreparedMessage, prepareMessage, prepareZcashMessage } from './prepare.js'
+export {
+  type ZcashTxFields,
+  type ZcashTxInput,
+  type ZcashTxOutput,
+  type ZcashSignTarget,
+  ZCASH_BRANCH_NU5,
+  ZCASH_BRANCH_SAPLING,
+} from './zcash.js'
 export { ChainIdParseError, UnsupportedChainError, InvalidPublicKeyError } from './errors.js'

@@ -538,6 +538,14 @@ export interface RequestSignatureInput {
   amount?: bigint
   /** Update 3 (ABI V2): index in the KIND_SPENDING_USD allowlist. Default 0. */
   assetIndex?: number
+  /**
+   * Update 6 (ABI V3): the Ika message_metadata_digest (32 bytes) forwarded to
+   * approve_message. Default = 32 zero bytes (no signing metadata; the prior
+   * behaviour for every chain except Zcash). For Zcash pass keccak256 of the
+   * BCS Blake2bMessageMetadata (from prepare-message). The MessageApproval PDA
+   * must be derived with the matching metadata seed when non-zero.
+   */
+  ikaMsgMetadataDigest?: Uint8Array
 }
 
 export async function buildRequestSignatureInstruction(
@@ -558,6 +566,8 @@ export async function buildRequestSignatureInstruction(
   const scheme = new Uint8Array(2)
   new DataView(scheme.buffer).setUint16(0, input.signatureScheme, true)
   const gen = u32LE(input.rulesGenerationSeen)
+  const ikaMsgMetadataDigest = input.ikaMsgMetadataDigest ?? new Uint8Array(32)
+  assertLen(ikaMsgMetadataDigest, 32, 'ika_msg_metadata_digest')
 
   const data = concat([
     new Uint8Array([POLICY_ENGINE_INSTRUCTION_DISCRIMINATOR.requestSignature]),
@@ -572,6 +582,8 @@ export async function buildRequestSignatureInstruction(
     // ABI V2 (Update 3): amount (u64 LE) + asset_index (u8).
     u64LE(input.amount ?? 0n),
     new Uint8Array([input.assetIndex ?? 0]),
+    // ABI V3 (Update 6): the Ika message_metadata_digest (32 bytes; zero = none).
+    ikaMsgMetadataDigest,
   ])
 
   const accounts = [

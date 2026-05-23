@@ -157,15 +157,18 @@ describe('PolicyEngine v3 instruction builders (F2.4b)', () => {
     })
 
     expect(ix.data?.[0]).toBe(POLICY_ENGINE_INSTRUCTION_DISCRIMINATOR.requestSignature)
-    // ABI V2 (Update 3): 1 (disc) + 32 + 32 + 32 + 32 + 2 + 1 + 1 + 32 + 4
-    // + 8 (amount) + 1 (asset_index) = 178
-    expect(ix.data?.length).toBe(178)
+    // ABI V3 (Update 6): 1 (disc) + 32 + 32 + 32 + 32 + 2 + 1 + 1 + 32 + 4
+    // + 8 (amount) + 1 (asset_index) + 32 (ika_msg_metadata_digest) = 210
+    expect(ix.data?.length).toBe(210)
     expect(ix.data?.[129]).toBe(0) // signature_scheme LE byte 0
     expect(ix.data?.[131]).toBe(254) // message_approval_bump
     expect(ix.data?.[132]).toBe(253) // cpi_authority_bump
     // amount (u64 LE) at offset 169, asset_index (u8) at offset 177; both 0 here.
     expect(ix.data?.[169]).toBe(0)
     expect(ix.data?.[177]).toBe(0)
+    // ika_msg_metadata_digest (32 bytes) at offset 178; zero by default here.
+    expect(ix.data?.[178]).toBe(0)
+    expect(ix.data?.[209]).toBe(0)
     // 12 declared + 1 remaining (rule slot 0) = 13
     expect(ix.accounts?.length).toBe(13)
   })

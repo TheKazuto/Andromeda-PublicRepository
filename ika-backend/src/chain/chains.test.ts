@@ -77,7 +77,7 @@ describe('helpers', () => {
   })
 
   it('namespacesForCurve groups by curve', () => {
-    expect(namespacesForCurve('Secp256k1').sort()).toEqual(['avalanche', 'bip122', 'cosmos', 'eip155', 'fil', 'tron', 'vechain'])
+    expect(namespacesForCurve('Secp256k1').sort()).toEqual(['avalanche', 'bip122', 'cosmos', 'eip155', 'fil', 'tron', 'vechain', 'zcash'])
     expect(namespacesForCurve('Curve25519').sort()).toEqual(
       ['algorand', 'aptos', 'casper', 'iota', 'mvx', 'near', 'polkadot', 'solana', 'stellar', 'sui', 'tezos', 'ton'],
     )

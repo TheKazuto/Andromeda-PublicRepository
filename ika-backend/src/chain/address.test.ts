@@ -54,7 +54,7 @@ describe('deriveAccountsForCurve', () => {
     const accounts = deriveAccountsForCurve(secpKey, 'Secp256k1')
     const byNamespace = Object.fromEntries(accounts.map((a) => [a.chainId.split(':')[0], a.address]))
     expect(Object.keys(byNamespace).sort()).toEqual(
-      ['avalanche', 'bip122', 'cosmos', 'eip155', 'fil', 'tron', 'vechain'],
+      ['avalanche', 'bip122', 'cosmos', 'eip155', 'fil', 'tron', 'vechain', 'zcash'],
     )
     expect(byNamespace.eip155).toBe('0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266')
   })

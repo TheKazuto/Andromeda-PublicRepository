@@ -72,14 +72,15 @@ describe('prepareMessage — semantics', () => {
 
 describe('schemeDigest', () => {
   const msg = fromHex('48656c6c6f')
-  it('keccak256 for scheme 0, sha256 for 1, double-sha256 for 2', () => {
-    expect(toHex(schemeDigest(0, msg)!).length).toBe(64)
-    expect(toHex(schemeDigest(1, msg)!).length).toBe(64)
-    // double-sha256 == sha256(sha256)
-    expect(schemeDigest(2, msg)).toEqual(schemeDigest(1, schemeDigest(1, msg)!))
+  it('keccak256 for every supported scheme (the MessageApproval key)', () => {
+    // Update 6 M1-fix: the approval digest is keccak256(message) for ALL
+    // schemes; the scheme hash is applied by the network at sign time.
+    const expected = keccak_256(msg)
+    for (const scheme of [0, 1, 2, 3, 4, 5, 6]) {
+      expect(schemeDigest(scheme, msg)).toEqual(expected)
+    }
   })
-  it('keccak256 for EdDSA (5); null for unknown schemes', () => {
-    expect(schemeDigest(5, msg)).toEqual(keccak_256(msg))
+  it('null for unknown schemes', () => {
     expect(schemeDigest(99, msg)).toBeNull()
   })
 })

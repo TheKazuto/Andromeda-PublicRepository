@@ -44,7 +44,7 @@ const MVX_MAINNET_REF = '1'
 const ADDRESS_NAMESPACES: readonly string[] = [
   'eip155', 'tron', 'bip122', 'solana', 'sui', 'cosmos',
   'fil', 'stellar', 'algorand', 'aptos', 'mvx', 'ton', 'vechain',
-  'avalanche', 'casper', 'tezos', 'iota', 'near', 'polkadot',
+  'avalanche', 'casper', 'tezos', 'iota', 'near', 'polkadot', 'zcash',
 ]
 
 /** Stellar StrKey version byte for an ed25519 public key (the "G" prefix). */
@@ -111,16 +111,26 @@ function hash160(compressed: Uint8Array): Uint8Array {
   return ripemd160(sha256(compressed))
 }
 
-/** Bitcoin legacy P2PKH (base58check). version 0x00 mainnet / 0x6f testnet. */
-function bitcoinP2pkh(publicKey: Uint8Array, mainnet = true): string {
-  const payload = new Uint8Array(1 + 20)
-  payload[0] = mainnet ? 0x00 : 0x6f
-  payload.set(hash160(secpCompressed(publicKey)), 1)
+/**
+ * base58check P2PKH with a variable-length version prefix:
+ * base58(versionPrefix || HASH160(compressed) || doubleSha256[:4]).
+ * Bitcoin uses a 1-byte prefix; Zcash transparent uses a 2-byte prefix.
+ */
+function base58CheckP2pkh(publicKey: Uint8Array, versionPrefix: Uint8Array): string {
+  const pkh = hash160(secpCompressed(publicKey))
+  const payload = new Uint8Array(versionPrefix.length + pkh.length)
+  payload.set(versionPrefix, 0)
+  payload.set(pkh, versionPrefix.length)
   const checksum = sha256(sha256(payload)).slice(0, 4)
   const full = new Uint8Array(payload.length + 4)
   full.set(payload, 0)
   full.set(checksum, payload.length)
   return bs58.encode(full)
+}
+
+/** Bitcoin legacy P2PKH (base58check). version 0x00 mainnet / 0x6f testnet. */
+function bitcoinP2pkh(publicKey: Uint8Array, mainnet = true): string {
+  return base58CheckP2pkh(publicKey, Uint8Array.from([mainnet ? 0x00 : 0x6f]))
 }
 
 /** EIP-55 mixed-case checksum for a 40-char lowercase hex address (no 0x). */
@@ -155,6 +165,15 @@ export function deriveAddress(publicKey: Uint8Array, chainId: string): string {
     case 'vechain': {
       // Same 20-byte address as EVM, but VeChain canonicalizes lowercase.
       return '0x' + toHex(evmAddressBytes(publicKey))
+    }
+    case 'zcash': {
+      // Zcash transparent P2PKH (t-address). base58check of
+      // [version(2) || HASH160(compressed)]. Mainnet "t1" = 0x1cb8,
+      // testnet "tm" = 0x1d25. Shielded (z-address) is out of scope.
+      const version = reference === 'test'
+        ? Uint8Array.from([0x1d, 0x25])
+        : Uint8Array.from([0x1c, 0xb8])
+      return base58CheckP2pkh(publicKey, version)
     }
     case 'tron': {
       // 0x41 prefix + 20-byte address, base58check (double-sha256 checksum).
@@ -318,6 +337,7 @@ export function deriveAccountsForCurve(publicKey: Uint8Array, curve: CurveName):
       'fil:f',
       'vechain:0x4a1208',
       'avalanche:mainnet',
+      'zcash:main',
     ]
   } else if (curve === 'Curve25519') {
     chainIds = [
