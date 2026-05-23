@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -34,6 +35,38 @@ func (s *Server) requireAdminJWT(next http.Handler) http.Handler {
 			Email: claims.Email,
 			Role:  claims.Role,
 		}))
+	})
+}
+
+// requireMetricsToken gates GET /metrics. The backend has a public domain
+// (auth.andromedainfra.pro) because the static dashboard calls it from the
+// browser, so /metrics is NOT on a private network — leaving it open leaks
+// DB pool stats, per-route request counters and rate-limit blocks, which are
+// useful for attack reconnaissance.
+//
+// Auth is a shared bearer secret (ADMIN_TOKEN) so a Prometheus scraper can
+// pass it without an interactive login. Behaviour:
+//   - ADMIN_TOKEN set  → require an exact, constant-time match.
+//   - ADMIN_TOKEN empty in production → 404 (metrics disabled — never open on
+//     a public surface).
+//   - ADMIN_TOKEN empty in development → allowed, with a startup-style warning
+//     so the gap is visible. No silent fallback.
+func (s *Server) requireMetricsToken(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.cfg.AdminToken == "" {
+			if s.cfg.Env == "production" {
+				writeError(w, http.StatusNotFound, "not found")
+				return
+			}
+			slog.Warn("/metrics is unauthenticated (ADMIN_TOKEN unset); set ADMIN_TOKEN to gate it in production")
+			next.ServeHTTP(w, r)
+			return
+		}
+		if raw := bearerToken(r); raw == "" || !auth.ConstantTimeEqual(raw, s.cfg.AdminToken) {
+			writeError(w, http.StatusUnauthorized, "Authorization: Bearer <ADMIN_TOKEN> required")
+			return
+		}
+		next.ServeHTTP(w, r)
 	})
 }
 

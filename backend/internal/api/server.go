@@ -165,11 +165,12 @@ func (s *Server) Router() http.Handler {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	})
 
-	// /metrics is unauthenticated by design — Railway exposes the
-	// backend service on its private network and the public dashboard
-	// origin does not hit this path. If the backend ever becomes
-	// directly reachable, gate this behind a bearer token.
-	r.Method("GET", "/metrics", s.metricsHandler)
+	// /metrics is gated by ADMIN_TOKEN (bearer). The backend has a public
+	// domain (the static dashboard calls it from the browser), so this is
+	// NOT a private-network surface — an open /metrics would leak DB pool
+	// stats, per-route request counters and rate-limit blocks. The
+	// Prometheus scraper passes Authorization: Bearer <ADMIN_TOKEN>.
+	r.With(s.requireMetricsToken).Method("GET", "/metrics", s.metricsHandler)
 
 	// Stripe webhook lives outside auth — Stripe-Signature is the auth
 	// mechanism and the handler verifies it itself.
