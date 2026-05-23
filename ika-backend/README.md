@@ -116,6 +116,7 @@ stateless, custody-free. Not mirrored as an MCP tool.
 
 - **EVM/Tron:** real `eth_call` (true revert) + `eth_estimateGas` against the client `rpc_url`, plus structured effects decoded from the calldata (native value, ERC-20 `transfer`/`transferFrom`, `approve`, `setApprovalForAll`). A real on-chain revert is told apart from an unreachable RPC.
 - **Solana:** real `simulateTransaction` against the client `rpc_url`.
+- **Other chains (static decode, no RPC):** Cosmos, Bitcoin, VeChain, NEAR, Aptos, MultiversX, Algorand and Filecoin calldata is decoded into advisory effects (recipients, amounts, contract/method calls) via pluggable per-family decoders in `src/risk/decoders/`. Families without a registered decoder return an explicit "cannot verify" instead of a false "safe".
 - **RPC comes from the client.** Andromeda does not host RPCs; the dev passes `rpc_url`. Without it, the analysis degrades to static calldata decode (no RPC call). The server's core Solana RPC is **never** used to simulate user transactions — it is reserved for internal use (Ika + our programs).
 - **SSRF guard (`src/risk/ssrf.ts`).** The client `rpc_url` is validated before any outbound call: http/https only; `localhost`, private/loopback/link-local/metadata/ULA targets rejected; every DNS-resolved IP checked; redirects disabled. Required because this engine runs on the private network next to sensitive services.
 
@@ -269,6 +270,7 @@ npm run dev          # tsx watch src/server.ts
 | `npm run build` | `tsc` → `dist/`. |
 | `npm start` | Run the compiled server (`dist/server.js`). Migrations run automatically on boot. |
 | `npm run typecheck` | `tsc --noEmit`. |
+| `npm run lint` | ESLint (flat config, type-checked): correctness rules the compiler doesn't catch (no floating/misused promises) plus light hygiene. |
 | `npm test` / `npm run test:watch` | Vitest. |
 | `npm run migrate` | Run Postgres migrations against `DATABASE_URL` (uses `dist/`; build first). |
 | `npm run migrate:dev` | Same, via `tsx` (no build). |
