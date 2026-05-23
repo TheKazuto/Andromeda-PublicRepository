@@ -82,7 +82,7 @@ func TestIntegration_ConsumeMonthly(t *testing.T) {
 	ctx := context.Background()
 	_, sub := seedSubscription(t, db, 1000)
 
-	r, err := db.ConsumeTokensV2(ctx, sub.ID, 300)
+	r, err := db.ConsumeTokensV2(ctx, sub.ID, 300, "")
 	if err != nil {
 		t.Fatalf("consume 300: %v", err)
 	}
@@ -90,7 +90,7 @@ func TestIntegration_ConsumeMonthly(t *testing.T) {
 		t.Fatalf("first consume = %+v, want monthly=300 used=300", r)
 	}
 
-	r, err = db.ConsumeTokensV2(ctx, sub.ID, 600)
+	r, err = db.ConsumeTokensV2(ctx, sub.ID, 600, "")
 	if err != nil {
 		t.Fatalf("consume 600: %v", err)
 	}
@@ -101,7 +101,7 @@ func TestIntegration_ConsumeMonthly(t *testing.T) {
 		t.Fatalf("crossing 900/1000 should flag 80%%: %+v", r)
 	}
 
-	if _, err := db.ConsumeTokensV2(ctx, sub.ID, 200); err != store.ErrQuotaExceeded {
+	if _, err := db.ConsumeTokensV2(ctx, sub.ID, 200, ""); err != store.ErrQuotaExceeded {
 		t.Fatalf("over-limit consume err = %v, want ErrQuotaExceeded", err)
 	}
 }
@@ -111,11 +111,12 @@ func TestIntegration_Refund(t *testing.T) {
 	ctx := context.Background()
 	_, sub := seedSubscription(t, db, 1000)
 
-	r, err := db.ConsumeTokensV2(ctx, sub.ID, 400)
+	op := uuid.NewString()
+	r, err := db.ConsumeTokensV2(ctx, sub.ID, 400, op)
 	if err != nil {
 		t.Fatalf("consume: %v", err)
 	}
-	if err := db.RefundTokensV2(ctx, sub.ID, *r); err != nil {
+	if err := db.RefundTokensV2(ctx, sub.ID, *r, op); err != nil {
 		t.Fatalf("refund: %v", err)
 	}
 	bal, err := db.ComputeBalance(ctx, sub.UserID)
@@ -125,8 +126,9 @@ func TestIntegration_Refund(t *testing.T) {
 	if bal.Subscription.TokensUsed != 0 {
 		t.Fatalf("after refund tokens_used = %d, want 0", bal.Subscription.TokensUsed)
 	}
-	// Double refund must clamp at 0, not go negative.
-	if err := db.RefundTokensV2(ctx, sub.ID, *r); err != nil {
+	// Double refund with the same op must be an idempotent no-op (and would
+	// clamp at 0 anyway).
+	if err := db.RefundTokensV2(ctx, sub.ID, *r, op); err != nil {
 		t.Fatalf("double refund: %v", err)
 	}
 	bal, _ = db.ComputeBalance(ctx, sub.UserID)
@@ -147,10 +149,10 @@ func TestIntegration_Overage(t *testing.T) {
 		t.Fatalf("enable overage: %v", err)
 	}
 
-	if _, err := db.ConsumeTokensV2(ctx, sub.ID, 1000); err != nil { // fill monthly
+	if _, err := db.ConsumeTokensV2(ctx, sub.ID, 1000, ""); err != nil { // fill monthly
 		t.Fatalf("fill monthly: %v", err)
 	}
-	r, err := db.ConsumeTokensV2(ctx, sub.ID, 500) // → overage
+	r, err := db.ConsumeTokensV2(ctx, sub.ID, 500, "") // → overage
 	if err != nil {
 		t.Fatalf("overage consume: %v", err)
 	}
@@ -158,11 +160,11 @@ func TestIntegration_Overage(t *testing.T) {
 		t.Fatalf("overage consume = %+v, want overage=500", r)
 	}
 	// Cap is 2000; 500 used; 1600 more would exceed it.
-	if _, err := db.ConsumeTokensV2(ctx, sub.ID, 1600); err != store.ErrQuotaExceeded {
+	if _, err := db.ConsumeTokensV2(ctx, sub.ID, 1600, ""); err != store.ErrQuotaExceeded {
 		t.Fatalf("over-cap consume err = %v, want ErrQuotaExceeded", err)
 	}
 	// But 1500 exactly fits.
-	if _, err := db.ConsumeTokensV2(ctx, sub.ID, 1500); err != nil {
+	if _, err := db.ConsumeTokensV2(ctx, sub.ID, 1500, ""); err != nil {
 		t.Fatalf("exact-cap consume: %v", err)
 	}
 }
@@ -182,7 +184,7 @@ func TestIntegration_Credits(t *testing.T) {
 	}
 
 	// First 300 come fully from credits.
-	r, err := db.ConsumeTokensV2(ctx, sub.ID, 300)
+	r, err := db.ConsumeTokensV2(ctx, sub.ID, 300, "")
 	if err != nil {
 		t.Fatalf("consume 300: %v", err)
 	}
@@ -191,7 +193,8 @@ func TestIntegration_Credits(t *testing.T) {
 	}
 
 	// Next 300: 100 left on the credit, 200 from monthly. Credit exhausts.
-	r2, err := db.ConsumeTokensV2(ctx, sub.ID, 300)
+	op2 := uuid.NewString()
+	r2, err := db.ConsumeTokensV2(ctx, sub.ID, 300, op2)
 	if err != nil {
 		t.Fatalf("consume 300 again: %v", err)
 	}
@@ -207,7 +210,7 @@ func TestIntegration_Credits(t *testing.T) {
 	}
 
 	// Refund the second charge → credit un-exhausts, consumed drops back.
-	if err := db.RefundTokensV2(ctx, sub.ID, *r2); err != nil {
+	if err := db.RefundTokensV2(ctx, sub.ID, *r2, op2); err != nil {
 		t.Fatalf("refund: %v", err)
 	}
 	var consumed int64
@@ -233,7 +236,7 @@ func TestIntegration_ComputeBalance(t *testing.T) {
 		t.Fatalf("insert credit: %v", err)
 	}
 	// Consume 100: drains 100 from the credit (oldest-first), 0 monthly.
-	if _, err := db.ConsumeTokensV2(ctx, sub.ID, 100); err != nil {
+	if _, err := db.ConsumeTokensV2(ctx, sub.ID, 100, ""); err != nil {
 		t.Fatalf("consume: %v", err)
 	}
 
@@ -273,7 +276,7 @@ func TestIntegration_PeriodRollover(t *testing.T) {
 	ctx := context.Background()
 	_, sub := seedSubscription(t, db, 1000)
 
-	if _, err := db.ConsumeTokensV2(ctx, sub.ID, 700); err != nil {
+	if _, err := db.ConsumeTokensV2(ctx, sub.ID, 700, ""); err != nil {
 		t.Fatalf("pre-rollover consume: %v", err)
 	}
 	// Force the window into the past so the next consume triggers a rollover.
@@ -285,7 +288,7 @@ func TestIntegration_PeriodRollover(t *testing.T) {
 		t.Fatalf("rewind period: %v", err)
 	}
 
-	r, err := db.ConsumeTokensV2(ctx, sub.ID, 200)
+	r, err := db.ConsumeTokensV2(ctx, sub.ID, 200, "")
 	if err != nil {
 		t.Fatalf("post-rollover consume: %v", err)
 	}
@@ -295,5 +298,110 @@ func TestIntegration_PeriodRollover(t *testing.T) {
 	}
 	if !r.Subscription.CurrentPeriodEnd.After(time.Now()) {
 		t.Fatalf("rolled period end %v should be in the future", r.Subscription.CurrentPeriodEnd)
+	}
+}
+
+// A charge replayed with the same op_id must NOT debit twice (F2 ledger).
+func TestIntegration_ChargeIdempotent(t *testing.T) {
+	db := newDB(t)
+	ctx := context.Background()
+	_, sub := seedSubscription(t, db, 1000)
+
+	op := uuid.NewString()
+	r1, err := db.ConsumeTokensV2(ctx, sub.ID, 300, op)
+	if err != nil {
+		t.Fatalf("first charge: %v", err)
+	}
+	if r1.FromMonthly != 300 || r1.TokensUsed != 300 {
+		t.Fatalf("first charge = %+v, want monthly=300 used=300", r1)
+	}
+
+	// Same op again → replay the stored breakdown, no second debit.
+	r2, err := db.ConsumeTokensV2(ctx, sub.ID, 300, op)
+	if err != nil {
+		t.Fatalf("replay charge: %v", err)
+	}
+	if r2.FromMonthly != 300 {
+		t.Fatalf("replay breakdown = %+v, want stored monthly=300", r2)
+	}
+	if r2.TokensUsed != 300 {
+		t.Fatalf("replay used = %d, want 300 (not double-charged)", r2.TokensUsed)
+	}
+	if r2.Crossed80Pct || r2.Crossed95Pct || r2.Crossed100Pct {
+		t.Fatalf("replay must not re-report a threshold crossing: %+v", r2)
+	}
+
+	bal, err := db.ComputeBalance(ctx, sub.UserID)
+	if err != nil {
+		t.Fatalf("balance: %v", err)
+	}
+	if bal.Subscription.TokensUsed != 300 {
+		t.Fatalf("tokens_used = %d, want 300 (charged exactly once)", bal.Subscription.TokensUsed)
+	}
+}
+
+// A refund replayed with the same op_id is a no-op and never reaches a
+// later, unrelated charge (F2 ledger).
+func TestIntegration_RefundIdempotent(t *testing.T) {
+	db := newDB(t)
+	ctx := context.Background()
+	_, sub := seedSubscription(t, db, 1000)
+
+	op := uuid.NewString()
+	r, err := db.ConsumeTokensV2(ctx, sub.ID, 400, op)
+	if err != nil {
+		t.Fatalf("charge: %v", err)
+	}
+	if err := db.RefundTokensV2(ctx, sub.ID, *r, op); err != nil {
+		t.Fatalf("refund: %v", err)
+	}
+
+	// A fresh, unrelated charge.
+	if _, err := db.ConsumeTokensV2(ctx, sub.ID, 100, uuid.NewString()); err != nil {
+		t.Fatalf("second charge: %v", err)
+	}
+	// Replaying the first refund must not touch the second charge.
+	if err := db.RefundTokensV2(ctx, sub.ID, *r, op); err != nil {
+		t.Fatalf("replay refund: %v", err)
+	}
+
+	bal, err := db.ComputeBalance(ctx, sub.UserID)
+	if err != nil {
+		t.Fatalf("balance: %v", err)
+	}
+	if bal.Subscription.TokensUsed != 100 {
+		t.Fatalf("tokens_used = %d, want 100 (replayed refund must not over-refund)", bal.Subscription.TokensUsed)
+	}
+}
+
+// A refund whose breakdown is inflated is clamped to what the charge took
+// (F2 defense-in-depth).
+func TestIntegration_RefundClampToCharge(t *testing.T) {
+	db := newDB(t)
+	ctx := context.Background()
+	_, sub := seedSubscription(t, db, 5000)
+
+	op := uuid.NewString()
+	if _, err := db.ConsumeTokensV2(ctx, sub.ID, 200, op); err != nil {
+		t.Fatalf("charge 200: %v", err)
+	}
+	// Fill more so a buggy 999-refund would have room to over-credit.
+	if _, err := db.ConsumeTokensV2(ctx, sub.ID, 800, uuid.NewString()); err != nil {
+		t.Fatalf("charge 800: %v", err)
+	}
+
+	// Inflated refund for `op` — claims 999 monthly, but the charge took 200.
+	inflated := store.ConsumptionResult{Cost: 200, FromMonthly: 999}
+	if err := db.RefundTokensV2(ctx, sub.ID, inflated, op); err != nil {
+		t.Fatalf("clamped refund: %v", err)
+	}
+
+	bal, err := db.ComputeBalance(ctx, sub.UserID)
+	if err != nil {
+		t.Fatalf("balance: %v", err)
+	}
+	// 1000 charged − 200 clamped refund = 800.
+	if bal.Subscription.TokensUsed != 800 {
+		t.Fatalf("tokens_used = %d, want 800 (refund clamped to the 200 charge)", bal.Subscription.TokensUsed)
 	}
 }

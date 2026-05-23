@@ -13,10 +13,12 @@ Order matters: roll back the highest version first, then descend.
 
 ## Coverage
 
-Down scripts are provided for migrations **010 onward** (the token economy
-overhaul + everything since). Migrations 001–009 are foundational schema
-that we don't expect to roll back — if you need to drop those tables, do
-it explicitly via SQL and treat it as a destructive reset.
+Down scripts cover migrations **010–024** plus **033** (`token_ledger`).
+Migrations 001–009 are foundational schema we don't expect to roll back, and
+**025–032** (recovery/MCP/passkey/oracle/risk-layer) currently ship without
+down scripts — to roll any of those back, write the reverse SQL by hand and
+treat it as a destructive reset. Migration 033 (`DROP TABLE token_ledger`) is a
+clean, dependent-free revert.
 
 ## Caveats
 

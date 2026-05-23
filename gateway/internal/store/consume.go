@@ -2,9 +2,12 @@ package store
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -27,9 +30,16 @@ import (
 //   - ErrQuotaExceeded — buckets combined cannot cover `cost`. Includes
 //     the case where overage is needed but disabled / no card on file.
 //   - ErrNotFound      — subscription does not exist or is not active.
-func (s *pgStore) ConsumeTokensV2(ctx context.Context, subscriptionID string, cost int) (*ConsumptionResult, error) {
+func (s *pgStore) ConsumeTokensV2(ctx context.Context, subscriptionID string, cost int, opID string) (*ConsumptionResult, error) {
 	if cost <= 0 {
 		return nil, errInvalid("cost must be > 0")
+	}
+	// An empty opID means the caller cannot offer cross-retry idempotency
+	// (no Idempotency-Key, no request id). Mint a unique one so the ledger
+	// row is still written but every call is treated as distinct — i.e. the
+	// pre-ledger behaviour, never an accidental no-op dedup against "".
+	if opID == "" {
+		opID = uuid.NewString()
 	}
 
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
@@ -62,6 +72,23 @@ func (s *pgStore) ConsumeTokensV2(ctx context.Context, subscriptionID string, co
 			&planID, &billingCycle)
 	if err != nil {
 		return nil, mapErr(err)
+	}
+
+	// 1b. Ledger idempotency gate. Claim this op_id as a charge; on conflict
+	//     the charge already ran, so replay the stored breakdown without
+	//     debiting again. The subscription FOR UPDATE lock above serialises
+	//     concurrent calls with the same op_id through this point.
+	var ledgerID int64
+	err = tx.QueryRow(ctx, `
+        INSERT INTO token_ledger (op_id, kind, subscription_id, cost)
+        VALUES ($1, 'charge', $2, $3)
+        ON CONFLICT (op_id, kind) DO NOTHING
+        RETURNING id`, opID, subscriptionID, cost).Scan(&ledgerID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return s.replayLedgerCharge(ctx, tx, subscriptionID, opID)
+	}
+	if err != nil {
+		return nil, err
 	}
 
 	// 2. Period rollover.
@@ -183,10 +210,6 @@ func (s *pgStore) ConsumeTokensV2(ctx context.Context, subscriptionID string, co
 		return nil, err
 	}
 
-	if err := tx.Commit(ctx); err != nil {
-		return nil, err
-	}
-
 	// 6. Build the result + threshold crossings against (monthly + overage)
 	//    usage over the monthly limit (200% == the overage hard cap).
 	res := &ConsumptionResult{
@@ -203,6 +226,22 @@ func (s *pgStore) ConsumeTokensV2(ctx context.Context, subscriptionID string, co
 	totalOld := totalNew - int64(plan.fromMonthly+plan.fromOverage)
 	res.Crossed80Pct, res.Crossed95Pct, res.Crossed100Pct, res.Crossed200Pct =
 		crossedThresholds(sub.TokensLimit, totalOld, totalNew)
+
+	// 7. Record the breakdown on the ledger row so a later refund can clamp
+	//    to exactly what this op consumed and a replay can return it verbatim.
+	//    Subscription is json:"-" so it is naturally excluded from the snapshot.
+	breakdown, err := json.Marshal(res)
+	if err != nil {
+		return nil, fmt.Errorf("marshal ledger breakdown: %w", err)
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE token_ledger SET breakdown = $2 WHERE id = $1`, ledgerID, breakdown); err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
 	return res, nil
 }
 
@@ -216,7 +255,7 @@ func (s *pgStore) ConsumeTokensV2(ctx context.Context, subscriptionID string, co
 //
 // All updates run in a single transaction so a partial refund cannot
 // leave the user with inconsistent counters.
-func (s *pgStore) RefundTokensV2(ctx context.Context, subscriptionID string, r ConsumptionResult) error {
+func (s *pgStore) RefundTokensV2(ctx context.Context, subscriptionID string, r ConsumptionResult, opID string) error {
 	if r.FromMonthly == 0 && r.FromOverage == 0 && len(r.CreditDebits) == 0 {
 		return nil
 	}
@@ -226,6 +265,29 @@ func (s *pgStore) RefundTokensV2(ctx context.Context, subscriptionID string, r C
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Ledger idempotency + clamp. With an opID, claim the refund exactly once
+	// (a conflict means it was already refunded — no-op) and clamp the amounts
+	// to what the matching charge actually consumed, so a buggy or replayed
+	// caller can never refund more than was taken.
+	if opID != "" {
+		var refundID int64
+		err = tx.QueryRow(ctx, `
+            INSERT INTO token_ledger (op_id, kind, subscription_id, cost)
+            VALUES ($1, 'refund', $2, $3)
+            ON CONFLICT (op_id, kind) DO NOTHING
+            RETURNING id`, opID, subscriptionID, r.Cost).Scan(&refundID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return tx.Commit(ctx) // already refunded — idempotent no-op
+		}
+		if err != nil {
+			return err
+		}
+		r = s.clampRefundToCharge(ctx, tx, subscriptionID, opID, r)
+		if r.FromMonthly == 0 && r.FromOverage == 0 && len(r.CreditDebits) == 0 {
+			return tx.Commit(ctx) // nothing left to give back after clamping
+		}
+	}
 
 	if r.FromMonthly > 0 || r.FromOverage > 0 {
 		if _, err := tx.Exec(ctx, `
@@ -259,6 +321,83 @@ func (s *pgStore) RefundTokensV2(ctx context.Context, subscriptionID string, r C
 	}
 
 	return tx.Commit(ctx)
+}
+
+// replayLedgerCharge returns the stored breakdown for an already-charged
+// op_id without debiting again. Called inside ConsumeTokensV2's transaction
+// when the charge ledger insert hit a conflict; it commits the transaction.
+func (s *pgStore) replayLedgerCharge(ctx context.Context, tx pgx.Tx, subscriptionID, opID string) (*ConsumptionResult, error) {
+	var breakdown []byte
+	if err := tx.QueryRow(ctx,
+		`SELECT breakdown FROM token_ledger WHERE op_id = $1 AND kind = 'charge' AND subscription_id = $2`,
+		opID, subscriptionID).Scan(&breakdown); err != nil {
+		return nil, err
+	}
+	res := &ConsumptionResult{}
+	if len(breakdown) > 0 {
+		if err := json.Unmarshal(breakdown, res); err != nil {
+			return nil, fmt.Errorf("decode ledger breakdown: %w", err)
+		}
+	}
+	// Refresh the subscription so counters/limit reflect the present, and a
+	// replay never re-reports a threshold crossing (those fire only on the
+	// first charge that crosses).
+	subRow := tx.QueryRow(ctx, `
+        SELECT `+subscriptionColumns+`
+        FROM subscriptions sub
+        JOIN plans p ON p.id = sub.plan_id
+        WHERE sub.id = $1`, subscriptionID)
+	var sub Subscription
+	if err := scanSubscription(subRow, &sub); err != nil {
+		return nil, err
+	}
+	res.Subscription = &sub
+	res.TokensUsed = sub.TokensUsed
+	res.OverageUsed = sub.OverageUsedTokens
+	res.Crossed80Pct, res.Crossed95Pct, res.Crossed100Pct, res.Crossed200Pct = false, false, false, false
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return res, nil
+}
+
+// clampRefundToCharge limits each bucket of r to what the matching charge
+// (same op_id) actually consumed. With no charge breakdown on record it
+// returns r unchanged — the per-row GREATEST(...,0) in the UPDATEs is the
+// final safety net either way.
+func (s *pgStore) clampRefundToCharge(ctx context.Context, tx pgx.Tx, subscriptionID, opID string, r ConsumptionResult) ConsumptionResult {
+	var breakdown []byte
+	if err := tx.QueryRow(ctx,
+		`SELECT breakdown FROM token_ledger WHERE op_id = $1 AND kind = 'charge' AND subscription_id = $2`,
+		opID, subscriptionID).Scan(&breakdown); err != nil || len(breakdown) == 0 {
+		return r
+	}
+	var charge ConsumptionResult
+	if err := json.Unmarshal(breakdown, &charge); err != nil {
+		return r
+	}
+	if r.FromMonthly > charge.FromMonthly {
+		r.FromMonthly = charge.FromMonthly
+	}
+	if r.FromOverage > charge.FromOverage {
+		r.FromOverage = charge.FromOverage
+	}
+	chargedByCredit := make(map[string]int64, len(charge.CreditDebits))
+	for _, d := range charge.CreditDebits {
+		chargedByCredit[d.CreditID] += d.Amount
+	}
+	clamped := make([]CreditDebit, 0, len(r.CreditDebits))
+	for _, d := range r.CreditDebits {
+		amt := d.Amount
+		if max := chargedByCredit[d.CreditID]; amt > max {
+			amt = max
+		}
+		if amt > 0 {
+			clamped = append(clamped, CreditDebit{CreditID: d.CreditID, Amount: amt})
+		}
+	}
+	r.CreditDebits = clamped
+	return r
 }
 
 // ComputeBalance returns the per-bucket remaining-token snapshot for a

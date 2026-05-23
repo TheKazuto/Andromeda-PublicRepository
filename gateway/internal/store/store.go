@@ -343,11 +343,20 @@ type Store interface {
 	// tokens, then overage (only when subscription has overage_enabled
 	// AND overage_card_present). Returns ErrQuotaExceeded if all buckets
 	// combined cannot cover the cost.
-	ConsumeTokensV2(ctx context.Context, subscriptionID string, cost int) (*ConsumptionResult, error)
-	// RefundTokensV2 reverses a prior ConsumeTokensV2. Refunds monthly
-	// and overage usage; credit refunds are NOT yet implemented (the
-	// schema doesn't track which credit row was debited).
-	RefundTokensV2(ctx context.Context, subscriptionID string, r ConsumptionResult) error
+	//
+	// opID makes the charge idempotent at the DB level: a repeat call with
+	// the same opID returns the original breakdown without debiting again.
+	// Pass the Idempotency-Key / request id (REST) or a stable per-call id
+	// (MCP); an empty opID disables dedup (every call charges).
+	ConsumeTokensV2(ctx context.Context, subscriptionID string, cost int, opID string) (*ConsumptionResult, error)
+	// RefundTokensV2 reverses a prior ConsumeTokensV2 across all buckets
+	// (credits + monthly + overage), using the breakdown in r.
+	//
+	// opID must match the charge's opID: the refund is then applied at most
+	// once (idempotent) and clamped to what that charge consumed. An empty
+	// opID skips both guards (the per-row GREATEST(...,0) still prevents
+	// negative counters).
+	RefundTokensV2(ctx context.Context, subscriptionID string, r ConsumptionResult, opID string) error
 	// ComputeBalance returns the per-bucket remaining-token snapshot.
 	ComputeBalance(ctx context.Context, userID string) (*Balance, error)
 
