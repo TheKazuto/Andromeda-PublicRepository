@@ -10,7 +10,7 @@
  *   1. in-memory override (operator-set; never expires)
  *   2. in-process micro-cache (NEK_INMEM_CACHE_TTL_MS)
  *   3. Redis (Upstash) cache (CACHE_TTL_NEK)
- *   4. live fetch (placeholder until SDK exposes a canonical method)
+ *   4. on-chain fetch (getProgramAccounts over the NetworkEncryptionKey account)
  *
  * The micro-cache + singleflight pattern eliminates the per-request Redis
  * round-trip on the hot path (createInputCiphertexts is called from every
@@ -22,6 +22,23 @@ import { cacheGet, cacheSet, cacheDel, cacheKeys } from '../cache/redis.js';
 import { logger } from '../lib/logger.js';
 import { Errors } from '../lib/errors.js';
 import { encodeBase64, decodeBase64 } from '../lib/validation.js';
+import { rpc } from '../solana/connection.js';
+import { ENCRYPT_PROGRAM_ID } from '../solana/programIds.js';
+import { withSolanaRpc } from '../solana/rpcwrap.js';
+
+// NetworkEncryptionKey account layout (Encrypt program account kind 7).
+// Source: Encrypt account reference (docs.encrypt.xyz/reference/accounts).
+//   offset 0  discriminator (1) = 7
+//   offset 1  version       (1)
+//   offset 2  network_encryption_public_key (32)
+//   offset 34 active        (1)  — 1 = active
+//   offset 35 bump          (1)
+// Total 36 bytes.
+const NEK_ACCOUNT_DISCRIMINATOR = 7;
+const NEK_ACCOUNT_ACTIVE = 1;
+const NEK_ACCOUNT_SIZE = 36;
+const NEK_PUBKEY_OFFSET = 2;
+const NEK_ACTIVE_OFFSET = 34;
 
 export type NekInfo = {
   publicKey: Uint8Array;     // 32 bytes
@@ -174,13 +191,71 @@ export async function getCurrentNek(): Promise<NekInfo> {
 }
 
 /**
- * Placeholder NEK fetch. The Encrypt SDK does not expose a stable method for
- * this in pre-alpha — the active key is registered on-chain via discriminator
- * 21 and surfaced via SDK helpers that are still moving. Until that lands we
- * surface a clear error so the operator sets it via override.
+ * Fetch the active NEK on-chain. The Encrypt SDK does not expose a typed helper
+ * in pre-alpha, and the NetworkEncryptionKey account is a PDA seeded by the key
+ * bytes themselves (`["network_encryption_key", key_bytes]`) — so its address
+ * can't be derived without already knowing the key, and EncryptConfig holds no
+ * pointer to "the active NEK". The only on-chain path is a getProgramAccounts
+ * scan filtered to account kind 7 (NetworkEncryptionKey) with `active = 1`.
+ *
+ * This is a heavy RPC call, so it only runs as the last-resort source (4): the
+ * override (env or /v1/nek/override) and the Redis/in-mem caches all short-
+ * circuit it. We require exactly one active key — zero or many is ambiguous and
+ * we refuse to guess (the wrong NEK orphans every ciphertext encrypted under it).
  */
 async function fetchNekFromNetwork(): Promise<Uint8Array> {
-  throw Errors.nek(
-    'NEK fetch not implemented — set INTERNAL_NEK_OVERRIDE via /v1/nek/override or wait for SDK helper'
+  const accounts = await withSolanaRpc('get_network_encryption_key', () =>
+    rpc
+      .getProgramAccounts(ENCRYPT_PROGRAM_ID, {
+        encoding: 'base64',
+        filters: [
+          { dataSize: BigInt(NEK_ACCOUNT_SIZE) },
+          {
+            memcmp: {
+              offset: 0n,
+              bytes: encodeBase64(Uint8Array.from([NEK_ACCOUNT_DISCRIMINATOR])) as never,
+              encoding: 'base64',
+            },
+          },
+          {
+            memcmp: {
+              offset: BigInt(NEK_ACTIVE_OFFSET),
+              bytes: encodeBase64(Uint8Array.from([NEK_ACCOUNT_ACTIVE])) as never,
+              encoding: 'base64',
+            },
+          },
+        ],
+      })
+      .send({ abortSignal: AbortSignal.timeout(config.SOLANA_RPC_TIMEOUT_MS) }),
   );
+
+  // Decode + re-validate each candidate; the memcmp filters already narrow
+  // server-side, but we never trust the wire for a key this load-bearing.
+  const keys: Uint8Array[] = [];
+  for (const entry of accounts) {
+    const data = entry.account.data;
+    const b64 = Array.isArray(data) ? data[0] : undefined;
+    if (typeof b64 !== 'string') continue;
+    const bytes = decodeBase64(b64);
+    if (
+      bytes.length !== NEK_ACCOUNT_SIZE ||
+      bytes[0] !== NEK_ACCOUNT_DISCRIMINATOR ||
+      bytes[NEK_ACTIVE_OFFSET] !== NEK_ACCOUNT_ACTIVE
+    ) {
+      continue;
+    }
+    keys.push(bytes.slice(NEK_PUBKEY_OFFSET, NEK_PUBKEY_OFFSET + 32));
+  }
+
+  if (keys.length === 0) {
+    throw Errors.nek(
+      'no active NetworkEncryptionKey found on-chain — set INTERNAL_NEK_OVERRIDE via /v1/nek/override',
+    );
+  }
+  if (keys.length > 1) {
+    throw Errors.nek(
+      `found ${keys.length} active NetworkEncryptionKeys on-chain — set INTERNAL_NEK_OVERRIDE to disambiguate`,
+    );
+  }
+  return keys[0]!;
 }
