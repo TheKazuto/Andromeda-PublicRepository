@@ -372,10 +372,6 @@ func main() {
 		// Create the config service.
 		internalRiskConfigSvc := policy.NewRiskConfigService(storeAdapter)
 
-		// Wrap both in policy layer adapters (map[string]interface{} ↔ typed).
-		riskSvc := policy.NewRiskServiceAdapter(internalRiskSvc)
-		riskConfigSvc := policy.NewRiskConfigServiceAdapter(internalRiskConfigSvc)
-
 		// Create the internal ika-backend HTTP client with circuit breaker.
 		// Only instantiate if IkaUpstreamURL and InternalAPIKey are both set
 		// (for digest verification). Without them, calldata/simulation are unavailable,
@@ -418,9 +414,10 @@ func main() {
 				"sources", len(sources.All()))
 		}
 
-		// Wire all three into policyV3Svc.
-		policyV3Svc.WithRiskService(riskSvc)
-		policyV3Svc.WithRiskConfigService(riskConfigSvc)
+		// Wire all three into policyV3Svc. *risk.Service and *risk.ConfigService
+		// satisfy the policy interfaces directly (no adapter layer).
+		policyV3Svc.WithRiskService(internalRiskSvc)
+		policyV3Svc.WithRiskConfigService(internalRiskConfigSvc)
 		if ikaClient != nil {
 			policyV3Svc.WithIkaSimulateClient(ikaClient)
 		}
