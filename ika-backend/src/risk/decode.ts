@@ -10,7 +10,6 @@
  */
 
 import { VersionedTransaction } from '@solana/web3.js'
-// @ts-ignore - viem has implicit any for parseTransaction
 import { parseTransaction } from 'viem'
 import type {
   CalldataRisk,
@@ -301,8 +300,21 @@ export function decodeSolanaTransaction(
 
     // Iterate over instructions in the message
     const message = tx.message
-    // MessageV0 uses compiledInstructions; legacy uses instructions
-    const msgInstructions = 'compiledInstructions' in message ? message.compiledInstructions : 'instructions' in message ? (message as any).instructions : []
+    // MessageV0 exposes compiledInstructions (accountKeyIndexes + Uint8Array data);
+    // a legacy Message (not in the v0 type but possible at runtime) exposes
+    // instructions (accounts + base58 string data). Bridge both to one minimal
+    // typed shape via `unknown` instead of `any`, so the loop stays type-checked.
+    type CompiledIxLike = {
+      programIdIndex: number
+      accounts?: number[]
+      data: Uint8Array | string
+    }
+    const msgInstructions: CompiledIxLike[] =
+      'compiledInstructions' in message
+        ? message.compiledInstructions
+        : 'instructions' in message
+          ? (message as unknown as { instructions: CompiledIxLike[] }).instructions
+          : []
     const accountKeys = message.staticAccountKeys
 
     for (let i = 0; i < msgInstructions.length; i++) {
@@ -336,7 +348,7 @@ export function decodeSolanaTransaction(
 
       // Heuristic decoding for SPL Token
       if (programIdStr === SPL_TOKEN_PROGRAM_ID && ixData && ixData.length >= 1) {
-        const instruction = ixData[0]
+        const instruction = ixData[0]! // guarded by length >= 1 above
         const decoded = decodeSplTokenInstruction(instruction, ixData)
         if (decoded) {
           instructions.push({
@@ -353,7 +365,7 @@ export function decodeSolanaTransaction(
       instructions.push({
         programId: programIdStr,
         programName,
-        operationType: undefined as string | undefined,
+        operationType: undefined,
         fields: {
           data_len: ixData ? ixData.length : 0,
           accounts_len: ix.accounts ? ix.accounts.length : 0,
