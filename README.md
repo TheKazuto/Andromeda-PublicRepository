@@ -5,7 +5,7 @@
 
   <p><strong>Multi-chain MPC + FHE infrastructure as API and MCP Server.</strong></p>
 
-  <p>One API for cross-chain signing, confidential compute, and social recovery.<br/>No SDK, no node, no seed phrase, no chain-specific wallet for your users.</p>
+  <p>One API for cross-chain signing, intents, confidential compute, and social recovery.<br/>No SDK, no node, no seed phrase, no chain-specific wallet for your users.</p>
 
   <p>
     <img src="https://img.shields.io/badge/license-Apache--2.0%20OR%20MIT-blue.svg" alt="License" />
@@ -60,6 +60,7 @@ Andromeda is a **B2D (Business-to-Developer)** platform.
 Cases that Andromeda specifically unblocks, not generic Web3 use cases.
 
 - **Cross-chain smart wallets.** Same identity drives signing across EVM, Solana, Bitcoin, Sui, Cosmos, Tron, TON and Aptos. The user signs into the app once and the same dWallet works on every chain.
+- **Multichain swaps for apps and AI agents.** Quote, build, sign and broadcast a token swap over a dWallet, custody-free, with liquidity from the LI.FI aggregator. The same flow works same-chain (Solana, EVM) and cross-chain (bridge). An AI agent can do it natively over MCP: no DEX integration, no bridge SDK, no wallet for the user.
 - **Onboarding without a wallet (Login Social).** The user signs in with Google or Apple and gets a cross-chain dWallet immediately, with no wallet to install, no seed phrase, no SOL to hold. The same Google/Apple account derives the same dWallet in any app on Andromeda: one identity, one wallet, every chain.
 - **DAO treasuries with on-chain rule enforcement.** A single Solana Quasar program — the PolicyEngine v3 — holds the dWallet authority with a composable allowlist + velocity rule attached. The treasury can only interact with whitelisted programs, capped at N signatures per slot window, with no ability for the gateway to bypass the policy.
 - **Trading bots with scoped delegation.** The `KIND_SESSION_KEY` rule of the PolicyEngine grants a temporary key with on-chain limits on slot expiry, number of uses, amount per transaction, and allowed destination programs. Multiple sessions per dWallet (up to 2^32 concurrent), each with its own monotonic replay nonce.
@@ -103,6 +104,14 @@ Capabilities beyond the core Ika and Encrypt primitives: the surrounding product
 - **IDL-aware Solana listener.** Websocket subscription that parses the 6 canonical Andromeda events and 4 Anchor self-CPI events from Ika, fanning out to per-tenant webhooks.
 - **HMAC-signed webhook system.** Replay-protected (5-minute window), retries with backoff, dead-letter queue.
 
+### Multichain swaps (Intents)
+- **Swap intents over dWallets.** Liquidity from the LI.FI aggregator; the dWallet signs and the PolicyEngine gates every signature. The gas-sponsor pays only the Ika approval, the swap gas comes from the dWallet's own balance. REST + MCP, no SDK.
+- **Intent types available today:**
+  - **Same-chain swap** — token to token on one chain (Solana and EVM).
+  - **Cross-chain swap (bridge)** — source and destination on different chains; the destination must be the dWallet's own address on the target chain.
+- **Per-intent flow.** `quote` (price + unified fee + native-gas estimate), `simulate` (route, fees and advisory risk, nothing signed), `prepare` (build the intent), `submit` (authorize + sign + broadcast), `status`.
+- **Safety.** Mandatory idempotency on prepare/submit, byte-for-byte re-validation of the persisted payload before signing, advisory risk + simulation, ERC20 two-step approve, and no blind retry on an uncertain broadcast (a reconciler resolves it from the chain).
+
 ### Pre-sign safety (advisory)
 - **Transaction simulation (multi-chain).** Before signing, simulate against the destination chain and get the real effects back. EVM/Tron run a real `eth_call` (true revert) + `eth_estimateGas`; Solana runs `simulateTransaction`. Structured effects (native/token transfers, approvals, contract calls) are decoded from the transaction. The developer supplies their own destination-chain RPC per request — Andromeda hosts none — and the analysis degrades honestly to static calldata decoding when no RPC is given. That static decoding spans EVM/Tron, Solana, and eight more families (Cosmos, Bitcoin, VeChain, NEAR, Aptos, MultiversX, Algorand, Filecoin); a family with no decoder returns an explicit "cannot verify" instead of a false "safe".
 - **Risk scoring.** A risk level (none → critical) with reasons, from a self-hosted scam-address blocklist (MetaMask eth-phishing + OpenChain), a per-tenant denylist/allowlist, this dWallet's destination history, and calldata heuristics (unlimited approvals, `setApprovalForAll`, drainer patterns). **Advisory only**: it never blocks or refuses a signature — the on-chain policies stay the hard protection. The analysis is bound to the digest you sign, and the client RPC is SSRF-validated server-side.
@@ -140,17 +149,18 @@ Capabilities beyond the core Ika and Encrypt primitives: the surrounding product
                  │  Auth + Quotas + MCP + Audit +   │
                  │  Idempotency + Webhooks + Batch  │
                  │  + OAuth broker (Login Social)   │
-                 └─────┬────────────────────┬───────┘
-                       │ private network    │ private network
-                       ▼                    ▼
-              ┌────────────────┐    ┌─────────────────┐
-              │  ika-backend   │    │ encrypt-backend │
-              │  MPC engine    │    │   FHE engine    │
-              └────┬───────────┘    └────────┬────────┘
-                   │ gRPC                    │ gRPC
-                   ▼                         ▼
-              Ika validator             Encrypt network
-                network                   (devnet)
+                 └─────────────────────────┬────────┘
+                                           │ private network
+                       ┌───────────────────┼───────────────────┐
+                       ▼                   ▼                   ▼
+              ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐
+              │   ika-backend   │  │ encrypt-backend │  │ intents-backend │
+              │   MPC engine    │  │   FHE engine    │  │   swap router   │
+              └────────┬────────┘  └────────┬────────┘  └────────┬────────┘
+                       │ gRPC              │ gRPC              │ HTTPS
+                       ▼                   ▼                   ▼
+                 Ika validator     Encrypt network    LI.FI aggregator
+                    network            (devnet)          + chain RPCs
 
      ┌────────────────────────────────────────────────────┐
      │  Solana devnet: PolicyEngine v3 + jwk-registry +   │
@@ -170,13 +180,14 @@ Capabilities beyond the core Ika and Encrypt primitives: the surrounding product
      Stripe + SMTP (backend service)  |   Cloudflare Pages (dashboard)
 ```
 
-The product surface is composed of **6 services** plus **4 on-chain programs**.
+The product surface is composed of **7 services** plus **4 on-chain programs**.
 
 | Service | Stack | Role |
 |---------|-------|------|
 | gateway | Go 1.25, chi, pgx, Redis | Hot path. Auth, quota, rate limit, MCP server, reverse-proxy to engines, audit log, PolicyEngine v3 admin surface (`/v1/policy/*`). |
 | ika-backend | Node 24, Express 5, @grpc/grpc-js, @solana/kit | MPC engine. gRPC to Ika validator network, dWallet lifecycle, OIDC pre-flow helpers. |
 | encrypt-backend | Node 22, Hono 4, @encrypt.xyz/pre-alpha-solana-client | FHE engine. 22 Encrypt instructions + high-level wallet primitives. |
+| intents-backend | Go 1.25, chi, gobreaker | Swap router. Talks to the LI.FI aggregator, builds the unsigned swap, inserts the dWallet signature and broadcasts. Stateless, custody-free. |
 | backend | Go 1.25, chi, pgx, Stripe | Product surface. Auth, customer endpoints, billing, admin console. |
 | dashboard | Next.js 16, React 19, Tailwind 4 | Static export. Customer dashboard + admin console + landing. |
 | jwk-rotator | Node 24, TypeScript, @solana/web3.js | Off-chain watcher. Fetches Google/Apple JWKS, proposes new keys on-chain via the `jwk-registry` authority. Required for Login Social. |
@@ -260,7 +271,7 @@ The agent can immediately call any of the auto-generated tools, covering signing
 
 ### Run locally
 
-The monorepo runs on Postgres + Redis + 6 services. Each service has its own .env.example.
+The monorepo runs on Postgres + Redis + 7 services. Each service has its own .env.example.
 
 ```bash
 git clone https://github.com/TheKazuto/Andromeda-PublicRepository andromeda
@@ -271,6 +282,7 @@ cd andromeda
 # 2. Boot each service in its own terminal.
 ( cd backend         && cp .env.example .env && go mod download && go run ./cmd/server )
 ( cd gateway         && cp .env.example .env && go mod download && go run ./cmd/server )
+( cd intents-backend && cp .env.example .env && go mod download && go run ./cmd/server )   # swap router, optional
 ( cd ika-backend     && cp .env.example .env && npm install && npm run dev )
 ( cd encrypt-backend && cp .env.example .env && npm install && npm run dev )
 ( cd dashboard       && cp .env.local.example .env.local && npm install && npm run dev )
@@ -280,7 +292,7 @@ cd andromeda
 open http://localhost:3000
 ```
 
-Service ports: backend on 8080, gateway on 8081, ika-backend on 3020, encrypt-backend on 3010, dashboard on 3000. `jwk-rotator` is a background worker, with no HTTP port.
+Service ports: backend on 8080, gateway on 8081, intents-backend on 8082, ika-backend on 3020, encrypt-backend on 3010, dashboard on 3000. `jwk-rotator` is a background worker, with no HTTP port.
 
 ### Build
 
@@ -289,6 +301,7 @@ Every service ships a Dockerfile and a Railway config. The dashboard exports to 
 ```bash
 ( cd backend         && go build -o bin/backend ./cmd/server )
 ( cd gateway         && go build -o bin/gateway ./cmd/server )
+( cd intents-backend && go build -o bin/intents ./cmd/server )
 ( cd ika-backend     && npm run build )
 ( cd encrypt-backend && npm run build )
 ( cd dashboard       && npm run build )      # static export to out/
@@ -300,6 +313,7 @@ Every service ships a Dockerfile and a Railway config. The dashboard exports to 
 ```bash
 ( cd backend         && go test ./... )
 ( cd gateway         && go test ./... )
+( cd intents-backend && go test ./... )
 ( cd ika-backend     && npm test )
 ( cd encrypt-backend && npm test )
 ```
