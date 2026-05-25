@@ -182,10 +182,11 @@ const MaxCallResponseBytes = 8 << 20 // 8 MiB
 // BaseURL set (development with the env var missing).
 var ErrUpstreamNotConfigured = errors.New("upstream not configured")
 
-// Registry holds the ika and encrypt upstreams.
+// Registry holds the ika, encrypt and intents upstreams.
 type Registry struct {
 	Ika     *Target
 	Encrypt *Target
+	Intents *Target
 	Timeout time.Duration
 }
 
@@ -208,7 +209,11 @@ func NewRegistryWithObserver(cfg *config.Config, obs TripObserver) (*Registry, e
 	if err != nil {
 		return nil, fmt.Errorf("encrypt upstream: %w", err)
 	}
-	return &Registry{Ika: ika, Encrypt: enc, Timeout: cfg.UpstreamTimeout}, nil
+	intents, err := newTarget(routes.UpstreamIntents, cfg.IntentsUpstreamURL, "X-Internal-Key", cfg.InternalAPIKey, cfg.UpstreamTimeout, obs)
+	if err != nil {
+		return nil, fmt.Errorf("intents upstream: %w", err)
+	}
+	return &Registry{Ika: ika, Encrypt: enc, Intents: intents, Timeout: cfg.UpstreamTimeout}, nil
 }
 
 // Get returns the target by upstream name. Returns nil if unknown.
@@ -218,6 +223,8 @@ func (r *Registry) Get(name string) *Target {
 		return r.Ika
 	case routes.UpstreamEncrypt:
 		return r.Encrypt
+	case routes.UpstreamIntents:
+		return r.Intents
 	}
 	return nil
 }
