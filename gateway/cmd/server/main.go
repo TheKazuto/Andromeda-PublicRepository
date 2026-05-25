@@ -24,6 +24,7 @@ import (
 	"github.com/shinkalabs/andromeda-gateway/internal/config"
 	"github.com/shinkalabs/andromeda-gateway/internal/futuresign"
 	"github.com/shinkalabs/andromeda-gateway/internal/gasponsor"
+	"github.com/shinkalabs/andromeda-gateway/internal/intents"
 	"github.com/shinkalabs/andromeda-gateway/internal/leader"
 	gwmetrics "github.com/shinkalabs/andromeda-gateway/internal/metrics"
 	"github.com/shinkalabs/andromeda-gateway/internal/netsafety"
@@ -619,6 +620,37 @@ func main() {
 		}
 	}
 
+	// --- Intents orchestrator (multichain swaps via LI.FI) ---
+	// Enabled only when the intents-backend upstream + PolicyEngine are wired.
+	// The orchestrator persists swap state in the gateway's Postgres; a
+	// leader-elected reconciler resolves orphaned / pending intents.
+	var intentsOrch *intents.Orchestrator
+	if cfg.IntentsUpstreamURL != "" && policyV3Svc != nil {
+		intentsStore := intents.NewStore(db.Pool())
+		var intentsMetrics *intents.Metrics
+		if metrics != nil {
+			intentsMetrics = intents.NewMetrics(metrics.Registry())
+		}
+		intentsOrch = intents.NewOrchestrator(intents.Options{
+			Store:      intentsStore,
+			Upstreams:  ups,
+			Authorizer: policyV3Svc,
+			Audit:      api.NewIntentsAuditBridge(auditRec),
+			Webhooks:   whPublisher,
+			Metrics:    intentsMetrics,
+			Logger:     logger,
+		})
+		reconciler := intents.NewReconciler(intentsStore, ups, intentsMetrics, whPublisher, logger)
+		spawn("intents-reconciler-leader", (&leader.Runner{
+			Pool:   db.Pool(),
+			Name:   "intents-reconciler",
+			LockID: leader.IntentsReconcilerLockID,
+			Func:   reconciler.Run,
+			Logger: logger,
+		}).Start)
+		logger.Info("intents orchestrator running", "upstream", cfg.IntentsUpstreamURL)
+	}
+
 	// --- HTTP server ---
 	srv := api.NewServer(api.Deps{
 		Config:                   cfg,
@@ -637,6 +669,7 @@ func main() {
 		OracleMonitorRunning:     omRunning,
 		FutureSignStore:          fsStore,
 		FutureSignWatcherRunning: fsWatcherRunning,
+		IntentsOrchestrator:      intentsOrch,
 		Metrics:                  metrics,
 		MetricsHandler:           metricsHandler,
 		URLGuard:                 urlGuard,

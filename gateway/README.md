@@ -9,6 +9,7 @@ Stack: Go 1.25 · chi · pgx · Redis · gobreaker · Prometheus · OpenTelemetr
 - **External clients** — REST (`/v1/*`) and MCP (`/mcp`), authenticated with `X-Api-Key`.
 - **`ika-backend`** (private network, `IKA_UPSTREAM_URL` + `X-Api-Key`) — MPC engine.
 - **`encrypt-backend`** (private network, `ENCRYPT_UPSTREAM_URL` + `X-Internal-Key`) — FHE engine.
+- **`intents-backend`** (private network, `INTENTS_UPSTREAM_URL` + `X-Internal-Key`): LI.FI swap router.
 - **`backend/`** — shares the same Postgres pool. Gateway owns the schema; backend reads/writes.
 - **Vault Transit** — signs the audit log chain (`andromeda-audit` ed25519 key).
 - **Solana RPC** — on-chain event listener and policy state reads.
@@ -44,6 +45,8 @@ gateway/
 │   ├── webhooks/           # CRUD + dispatcher worker (HMAC + retries)
 │   ├── policy/             # PolicyEngine v3 service (Go side): challenges, codecs, PDA derivation, request_signature builders, recover_as_primary + quorum_session_* + passkey_session_* handlers
 │   ├── futuresign/         # Trigger watcher (oracle/slot/event/external)
+│   ├── intents/            # Swap orchestrator (LI.FI): prepare/submit/status state machine + reconciler over the intents-backend
+
 │   ├── oraclerelay/        # Pyth adapter: FeedCache bootstrap + refresh-on-sign + /v1/oracle/* admin + Hermes catalog (crank off by default)
 │   ├── oraclemonitor/      # Managed price-trigger keeper: arms → fires request_signature when a band holds
 │   ├── audit/              # Per-tenant ed25519 hash chain (env or Vault Transit signer)
@@ -117,6 +120,7 @@ production, `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, `Per
 | **Audit log** | `GET audit/log`, `GET audit/log/export`, `GET audit/log/verify`, `GET audit/log/{seq}/proof` — per-tenant signed hash-chain (read + export + verify + Merkle proof). The `verify` response also carries the tenant's ed25519 `publicKeyB64` so external replayers can re-check signatures. | admin | gateway |
 | **Future-sign triggers** | oracle / slot / event / external watchers | admin | gateway |
 | **Oracle price triggers** | `oracle/triggers` (arm / list / get / cancel) — managed Pyth price-trigger keeper: fires a pre-built `request_signature` when the price band holds. Fan-out via webhooks (`oracle_trigger.fired` / `.expired`). | write | gateway |
+| **Swaps (Intents)** | `intents/{quote,chains,tokens}` (proxy to intents-backend) · `intents/simulate`, `intents/swap/{prepare,submit}`, `GET intents/status/{intentId}` (local orchestrator: LI.FI route → re-validate → PolicyEngine authorize → ika sign → broadcast). Idempotency-Key MANDATORY on prepare/submit. The dWallet pays swap gas; the gas-sponsor pays only the Ika approval. Solana + EVM, same-chain and cross-chain (bridge). | read / write | local + intents-backend |
 | **Utilities (display-only)** | `GET util/format-amount?raw=&decimals=&symbol=&group=` — render a raw integer amount as a human-readable decimal, using the same canonical shift as the on-chain signed human messages. No engine, no gas (→ MCP `format_amount`). NEVER a signed message. | read | gateway |
 
 Full machine-readable catalogue of the proxied routes in `internal/routes/routes.go`; everything
@@ -276,6 +280,7 @@ Both charge and refund are idempotent at the database level via the `token_ledge
 | `future-sign-watcher` | 5s (slot/time) · 30s (external) | Fire future-sign triggers (oracle/slot/event/external) → ika engine | `IKA_UPSTREAM_URL` + `INTERNAL_API_KEY` set | leader-elected |
 | `oracle-monitor` | `ORACLE_MONITOR_TICK_SECONDS` (default 10s) | Read live Pyth prices (Hermes) and fire pre-built `request_signature` when a price band holds; reaps stuck `firing` to terminal `failed` (no double-sign) | policy-engine + gas sponsor + `SOLANA_RPC_URL` set | leader-elected |
 | `oracle-relay` | bootstrap one-shot; periodic crank only if `PYTH_ADAPTER_CRANK_ENABLED=true` | Bootstrap FeedCache PDAs + serve `/v1/oracle/*` admin routes. Periodic refresh crank retired by default (F7.5) — refresh-on-sign + `oracle-monitor` keep feeds fresh at signing time | `PYTH_ADAPTER_PROGRAM_ID` + `PYTH_ADAPTER_AUTHORITY_KEY` + `SOLANA_RPC_URL` set | leader-elected |
+| `intents-reconciler` | 30s | Resolve swap intents stuck in non-final states: expire stale quotes, fail ones interrupted before broadcast, poll LI.FI for the on-chain outcome of broadcast/unknown swaps (never blind-retries); emits settle/fail webhooks | `INTENTS_UPSTREAM_URL` set | leader-elected |
 | `metrics-scraper` | 15s | Sample runtime gauges (pool, breaker, audit outbox, webhook backlog) | metrics enabled | safe (per-replica) |
 
 Leader election uses Postgres advisory locks (`pg_try_advisory_lock`) on a dedicated pool connection
@@ -419,6 +424,11 @@ Each upload is recorded in the `audit_snapshot_log` table — point-in-time look
 | `IKA_PROGRAM_ID` | Ika dWallet program (must match the ika-backend's). Referenced by the `KIND_RECOVERY` / `KIND_PASSKEY` dispatchers when building the CPI to `approve_message`. |
 | `ANDROMEDA_POLICY_ENGINE_PROGRAM_ID` | Deployed `policy-engine` Quasar program. Devnet: `ARfJadMTH8mvAWprE8oMoRGNamKVDX9GV3URvudYyXgL`. Empty → the local `/v1/policy/*` routes are not mounted. |
 | `ANDROMEDA_GAS_SPONSOR_KEYPAIR` | JSON byte array (64 B, `solana-keygen` format). Gateway pays gas for every PolicyEngine v3 Solana tx so users never need a Solana wallet. Empty → `/submit` endpoints return `503 no_gas_sponsor`. Never commit it; keep it funded. A send that fails after the tx may already have been broadcast (transport error / deadline) is classified `submitted_unknown`, logged with its signature for reconciliation, and counted by `gateway_gas_sponsor_send_unknown_total` (alert on it); a clean preflight rejection is safe to retry. |
+
+### Intents (swaps)
+| Var | Default | Notes |
+|-----|---------|-------|
+| `INTENTS_UPSTREAM_URL` | empty | Private-network URL of the `intents-backend` (LI.FI swap router). Empty → the `/v1/intents/*` routes are not mounted (the proxy quote/chains/tokens + the local swap orchestrator). Authenticated with `INTERNAL_API_KEY` as `X-Internal-Key`. With `IKA_PRESIGN_PREFETCH_ENABLED=true` (see *Tuning*) the swap `prepare` also fires a presign so `submit` is faster. |
 
 ### Multi-network (F4 scaffolding)
 
