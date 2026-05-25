@@ -123,12 +123,89 @@ var routeHints = map[string]routeHint{
 		}, "dwalletAddress", "passphrase", "newAuthorityBase58"),
 	},
 
+	// --- Intents (multichain swaps via LI.FI over dWallets) ---
+	"intent.quote": {
+		Description: "Preview a token swap (price, fees, validity) without committing. Supports same-chain (Solana, EVM) and cross-chain (bridge) routes. " +
+			"Returns amountOut, a single transactionFeeUsd (Andromeda + aggregator fees combined), and nativeFeeEstimate — " +
+			"the native token the dWallet must hold for the swap's own gas. Andromeda sponsors ONLY the Ika/PolicyEngine approval gas, " +
+			"never the swap gas. Pre-alpha / devnet — not for real value. (REST: POST /v1/intents/quote.)",
+		BodyRequired: true,
+		BodySchema: obj(map[string]any{
+			"fromChain":   str("Source chain (LI.FI id/key, e.g. \"SOL\")."),
+			"toChain":     str("Destination chain. Equal to fromChain for a same-chain swap, different for cross-chain (bridge)."),
+			"fromToken":   str("Input token (mint/address or symbol)."),
+			"toToken":     str("Output token (mint/address or symbol)."),
+			"fromAmount":  str("Input amount in base units (integer string)."),
+			"fromAddress": str("The dWallet's address on the source chain."),
+			"slippageBps": map[string]any{"type": "integer", "minimum": 0, "maximum": 5000, "description": "Slippage tolerance in bps (optional)."},
+		}, "fromChain", "toChain", "fromToken", "toToken", "fromAmount", "fromAddress"),
+	},
+	"intent.simulate": {
+		Description: "Preview a swap end to end WITHOUT committing: returns the route, amountOut, unified transactionFeeUsd, nativeFeeEstimate, " +
+			"whether an ERC20 approval is required, and an advisory risk + simulation summary. Creates no intent and signs nothing — use it so " +
+			"an agent can decide before calling prepare/submit. Same body as prepare. (REST: POST /v1/intents/simulate.)",
+		BodyRequired: true,
+		BodySchema: obj(map[string]any{
+			"dwalletAddress":      str("Base58 dWallet address."),
+			"dwalletPublicKeyHex": str("The dWallet's curve public key (hex)."),
+			"chainKind":           str("\"solana\" or \"evm\" (the source chain)."),
+			"chainNativeAddress":  str("The dWallet's 0x address (required for EVM source)."),
+			"fromChain":           str("Source chain."),
+			"toChain":             str("Destination chain (equal = same-chain; different = cross-chain)."),
+			"fromToken":           str("Input token."),
+			"toToken":             str("Output token."),
+			"fromAmount":          str("Input amount in base units (integer string)."),
+			"toAddress":           str("Recipient on the destination chain — required for cross-chain (your dWallet on toChain)."),
+		}, "dwalletAddress", "dwalletPublicKeyHex", "chainKind", "fromChain", "toChain", "fromToken", "toToken", "fromAmount"),
+	},
+	"intent.swap.prepare": {
+		Description: "Build a swap and create an intent. Pass the dWallet identity from ika.dwallet.create " +
+			"(dwalletAddress, dwalletPublicKeyHex, ownerPubkeyHex, initAuthorityHashHex). Andromeda fetches the route, " +
+			"builds the unsigned tx and derives the signing material — nothing is signed yet. Returns intentId + amountOut + " +
+			"transactionFeeUsd + nativeFeeEstimate + expiresAt. Then call intent.swap.submit with the intentId + passphrase. " +
+			"Requires an Idempotency-Key. (REST: POST /v1/intents/swap/prepare.)",
+		BodyRequired: true,
+		BodySchema: obj(map[string]any{
+			"dwalletAddress":       str("Base58 dWallet address."),
+			"dwalletPublicKeyHex":  str("32-byte curve public key (hex) of the dWallet."),
+			"ownerPubkeyHex":       str("32-byte owner public key (hex), from ika.dwallet.create."),
+			"initAuthorityHashHex": str("32-byte PolicyEngine init authority hash (hex), from ika.dwallet.create."),
+			"ikaCurve":             map[string]any{"type": "integer", "minimum": 0, "maximum": 2, "description": "Ika curve id: 2 = Curve25519 (Solana), 0 = Secp256k1 (EVM)."},
+			"chainKind":            str("\"solana\" or \"evm\" (the source chain)."),
+			"chainNativeAddress":   str("The dWallet's address on the SOURCE chain. Required for EVM (the 0x address); omit for Solana (derived from the key)."),
+			"fromChain":            str("Source chain."),
+			"toChain":              str("Destination chain (equal to fromChain for same-chain; different for cross-chain bridge)."),
+			"fromToken":            str("Input token."),
+			"toToken":              str("Output token."),
+			"toAddress":            str("Recipient on the destination chain. Required for cross-chain — must be your OWN dWallet address on toChain. Omit for same-chain."),
+			"fromAmount":           str("Input amount in base units (integer string)."),
+			"slippageBps":          map[string]any{"type": "integer", "minimum": 0, "maximum": 5000, "description": "Slippage tolerance in bps (optional)."},
+		}, "dwalletAddress", "dwalletPublicKeyHex", "ownerPubkeyHex", "initAuthorityHashHex", "chainKind", "fromChain", "toChain", "fromToken", "toToken", "fromAmount"),
+	},
+	"intent.swap.submit": {
+		Description: "Authorize (PolicyEngine), sign (from the passphrase, custody-free) and broadcast a prepared swap. " +
+			"The dWallet pays the swap gas; Andromeda sponsors only the approval gas. Returns the intentId + status + txHash. " +
+			"Requires an Idempotency-Key; a retry returns the current state instead of swapping twice. " +
+			"For an EVM swap that needs an ERC20 approval, the response status may be \"APPROVING\" while the approve tx confirms — " +
+			"just call submit again with the same intentId + passphrase and it resumes into the swap once the approval lands. " +
+			"(REST: POST /v1/intents/swap/submit.)",
+		BodyRequired: true,
+		BodySchema: obj(map[string]any{
+			"intentId":   str("The intentId returned by intent.swap.prepare."),
+			"passphrase": map[string]any{"type": "string", "minLength": 12, "description": "The dWallet's passphrase (>=12 chars). Used once to sign; never stored."},
+		}, "intentId", "passphrase"),
+	},
+	"intent.status": {
+		Description: "Read a swap intent's current state (PREPARED → AUTHORIZING → SIGNING → BROADCASTING → SUBMITTED → SETTLED, " +
+			"or FAILED/EXPIRED). Returns status, txHash and amounts. (REST: GET /v1/intents/status/{intentId}.)",
+	},
+
 	// --- Login Social pre-flow (OIDC id_token helpers) ---
 	// Read-only helpers preserved from the retired legacy /v1/recovery/primary/oidc/*
 	// flow. The PolicyEngine v3 OIDC successor (F9c) is gated on the
 	// `sol_big_mod_exp` syscall and will reuse these endpoints when it lands.
 	"ika.oidc.nonce": {
-		Description: "Login Social step 0: given the user's ephemeral Ed25519 public key, the server picks `not_after` (default ≈ 9 min — short enough to fit inside an Apple id_token's life even after the OAuth round-trip) and `nonce_randomness`, and returns the canonical `oidc_nonce` to use as the OAuth `nonce` (scope=openid). The client never needs to know the byte layout. You may optionally pass `notAfterUnixTs` to override the default (must be in (now, now+3600]). Returns {oidcNonce (43-char base64url), notAfterUnixTs, nonceRandomnessBase64} — keep `notAfterUnixTs` and `nonceRandomnessBase64`, they're needed by the open step. (REST: POST /v1/oidc/nonce → ika-backend.)",
+		Description:  "Login Social step 0: given the user's ephemeral Ed25519 public key, the server picks `not_after` (default ≈ 9 min — short enough to fit inside an Apple id_token's life even after the OAuth round-trip) and `nonce_randomness`, and returns the canonical `oidc_nonce` to use as the OAuth `nonce` (scope=openid). The client never needs to know the byte layout. You may optionally pass `notAfterUnixTs` to override the default (must be in (now, now+3600]). Returns {oidcNonce (43-char base64url), notAfterUnixTs, nonceRandomnessBase64} — keep `notAfterUnixTs` and `nonceRandomnessBase64`, they're needed by the open step. (REST: POST /v1/oidc/nonce → ika-backend.)",
 		BodyRequired: true,
 		BodySchema: obj(map[string]any{
 			"ephPkBase64":    str("Base64 of the user's ephemeral Ed25519 public key (32 bytes), generated on-device (e.g. WebCrypto). The matching private key stays on the device and signs the session challenges later."),
@@ -136,7 +213,7 @@ var routeHints = map[string]routeHint{
 		}, "ephPkBase64"),
 	},
 	"ika.oidc.validate": {
-		Description: "Login Social step 1: server-side pre-validation of an OIDC `id_token` (Google/Apple), against the provider JWKS. Run this BEFORE ika.recovery.primary.oidc.stage so you don't spend gas on a bad token. Checks signature, issuer, audience (the Andromeda auth-broker client_id), exp/iat/nbf, alg=RS256, kid, sub, and that `nonce` is a 43-char base64url string. Returns {valid, provider, addrSeed, issuerHash, audienceHash, subjectHash, expiresAt} (all base64) — never the raw sub or JWT. (REST: POST /v1/oidc/validate → ika-backend.)",
+		Description:  "Login Social step 1: server-side pre-validation of an OIDC `id_token` (Google/Apple), against the provider JWKS. Run this BEFORE ika.recovery.primary.oidc.stage so you don't spend gas on a bad token. Checks signature, issuer, audience (the Andromeda auth-broker client_id), exp/iat/nbf, alg=RS256, kid, sub, and that `nonce` is a 43-char base64url string. Returns {valid, provider, addrSeed, issuerHash, audienceHash, subjectHash, expiresAt} (all base64) — never the raw sub or JWT. (REST: POST /v1/oidc/validate → ika-backend.)",
 		BodyRequired: true,
 		BodySchema: obj(map[string]any{
 			"idToken": map[string]any{"type": "string", "minLength": 1, "maxLength": 4096, "description": "The provider `id_token` (a compact RS256 JWT, ≤ 4096 chars) obtained from Google/Apple with `scope=openid` and `nonce` = the `oidcNonce` returned by ika.oidc.nonce."},
@@ -156,41 +233,41 @@ var routeHints = map[string]routeHint{
 		Description: "Read the on-chain PolicyEngine state for a dWallet — header (paused, rules_generation, owner_slot) plus every active rule slot (kind, generation, sub-PDA, config_hash). The single source of truth for what policies currently gate a dWallet. (REST: GET /v1/policy/{dwallet} → handled locally by the gateway, no upstream proxy.)",
 	},
 	"policy.engine.init.challenge": {
-		Description: "Step 1/2 of attaching a PolicyEngine v3 to a dWallet. Computes the canonical 32-byte init challenge that the dWallet owner signs off-chain. Returns the challenge hash + the deterministic PolicyEngine PDA. The owner signs it with their wallet (Ed25519 / Secp256k1 / Secp256r1 / WebAuthn / OIDC) and posts the signature to policy.engine.init.submit. ADMIN scope. (REST: POST /v1/policy/init/challenge.)",
+		Description:  "Step 1/2 of attaching a PolicyEngine v3 to a dWallet. Computes the canonical 32-byte init challenge that the dWallet owner signs off-chain. Returns the challenge hash + the deterministic PolicyEngine PDA. The owner signs it with their wallet (Ed25519 / Secp256k1 / Secp256r1 / WebAuthn / OIDC) and posts the signature to policy.engine.init.submit. ADMIN scope. (REST: POST /v1/policy/init/challenge.)",
 		BodyRequired: true,
 		BodySchema: obj(map[string]any{
-			"dwallet_address":      str("Base58 address of the dWallet to attach the engine to."),
-			"init_authority_slot":  str("34-byte canonical member slot (scheme byte + 33-byte identifier, padded). Base64."),
-			"owner_slot":           str("34-byte canonical member slot of the engine's owner (who later signs admin actions). Base64."),
+			"dwallet_address":       str("Base58 address of the dWallet to attach the engine to."),
+			"init_authority_slot":   str("34-byte canonical member slot (scheme byte + 33-byte identifier, padded). Base64."),
+			"owner_slot":            str("34-byte canonical member slot of the engine's owner (who later signs admin actions). Base64."),
 			"default_recovery_hash": str("Optional 32-byte hex — config_hash of a Recovery rule pre-bound at init time. Empty/omitted for plain init."),
 		}, "dwallet_address", "init_authority_slot", "owner_slot"),
 	},
 	"policy.engine.init.submit": {
-		Description: "Step 2/2: submit the owner-signed init challenge. Gateway builds `init_engine` + Ed25519/Secp256k1/Secp256r1 precompile in the same tx, signs as gas sponsor, and lands the engine on-chain. ADMIN scope. Idempotency-Key REQUIRED. Returns {tx_signature, engine_address}. (REST: POST /v1/policy/init/submit.)",
+		Description:  "Step 2/2: submit the owner-signed init challenge. Gateway builds `init_engine` + Ed25519/Secp256k1/Secp256r1 precompile in the same tx, signs as gas sponsor, and lands the engine on-chain. ADMIN scope. Idempotency-Key REQUIRED. Returns {tx_signature, engine_address}. (REST: POST /v1/policy/init/submit.)",
 		BodyRequired: true,
 	},
 	"policy.engine.rules.add.challenge": {
-		Description: "Step 1/2 of adding a new rule (allowlist / velocity / time-lock / oracle / passkey / fhe-gated / session-key / recovery) to an existing PolicyEngine. Computes the canonical admin challenge for the chosen rule_kind + config payload. ADMIN scope. (REST: POST /v1/policy/rules/add/challenge.)",
+		Description:  "Step 1/2 of adding a new rule (allowlist / velocity / time-lock / oracle / passkey / fhe-gated / session-key / recovery) to an existing PolicyEngine. Computes the canonical admin challenge for the chosen rule_kind + config payload. ADMIN scope. (REST: POST /v1/policy/rules/add/challenge.)",
 		BodyRequired: true,
 	},
 	"policy.engine.rules.add.submit": {
-		Description: "Step 2/2: submit the owner-signed add-rule challenge. The on-chain handler allocates the rule sub-PDA and writes the engine.rules_flat entry. ADMIN scope. Idempotency-Key REQUIRED. (REST: POST /v1/policy/rules/add/submit.)",
+		Description:  "Step 2/2: submit the owner-signed add-rule challenge. The on-chain handler allocates the rule sub-PDA and writes the engine.rules_flat entry. ADMIN scope. Idempotency-Key REQUIRED. (REST: POST /v1/policy/rules/add/submit.)",
 		BodyRequired: true,
 	},
 	"policy.engine.rules.items.add.challenge": {
-		Description: "Step 1/2 of adding an item to an existing rule (e.g. allowlist destination, velocity window, recovery member). PE-011 incremental pattern keeps tx size under the Solana 1232-byte limit. ADMIN scope. (REST: POST /v1/policy/rules/{ruleIndex}/items/add/challenge.)",
+		Description:  "Step 1/2 of adding an item to an existing rule (e.g. allowlist destination, velocity window, recovery member). PE-011 incremental pattern keeps tx size under the Solana 1232-byte limit. ADMIN scope. (REST: POST /v1/policy/rules/{ruleIndex}/items/add/challenge.)",
 		BodyRequired: true,
 	},
 	"policy.engine.rules.items.add.submit": {
-		Description: "Step 2/2: submit the owner-signed add-item challenge. ADMIN scope. Idempotency-Key REQUIRED. (REST: POST /v1/policy/rules/{ruleIndex}/items/add/submit.)",
+		Description:  "Step 2/2: submit the owner-signed add-item challenge. ADMIN scope. Idempotency-Key REQUIRED. (REST: POST /v1/policy/rules/{ruleIndex}/items/add/submit.)",
 		BodyRequired: true,
 	},
 	"policy.engine.request-signature.challenge": {
-		Description: "Pre-flight for a signing request: compute the canonical metadata_digest binding (engine, dwallet, message_digest, destination, user_pubkey, signature_scheme, PATH_NORMAL, rules_generation). The caller signs this off-chain with the dWallet's owner key. Cheap read. (REST: POST /v1/policy/request-signature/challenge.)",
+		Description:  "Pre-flight for a signing request: compute the canonical metadata_digest binding (engine, dwallet, message_digest, destination, user_pubkey, signature_scheme, PATH_NORMAL, rules_generation). The caller signs this off-chain with the dWallet's owner key. Cheap read. (REST: POST /v1/policy/request-signature/challenge.)",
 		BodyRequired: true,
 	},
 	"policy.engine.request-signature.submit": {
-		Description: "Submit a signed request_signature. Gateway builds the tx with the owner's precompile + sub-PDAs for every active rule (in slot order), invokes Ika `approve_message` via CPI. Idempotency-Key REQUIRED. (REST: POST /v1/policy/request-signature/submit.)",
+		Description:  "Submit a signed request_signature. Gateway builds the tx with the owner's precompile + sub-PDAs for every active rule (in slot order), invokes Ika `approve_message` via CPI. Idempotency-Key REQUIRED. (REST: POST /v1/policy/request-signature/submit.)",
 		BodyRequired: true,
 	},
 
@@ -202,55 +279,55 @@ var routeHints = map[string]routeHint{
 		BodyRequired: true,
 	},
 	"policy.engine.recover-as-primary.submit": {
-		Description: "Step 2/2: submit the primary owner's signature over the `recover_as_primary` challenge. Gateway builds [credential precompile + recover_as_primary main ix], signs as gas sponsor, and lands the tx — on-chain Ika `approve_message` is CPI'd, RecoveryRule daily-limit + destinations whitelist enforced, primary_recover_nonce bumped. Idempotency-Key REQUIRED. Returns {tx_signature, engine_address}. (REST: POST /v1/policy/recover-as-primary/submit.)",
+		Description:  "Step 2/2: submit the primary owner's signature over the `recover_as_primary` challenge. Gateway builds [credential precompile + recover_as_primary main ix], signs as gas sponsor, and lands the tx — on-chain Ika `approve_message` is CPI'd, RecoveryRule daily-limit + destinations whitelist enforced, primary_recover_nonce bumped. Idempotency-Key REQUIRED. Returns {tx_signature, engine_address}. (REST: POST /v1/policy/recover-as-primary/submit.)",
 		BodyRequired: true,
 	},
 
 	// --- F11b-Phase2: quorum_session_* (M-of-N recovery) ---
 	"policy.engine.quorum.open.challenge": {
-		Description: "Step 1/2 of `quorum_session_open` (disc 82). Primary owner signs the canonical `quorum-session-open` challenge that binds {dwallet, message_digest, metadata_digest, user_pubkey, scheme, amount, destination, expires_at, session_nonce, primary_slot}. Tampering with any field on submit invalidates the signature. (REST: POST /v1/policy/quorum/session/open/challenge.)",
+		Description:  "Step 1/2 of `quorum_session_open` (disc 82). Primary owner signs the canonical `quorum-session-open` challenge that binds {dwallet, message_digest, metadata_digest, user_pubkey, scheme, amount, destination, expires_at, session_nonce, primary_slot}. Tampering with any field on submit invalidates the signature. (REST: POST /v1/policy/quorum/session/open/challenge.)",
 		BodyRequired: true,
 	},
 	"policy.engine.quorum.open.submit": {
-		Description: "Step 2/2: gateway lands [primary precompile + quorum_session_open main ix]. Allocates the ephemeral QuorumSession PDA, snapshots roster + threshold from the RecoveryRule. Idempotency-Key REQUIRED. (REST: POST /v1/policy/quorum/session/open/submit.)",
+		Description:  "Step 2/2: gateway lands [primary precompile + quorum_session_open main ix]. Allocates the ephemeral QuorumSession PDA, snapshots roster + threshold from the RecoveryRule. Idempotency-Key REQUIRED. (REST: POST /v1/policy/quorum/session/open/submit.)",
 		BodyRequired: true,
 	},
 	"policy.engine.quorum.contribute.challenge": {
-		Description: "Step 1/2 of `quorum_session_contribute` (disc 83). Each member signs the canonical `quorum-contribute` challenge that hashes the FULL session snapshot (session, member_slot, dwallet, all digests, user_pubkey, amount, destination, expires_at). Concurrent member updates do NOT affect in-flight signatures. (REST: POST /v1/policy/quorum/session/contribute/challenge.)",
+		Description:  "Step 1/2 of `quorum_session_contribute` (disc 83). Each member signs the canonical `quorum-contribute` challenge that hashes the FULL session snapshot (session, member_slot, dwallet, all digests, user_pubkey, amount, destination, expires_at). Concurrent member updates do NOT affect in-flight signatures. (REST: POST /v1/policy/quorum/session/contribute/challenge.)",
 		BodyRequired: true,
 	},
 	"policy.engine.quorum.contribute.submit": {
-		Description: "Step 2/2: gateway lands [member precompile + quorum_session_contribute main ix]. Bumps the contributions bitmap; rejects double-contributions. Idempotency-Key REQUIRED. (REST: POST /v1/policy/quorum/session/contribute/submit.)",
+		Description:  "Step 2/2: gateway lands [member precompile + quorum_session_contribute main ix]. Bumps the contributions bitmap; rejects double-contributions. Idempotency-Key REQUIRED. (REST: POST /v1/policy/quorum/session/contribute/submit.)",
 		BodyRequired: true,
 	},
 	"policy.engine.quorum.finalize": {
-		Description: "Permissionless: once `contributions_count >= threshold`, anyone calls finalize. Gateway lands the main ix which CPIs Ika `approve_message`. No signature needed — the session itself is the authorization. Idempotency-Key REQUIRED. (REST: POST /v1/policy/quorum/session/finalize.)",
+		Description:  "Permissionless: once `contributions_count >= threshold`, anyone calls finalize. Gateway lands the main ix which CPIs Ika `approve_message`. No signature needed — the session itself is the authorization. Idempotency-Key REQUIRED. (REST: POST /v1/policy/quorum/session/finalize.)",
 		BodyRequired: true,
 	},
 	"policy.engine.quorum.close": {
-		Description: "Close a finalized or expired QuorumSession, refunding rent to the recipient (must equal `session.payer_for_close` locked at open time). Returns the UNSIGNED Solana tx (base64) + recent blockhash + last_valid_block_height. The client decodes it, fills the recipient's signature slot, and submits via Solana RPC `sendTransaction`. The gateway can't fee-pay this because the recipient is the only on-chain signer. (REST: POST /v1/policy/quorum/session/close.)",
+		Description:  "Close a finalized or expired QuorumSession, refunding rent to the recipient (must equal `session.payer_for_close` locked at open time). Returns the UNSIGNED Solana tx (base64) + recent blockhash + last_valid_block_height. The client decodes it, fills the recipient's signature slot, and submits via Solana RPC `sendTransaction`. The gateway can't fee-pay this because the recipient is the only on-chain signer. (REST: POST /v1/policy/quorum/session/close.)",
 		BodyRequired: true,
 	},
 
 	// --- F11b-Phase2: passkey_session_* (Secp256r1 + WebAuthn step-up) ---
 	"policy.engine.passkey.open.challenge": {
-		Description: "Step 1/2 of `passkey_session_open` (disc 89). The passkey credential signs the canonical `passkey-session-open` challenge that binds {dwallet, primary_slot, eph_pk, not_after_unix_ts, credential_id_hash, session_nonce}. The on-chain handler verifies the Secp256r1 signature + WebAuthn assertion. (REST: POST /v1/policy/passkey/session/open/challenge.)",
+		Description:  "Step 1/2 of `passkey_session_open` (disc 89). The passkey credential signs the canonical `passkey-session-open` challenge that binds {dwallet, primary_slot, eph_pk, not_after_unix_ts, credential_id_hash, session_nonce}. The on-chain handler verifies the Secp256r1 signature + WebAuthn assertion. (REST: POST /v1/policy/passkey/session/open/challenge.)",
 		BodyRequired: true,
 	},
 	"policy.engine.passkey.open.submit": {
-		Description: "Step 2/2: gateway lands [Secp256r1 precompile (auth_data || sha256(clientDataJSON)) + passkey_session_open main ix]. Allocates the PasskeySession PDA, binds eph_pk. Idempotency-Key REQUIRED. (REST: POST /v1/policy/passkey/session/open/submit.)",
+		Description:  "Step 2/2: gateway lands [Secp256r1 precompile (auth_data || sha256(clientDataJSON)) + passkey_session_open main ix]. Allocates the PasskeySession PDA, binds eph_pk. Idempotency-Key REQUIRED. (REST: POST /v1/policy/passkey/session/open/submit.)",
 		BodyRequired: true,
 	},
 	"policy.engine.passkey.use.challenge": {
-		Description: "Step 1/2 of `recover_as_primary_passkey_session` (disc 90). The ephemeral Ed25519 key signs the canonical `passkey-primary-use` challenge that binds {session, dwallet, message_approval, digests, user_pubkey, scheme, use_nonce, primary_slot}. Single-use per session via use_nonce. (REST: POST /v1/policy/passkey/use/challenge.)",
+		Description:  "Step 1/2 of `recover_as_primary_passkey_session` (disc 90). The ephemeral Ed25519 key signs the canonical `passkey-primary-use` challenge that binds {session, dwallet, message_approval, digests, user_pubkey, scheme, use_nonce, primary_slot}. Single-use per session via use_nonce. (REST: POST /v1/policy/passkey/use/challenge.)",
 		BodyRequired: true,
 	},
 	"policy.engine.passkey.use.submit": {
-		Description: "Step 2/2: gateway lands [Ed25519 precompile by eph_pk + recover_as_primary_passkey_session main ix]. CPIs Ika `approve_message`. Repeat with fresh use_nonces until session expires. Idempotency-Key REQUIRED. (REST: POST /v1/policy/passkey/use/submit.)",
+		Description:  "Step 2/2: gateway lands [Ed25519 precompile by eph_pk + recover_as_primary_passkey_session main ix]. CPIs Ika `approve_message`. Repeat with fresh use_nonces until session expires. Idempotency-Key REQUIRED. (REST: POST /v1/policy/passkey/use/submit.)",
 		BodyRequired: true,
 	},
 	"policy.engine.passkey.close": {
-		Description: "Close an expired PasskeySession, refunding rent. Returns the UNSIGNED Solana tx (base64) + recent blockhash + last_valid_block_height; recipient signs client-side and submits via Solana RPC `sendTransaction`. Same recipient-signs constraint as quorum close. (REST: POST /v1/policy/passkey/session/close.)",
+		Description:  "Close an expired PasskeySession, refunding rent. Returns the UNSIGNED Solana tx (base64) + recent blockhash + last_valid_block_height; recipient signs client-side and submits via Solana RPC `sendTransaction`. Same recipient-signs constraint as quorum close. (REST: POST /v1/policy/passkey/session/close.)",
 		BodyRequired: true,
 	},
 }

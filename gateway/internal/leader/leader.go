@@ -47,6 +47,7 @@ const (
 	OracleRelayLockID       int64 = 0x416E64726F6704
 	OracleMonitorLockID     int64 = 0x416E64726F6705
 	RiskIngestorLockID      int64 = 0x416E64726F6706
+	IntentsReconcilerLockID int64 = 0x416E64726F6707
 )
 
 // Runner runs Func only when this process owns the advisory lock for Name.
