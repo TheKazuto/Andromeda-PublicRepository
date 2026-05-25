@@ -194,6 +194,22 @@ func (s *Server) recordUsage(r *http.Request, routeKey string, status int, laten
 	s.usage.Record(ev)
 }
 
+// refundOnError wraps a LOCAL route handler so a 5xx technical failure refunds
+// the charge — mirroring the proxy's refund policy. Local routes (PolicyEngine,
+// oracle, intents) don't go through proxyHandler, so without this they would
+// charge and never refund on a technical failure. Must be applied AFTER
+// chargeQuota so the opID + consumption are already in the request context;
+// 4xx (caller's fault) stays charged, exactly like the proxy.
+func (s *Server) refundOnError(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec := chimw.NewWrapResponseWriter(w, r.ProtoMajor)
+		next.ServeHTTP(rec, r)
+		if rec.Status() >= 500 {
+			s.refund(r)
+		}
+	})
+}
+
 // refund undoes the consumption charge attached to the request when an
 // upstream 5xx happens. It uses the bucket-aware ConsumptionResult stored
 // in context and reverses ALL buckets that paid — credits, monthly and

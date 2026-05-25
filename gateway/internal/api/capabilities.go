@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/shinkalabs/andromeda-gateway/internal/routes"
 )
@@ -39,6 +40,10 @@ type featureFlags struct {
 	// is running (store wired AND watcher started); otherwise armed price
 	// triggers never fire.
 	OracleMonitor bool `json:"oracleMonitor"`
+	// `intents` is true when the swap orchestrator is wired (intents-backend
+	// upstream + PolicyEngine). The proxy quote/chains/tokens routes also need
+	// the intents engine configured.
+	Intents bool `json:"intents"`
 	// `rateLimit` and `idempotency` are true only when Redis is configured;
 	// without Redis the middleware is a no-op. See `rateLimitMode` and
 	// `redisBackedIdempotency` below for the operational nuance the client
@@ -76,16 +81,24 @@ type routesSummary struct {
 	Total   int `json:"total"`
 	Ika     int `json:"ika"`
 	Encrypt int `json:"encrypt"`
+	Intents int `json:"intents"`
 }
 
 func (s *Server) handleCapabilities(w http.ResponseWriter, _ *http.Request) {
-	ikaCount, encCount := 0, 0
+	ikaCount, encCount, intentsCount := 0, 0, 0
 	for _, rt := range routes.All {
 		switch rt.Upstream {
 		case routes.UpstreamIka:
 			ikaCount++
 		case routes.UpstreamEncrypt:
 			encCount++
+		case routes.UpstreamIntents:
+			intentsCount++
+		}
+		// The Local intent routes (prepare/submit/status/simulate) carry the
+		// "intent." key prefix — count them too.
+		if rt.Local && strings.HasPrefix(rt.Key, "intent.") {
+			intentsCount++
 		}
 	}
 
@@ -112,6 +125,9 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, _ *http.Request) {
 			routes.UpstreamEncrypt: {
 				Configured: s.cfg.EncryptUpstreamURL != "" && s.cfg.InternalAPIKey != "",
 			},
+			routes.UpstreamIntents: {
+				Configured: s.cfg.IntentsUpstreamURL != "" && s.cfg.InternalAPIKey != "",
+			},
 		},
 		Features: featureFlags{
 			Audit:                  s.auditRecorder != nil,
@@ -119,6 +135,7 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, _ *http.Request) {
 			Policies:               s.policyV3Service != nil,
 			FutureSign:             s.futureSignStore != nil && watcherRunning,
 			OracleMonitor:          s.oracleMonitorStore != nil && s.oracleMonitorRunning,
+			Intents:                s.intentsOrchestrator != nil,
 			RateLimit:              redisConfigured,
 			Idempotency:            redisConfigured,
 			FutureSignWatcher:      watcherRunning,
@@ -135,6 +152,7 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, _ *http.Request) {
 			Total:   len(routes.All),
 			Ika:     ikaCount,
 			Encrypt: encCount,
+			Intents: intentsCount,
 		},
 	}
 

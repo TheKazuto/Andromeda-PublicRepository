@@ -19,6 +19,7 @@ import (
 	"github.com/shinkalabs/andromeda-gateway/internal/config"
 	"github.com/shinkalabs/andromeda-gateway/internal/futuresign"
 	"github.com/shinkalabs/andromeda-gateway/internal/idempotency"
+	"github.com/shinkalabs/andromeda-gateway/internal/intents"
 	"github.com/shinkalabs/andromeda-gateway/internal/mcp"
 	gwmetrics "github.com/shinkalabs/andromeda-gateway/internal/metrics"
 	"github.com/shinkalabs/andromeda-gateway/internal/netsafety"
@@ -54,6 +55,7 @@ type Server struct {
 	oracleMonitorRunning     bool
 	futureSignStore          *futuresign.Store
 	futureSignWatcherRunning bool
+	intentsOrchestrator      *intents.Orchestrator
 	mcpTools                 *mcp.ToolRegistry
 	metrics                  *gwmetrics.Metrics
 	metricsHandler           http.Handler
@@ -87,6 +89,10 @@ type Deps struct {
 	// store is wired AND this flag is set (otherwise armed triggers never fire).
 	OracleMonitorRunning bool
 	FutureSignStore      *futuresign.Store
+	// IntentsOrchestrator coordinates swap prepare/submit/status. nil disables
+	// the /v1/intents/swap/* + status Local routes (the proxy quote/chains/tokens
+	// routes still work as long as the intents upstream is configured).
+	IntentsOrchestrator *intents.Orchestrator
 	// FutureSignWatcherRunning signals that the in-process watcher goroutines
 	// (slot_time + external_webhook loops) have been started. Capabilities
 	// only reports `futureSign: true` when BOTH the store is wired AND this
@@ -201,6 +207,7 @@ func NewServer(d Deps) *Server {
 		oracleMonitorRunning:     d.OracleMonitorRunning,
 		futureSignStore:          d.FutureSignStore,
 		futureSignWatcherRunning: d.FutureSignWatcherRunning,
+		intentsOrchestrator:      d.IntentsOrchestrator,
 		mcpTools:                 tools,
 		metrics:                  d.Metrics,
 		metricsHandler:           d.MetricsHandler,
@@ -345,6 +352,40 @@ func (s *Server) Router() http.Handler {
 			sub.Use(s.idempotencyChain)
 			sub.Use(s.chargeQuota("gateway.policy-engine"))
 			s.policyV3Service.MountRoutes(sub)
+		})
+	}
+
+	// ----- Intents (multichain swaps via LI.FI) -----
+	// Local routes. quote/chains/tokens are proxies handled by
+	// registerProxyRoute. The mutating swap routes (prepare/submit) are
+	// write-level: ScopeWrite + tx rate + idempotency (mandatory via the
+	// catalogue predicate). The read routes (simulate/status) are read-level:
+	// ScopeRead + read rate, no idempotency. Per-route quota is applied inside
+	// MountRoutes so pricing stays per endpoint.
+	if s.intentsOrchestrator != nil {
+		intentsOpts := intents.RouteOptions{
+			Orchestrator:    s.intentsOrchestrator,
+			ResolveUserID:   userIDFromRequest,
+			ResolveAPIKeyID: apiKeyIDFromRequest,
+			Charge:          s.chargeQuota,
+			RefundOnError:   s.refundOnError,
+		}
+		// Write group: prepare, submit.
+		r.Group(func(sub chi.Router) {
+			sub.Use(s.requireAPIKey)
+			sub.Use(s.requireScope(auth.ScopeWrite))
+			sub.Use(s.requireSubscription)
+			sub.Use(s.applyRateLimitFor(routes.RateClassTx))
+			sub.Use(s.idempotencyChain)
+			intents.MountWriteRoutes(sub, intentsOpts)
+		})
+		// Read group: simulate, status.
+		r.Group(func(sub chi.Router) {
+			sub.Use(s.requireAPIKey)
+			sub.Use(s.requireScope(auth.ScopeRead))
+			sub.Use(s.requireSubscription)
+			sub.Use(s.applyRateLimitFor(routes.RateClassRead))
+			intents.MountReadRoutes(sub, intentsOpts)
 		})
 	}
 

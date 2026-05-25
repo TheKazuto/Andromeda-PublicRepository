@@ -17,12 +17,12 @@ import (
 // over this fallback, so the allowlist only kicks in when the handler
 // stayed silent.
 var publicCacheablePaths = map[string]bool{
-	"/capabilities":     true,
-	"/openapi.json":     true,
-	"/openapi.yaml":     true,
-	"/v1/pricing":       true,
-	"/health":           true,
-	"/health/ready":     true,
+	"/capabilities": true,
+	"/openapi.json": true,
+	"/openapi.yaml": true,
+	"/v1/pricing":   true,
+	"/health":       true,
+	"/health/ready": true,
 }
 
 // cacheControlMiddleware applies a safe default of `no-store` to every

@@ -76,6 +76,7 @@ func (s *Server) handleHealthReadiness(w http.ResponseWriter, r *http.Request) {
 	// even if the engines are temporarily down).
 	checks["ika_upstream"] = pingUpstream(ctx, s, "ika")
 	checks["encrypt_upstream"] = pingUpstream(ctx, s, "encrypt")
+	checks["intents_upstream"] = pingUpstream(ctx, s, "intents")
 
 	// Gas sponsor balance — non-critical (gateway still serves read-only
 	// flows when depleted), but surfaced so ops can refill before tenants

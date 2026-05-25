@@ -70,10 +70,10 @@ func TestSecurityHeaders_BaselineAlwaysPresent(t *testing.T) {
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/me", nil))
 
 	cases := map[string]string{
-		"X-Content-Type-Options":        "nosniff",
-		"X-Frame-Options":               "DENY",
-		"Referrer-Policy":               "strict-origin-when-cross-origin",
-		"Cross-Origin-Resource-Policy":  "same-origin",
+		"X-Content-Type-Options":       "nosniff",
+		"X-Frame-Options":              "DENY",
+		"Referrer-Policy":              "strict-origin-when-cross-origin",
+		"Cross-Origin-Resource-Policy": "same-origin",
 	}
 	for k, want := range cases {
 		if got := rec.Header().Get(k); got != want {
@@ -126,16 +126,16 @@ func TestSecurityHeaders_HSTSOnlyInProdHTTPS(t *testing.T) {
 
 func TestIsPublicCacheable(t *testing.T) {
 	cases := map[string]bool{
-		"/capabilities":  true,
-		"/capabilities/": true,
-		"/v1/pricing":    true,
-		"/v1/pricing/":   true,
-		"/health":        true,
-		"/health/ready":  true,
-		"/openapi.json":  true,
-		"/v1/me":         false,
-		"/admin/users":   false,
-		"/v1/auth/login": false,
+		"/capabilities":           true,
+		"/capabilities/":          true,
+		"/v1/pricing":             true,
+		"/v1/pricing/":            true,
+		"/health":                 true,
+		"/health/ready":           true,
+		"/openapi.json":           true,
+		"/v1/me":                  false,
+		"/admin/users":            false,
+		"/v1/auth/login":          false,
 		"/v1/dwallet/sign/submit": false,
 	}
 	for path, want := range cases {

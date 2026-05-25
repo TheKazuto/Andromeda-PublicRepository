@@ -10,6 +10,7 @@ import (
 
 	"github.com/shinkalabs/andromeda-gateway/internal/audit"
 	"github.com/shinkalabs/andromeda-gateway/internal/futuresign"
+	"github.com/shinkalabs/andromeda-gateway/internal/intents"
 	"github.com/shinkalabs/andromeda-gateway/internal/oraclemonitor"
 	"github.com/shinkalabs/andromeda-gateway/internal/policy"
 	"github.com/shinkalabs/andromeda-gateway/internal/webhooks"
@@ -76,6 +77,46 @@ func apiKeyIDFromRequest(r *http.Request) string {
 		return ""
 	}
 	return a.APIKey.ID
+}
+
+// userIDFromRequest pulls the authenticated tenant (user) id from context.
+// Empty when unauthenticated. Used by the intents orchestrator for tenant
+// isolation + as the X-Andromeda-User-Id forwarded to engines.
+func userIDFromRequest(r *http.Request) string {
+	a := authFrom(r)
+	if a == nil || a.User == nil {
+		return ""
+	}
+	return a.User.ID
+}
+
+// NewIntentsAuditBridge adapts the concrete audit.Recorder to the intents
+// orchestrator's AuditAppender interface, so main can wire it without the
+// intents package importing audit.Recorder. Returns nil when rec is nil.
+func NewIntentsAuditBridge(rec *audit.Recorder) intents.AuditAppender {
+	if rec == nil {
+		return nil
+	}
+	return &intentsAuditBridge{rec: rec}
+}
+
+// intentsAuditBridge adapts audit.Recorder to intents.AuditAppender.
+type intentsAuditBridge struct{ rec *audit.Recorder }
+
+func (b *intentsAuditBridge) Append(ctx context.Context, ev intents.AuditEvent) error {
+	apiKeyUUID, err := uuid.Parse(ev.APIKeyID)
+	if err != nil {
+		return fmt.Errorf("intents audit: invalid api_key_id: %w", err)
+	}
+	_, err = b.rec.Append(ctx, audit.Event{
+		APIKeyID:     apiKeyUUID,
+		EventType:    ev.EventType,
+		ResourceType: ev.ResourceType,
+		ResourceID:   ev.ResourceID,
+		Actor:        ev.Actor,
+		Payload:      ev.Payload,
+	})
+	return err
 }
 
 // resolveAPIKeyID is the satellite-package resolver: webhooks and audit need

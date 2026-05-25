@@ -42,6 +42,10 @@ type Config struct {
 
 	IkaUpstreamURL     string
 	EncryptUpstreamURL string
+	// IntentsUpstreamURL points at the intents-backend (LI.FI swap router).
+	// Optional: when empty the intents routes return 502/unconfigured, so the
+	// feature rolls out behind config without breaking existing deploys.
+	IntentsUpstreamURL string
 	// InternalAPIKey is the shared secret the gateway uses when proxying to
 	// either engine (sent as X-Api-Key to ika-backend, X-Internal-Key to
 	// encrypt-backend). Both engines authenticate against the same value.
@@ -230,6 +234,7 @@ func Load() *Config {
 		AdminToken:             getenv("ADMIN_TOKEN", "dev-only-admin-token-change-me"),
 		IkaUpstreamURL:         strings.TrimRight(getenv("IKA_UPSTREAM_URL", ""), "/"),
 		EncryptUpstreamURL:     strings.TrimRight(getenv("ENCRYPT_UPSTREAM_URL", ""), "/"),
+		IntentsUpstreamURL:     strings.TrimRight(getenv("INTENTS_UPSTREAM_URL", ""), "/"),
 		InternalAPIKey:         getenv("INTERNAL_API_KEY", ""),
 		UpstreamTimeout:        time.Duration(getenvInt("UPSTREAM_TIMEOUT_SECONDS", 30)) * time.Second,
 		AllowedOrigins:         splitCSV(getenv("ALLOWED_ORIGINS", "")),

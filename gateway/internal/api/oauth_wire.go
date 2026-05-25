@@ -15,9 +15,9 @@ import (
 // mountOAuthBroker registers the Login Social broker routes on `r` when
 // OAUTH_BROKER_ENABLED=true. No-op (logs once) when disabled.
 //
-//   GET  /v1/oauth/authorize       — X-Api-Key required
-//   GET  /v1/oauth/callback        — browser, no X-Api-Key
-//   POST /v1/oauth/token-exchange  — X-Api-Key required
+//	GET  /v1/oauth/authorize       — X-Api-Key required
+//	GET  /v1/oauth/callback        — browser, no X-Api-Key
+//	POST /v1/oauth/token-exchange  — X-Api-Key required
 //
 // Returns nil only if the broker is fully built (or disabled). A
 // configuration error here is fatal — the caller logs the error and
