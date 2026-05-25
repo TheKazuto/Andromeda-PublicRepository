@@ -19,6 +19,11 @@ import (
 const (
 	UpstreamIka     = "ika"
 	UpstreamEncrypt = "encrypt"
+	// UpstreamIntents — intents-backend (LI.FI swap router). Read/catalogue
+	// routes (quote, chains, tokens) proxy straight through; the prepare/submit/
+	// status routes are Local because they need orchestration (policy approval +
+	// ika sign + finalize + Postgres state).
+	UpstreamIntents = "intents"
 	// UpstreamLocal — gateway handles the route in-process. Used by
 	// PolicyEngine v3 (`/v1/policy/*`) which builds Solana transactions
 	// locally rather than proxying to an engine. Pairs with Route.Local.
@@ -254,6 +259,20 @@ var All = []Route{
 	// on-chain signed human messages. Display-only (never a signed message),
 	// no engine, no gas. Auto-registers as MCP tool `format_amount`.
 	{Method: "GET", Path: "/v1/util/format-amount", Upstream: UpstreamLocal, Local: true, Key: "util.format-amount", RateClass: RateClassRead},
+
+	// --- Intents (multichain swaps via LI.FI) ---------------------------------
+	// quote/chains/tokens are pure proxies to the intents-backend (UpstreamPath
+	// strips the /v1/intents prefix). prepare/submit/status are Local: the
+	// gateway orchestrates policy approval + ika sign + finalize and owns the
+	// `intents` Postgres state. Idempotency is MANDATORY on prepare/submit so a
+	// client/agent retry never creates a duplicate intent or a duplicate swap.
+	{Method: "POST", Path: "/v1/intents/quote", UpstreamPath: "/quote", Upstream: UpstreamIntents, Key: "intent.quote", RateClass: RateClassRead, MaxBodyBytes: 16 << 10},
+	{Method: "GET", Path: "/v1/intents/chains", UpstreamPath: "/chains", Upstream: UpstreamIntents, Key: "intent.chains", RateClass: RateClassRead},
+	{Method: "GET", Path: "/v1/intents/tokens", UpstreamPath: "/tokens", Upstream: UpstreamIntents, Key: "intent.tokens", RateClass: RateClassRead},
+	{Method: "POST", Path: "/v1/intents/simulate", Upstream: UpstreamLocal, Local: true, Key: "intent.simulate", RateClass: RateClassRead, MaxBodyBytes: 32 << 10},
+	{Method: "POST", Path: "/v1/intents/swap/prepare", Upstream: UpstreamLocal, Local: true, Key: "intent.swap.prepare", Idempotent: true, RequiresIdempotencyKey: true, RateClass: RateClassTx, TimeoutSeconds: 30, MaxBodyBytes: 32 << 10},
+	{Method: "POST", Path: "/v1/intents/swap/submit", Upstream: UpstreamLocal, Local: true, Key: "intent.swap.submit", Idempotent: true, RequiresIdempotencyKey: true, RateClass: RateClassTx, TimeoutSeconds: 120, MaxBodyBytes: 8 << 10},
+	{Method: "GET", Path: "/v1/intents/status/{intentId}", Upstream: UpstreamLocal, Local: true, Key: "intent.status", RateClass: RateClassRead},
 }
 
 // EffectiveRateClass returns r.RateClass with a default of "tx" when
