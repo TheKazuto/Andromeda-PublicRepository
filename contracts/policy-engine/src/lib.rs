@@ -133,6 +133,10 @@ pub const DOMAIN_RECOVERY_V3: &[u8] = b"andromeda::policy-engine::recovery::v3";
 // Op tags (mirror of ABI §6.3).
 pub const OP_INIT: &[u8] = b"init";
 pub const OP_INIT_WITH_RECOVERY: &[u8] = b"init-with-recovery";
+// Fase 1 (A1, 2026-05-25): op tag for the NORMAL signing-path owner
+// authorization (disc 1). The owner_slot signs this so the gateway cannot
+// relay a signature without the dWallet owner's consent.
+pub const OP_NORMAL_SIGN: &[u8] = b"normal-sign";
 pub const OP_ADD_ALLOWLIST: &[u8] = b"add-rule-allowlist";
 pub const OP_ALLOWLIST_ADD_DEST: &[u8] = b"allowlist-add-destination";
 pub const OP_ALLOWLIST_REMOVE_DEST: &[u8] = b"allowlist-remove-destination";
@@ -147,12 +151,13 @@ pub const OP_ADD_SPENDING_USD: &[u8] = b"add-rule-spending-usd";
 pub const OP_UPDATE_ALLOWLIST: &[u8] = b"update-rule-allowlist";
 pub const OP_ORACLE_ADD_FEED: &[u8] = b"oracle-add-feed";
 pub const OP_SPENDING_USD_ADD_FEED: &[u8] = b"spending-usd-add-feed";
-pub const OP_UPDATE_RECOVERY: &[u8] = b"update-rule-recovery";
 pub const OP_UPDATE_FHE_AUTH: &[u8] = b"update-rule-fhe-authorities";
+// B1 audit fix (2026-05-25): `remove-rule` op tag is now used by `remove_rule`
+// (disc 110). The `revoke` and `update-rule-recovery` op tags were removed —
+// no handler ever implemented them (dead code).
 pub const OP_REMOVE_RULE: &[u8] = b"remove-rule";
 pub const OP_PAUSE: &[u8] = b"pause";
 pub const OP_RESUME: &[u8] = b"resume";
-pub const OP_REVOKE: &[u8] = b"revoke";
 pub const OP_PRIMARY_RECOVER: &[u8] = b"primary-recover";
 pub const OP_OIDC_PRIMARY_USE: &[u8] = b"oidc-primary-use";
 pub const OP_RECOVERY_ADD_MEMBER: &[u8] = b"recovery-add-member";
@@ -281,6 +286,17 @@ pub enum PolicyEngineError {
     SpendingAssetNotAllowed,
     /// amount→USD conversion overflowed u64, or the price was non-positive.
     SpendingConversionOverflow,
+
+    /// A2 audit fix (2026-05-25): a rule sub-PDA that the dispatch must mutate
+    /// in place (Velocity / Spending USD runtime counters) was not passed as
+    /// writable. We reject explicitly instead of relying on the SVM runtime to
+    /// fault on the raw write through `data_ptr()`.
+    RuleAccountNotWritable,
+
+    /// Review fix (2026-05-25): the per-tx `amount` of a session signature
+    /// exceeded the session's `max_amount_per_tx` cap (set by the owner at
+    /// `session_open`). Added at the enum tail to avoid shifting existing codes.
+    SessionAmountExceeded,
 }
 
 impl From<AuthError> for PolicyEngineError {
@@ -327,11 +343,9 @@ pub struct EngineResumed {
     pub ts: i64,
 }
 
-#[event(discriminator = 4)]
-pub struct EngineRevoked {
-    pub engine: Address,
-    pub ts: i64,
-}
+// B1 audit fix (2026-05-25): the `EngineRevoked` event (disc 4) was removed —
+// no handler ever emitted it (there is no engine-revoke instruction; `pause`
+// covers the kill-switch need). Discriminator 4 is retired, not reused.
 
 // Fields are promoted to u64 to keep the struct padding-free for Quasar's
 // memcpy event serialization (same pattern as `SignatureRejected` in
@@ -1331,6 +1345,34 @@ pub fn request_metadata_digest(
     ])
 }
 
+/// Fase 1 (A1, 2026-05-25): owner-authorization challenge for the NORMAL
+/// signing path (disc 1). The dWallet `owner_slot` signs this off-chain and the
+/// gateway relays the precompile invocation. Binds the rendered human message,
+/// the engine/dWallet identity, and the full request via `metadata_digest`
+/// (destination, amount, message, scheme, generation, asset_index are all folded
+/// in) — so the gateway cannot alter any request field. Anti-replay is the Ika
+/// MessageApproval PDA (unique per message_digest), so no extra nonce is needed.
+#[inline]
+pub fn normal_use_challenge(
+    human: &[u8],
+    engine: &Address,
+    dwallet: &Address,
+    metadata_digest: &[u8; 32],
+    owner_slot: &[u8; MEMBER_SLOT_LEN],
+) -> [u8; 32] {
+    let h_len = human_len_le(human);
+    hashv(&[
+        DOMAIN_V3,
+        OP_NORMAL_SIGN,
+        &h_len,
+        human,
+        engine.as_array().as_slice(),
+        dwallet.as_array().as_slice(),
+        metadata_digest,
+        owner_slot,
+    ])
+}
+
 #[inline]
 fn check_sysvar_addr(addr: &Address) -> Result<(), ProgramError> {
     check_sysvar_address(addr).map_err(|_| PolicyEngineError::AuthFailed.into())
@@ -1450,6 +1492,843 @@ fn first_ed25519_record_self(ix_data: &[u8]) -> Option<(&[u8], &[u8])> {
 }
 
 // ── Program entrypoints ──────────────────────────────────────────────────────
+
+/// Shared rule-dispatch loop for every signing path (Fase 2, 2026-05-25).
+///
+/// Extracted verbatim from `request_signature` (disc 1) so the session
+/// (disc 101) and OIDC-session (disc 107) signing paths enforce the SAME
+/// rule set. The caller attaches exactly one remaining account per ENABLED
+/// rule slot (ascending) plus any per-kind aux accounts, then passes the
+/// iterator here. `path` selects which rules are ENFORCED: a rule runs only
+/// when `applies_to & path != 0`; rules on other paths are still
+/// header-validated (drift check) but skipped. `skip_slot` excludes exactly
+/// one slot entirely. Behaviour for PATH_NORMAL (`skip_slot = None`) is
+/// byte-for-byte identical to the previous inline loop.
+#[allow(clippy::too_many_arguments)]
+fn dispatch_active_rules<I>(
+    rules_flat: &[u8; RULES_FLAT_BYTES],
+    rem_iter: &mut I,
+    sysvar_view: &AccountView,
+    current_ts: i64,
+    dwallet_addr: &Address,
+    destination: &[u8; 32],
+    amount: u64,
+    asset_index: u8,
+    metadata_digest: &[u8; 32],
+    path: u8,
+    // `skip_slot` lets a caller exclude exactly ONE enabled slot from the
+    // dispatch — used by `request_signature_via_oidc_session` for the recovery
+    // rule that backs the OIDC session: it is already validated as the named
+    // `rule_pda` account, so re-reading it here as a trailing remaining_account
+    // would duplicate the account (shared borrow_state) and is unnecessary
+    // (recovery rules are APPLIES_RECOVERY — never a session gate). disc 1/101
+    // pass `None`.
+    skip_slot: Option<usize>,
+) -> Result<(), ProgramError>
+where
+    I: Iterator<Item = Result<AccountView, ProgramError>>,
+{
+    for slot in 0..MAX_RULES {
+        let entry = read_rule_entry(rules_flat, slot);
+        if entry.kind == KIND_EMPTY || entry.enabled != 1 {
+            continue;
+        }
+        // Excluded slot (e.g. the OIDC recovery rule): not pulled from
+        // remaining_accounts and not re-validated here.
+        if skip_slot == Some(slot) {
+            continue;
+        }
+
+        // Pull the matching sub-PDA from the remaining accounts.
+        let sub_view = rem_iter
+            .next()
+            .ok_or(PolicyEngineError::InvalidRuleHeader)?
+            .map_err(|_| PolicyEngineError::InvalidRuleHeader)?;
+
+        // Address binding: account passed in MUST be the recorded sub-PDA.
+        require!(
+            *sub_view.address() == entry.rule_pda,
+            PolicyEngineError::InvalidRuleHeader
+        );
+        // Ownership: sub-PDA must be owned by this program.
+        require!(
+            sub_view.owner() == &ID,
+            PolicyEngineError::InvalidRuleHeader
+        );
+
+        // Borrow the sub-PDA bytes and validate header drift.
+        let sub_data = sub_view
+            .try_borrow()
+            .map_err(|_| PolicyEngineError::InvalidRuleHeader)?;
+        require!(
+            sub_data.len() >= RULE_HEADER_BYTES + 1,
+            PolicyEngineError::InvalidRuleHeader
+        );
+        // sub_data[0] = account discriminator (= 2 for rules). Offsets
+        // below are 1-based relative to the start of the account data.
+        // (Mirror of ABI §3.4 RuleHeader layout.)
+        //
+        // M1 audit fix (2026-05-16): defense-in-depth — the address binding
+        // + owner check above already constrain this to a sub-PDA written
+        // by `add_rule_*`, but explicitly checking the discriminator
+        // hardens the loop against any future refactor that changes how
+        // rule PDAs are derived or owned.
+        require!(sub_data[0] == 2, PolicyEngineError::InvalidRuleHeader);
+        let header_kind = sub_data[1];
+        let header_index = sub_data[2];
+        let header_enabled = sub_data[3];
+        let mut gen_b = [0u8; 4];
+        gen_b.copy_from_slice(&sub_data[5..9]);
+        let header_gen = u32::from_le_bytes(gen_b);
+        let header_config_hash = &sub_data[57..89]; // offset 56 + 1 (disc)
+
+        require!(
+            header_kind == entry.kind
+                && header_index == slot as u8
+                && header_enabled == 1
+                && header_gen == entry.generation
+                && header_config_hash == entry.config_hash,
+            PolicyEngineError::InvalidRuleHeader
+        );
+
+        // Applies_to gate: rules whose mask excludes `path` are
+        // header-validated above (drift check) but skip enforcement here.
+        let applies_to = sub_data[97];
+        if (applies_to & path) == 0 {
+            continue;
+        }
+
+        // Per-kind dispatch (only when applies_to includes `path`).
+        match entry.kind {
+            KIND_ALLOWLIST => {
+                // AllowlistConfig payload starts at offset 96 + 1 (disc) = 97:
+                //   97  applies_to u8
+                //   98  destinations_count u8
+                //   99..105 _pad
+                //   105..1129 destinations_flat (32 destinations × 32)
+                let count = sub_data[98] as usize;
+                require!(count <= 32, PolicyEngineError::InvalidRuleHeader);
+                let mut allowed = false;
+                for i in 0..count {
+                    let off = 105 + i * 32;
+                    if &sub_data[off..off + 32] == destination.as_slice() {
+                        allowed = true;
+                        break;
+                    }
+                }
+                require!(allowed, PolicyEngineError::AllowlistDestinationNotAllowed);
+            }
+            KIND_VELOCITY => {
+                // F3b: count-based rate limit with real mutation via
+                // unsafe data_mut_ptr (same pattern Quasar uses
+                // internally for `set_lamports` / `resize` / `realloc`).
+                // sub-PDA layout mirror of ABI §3.5.2:
+                //   sub_data[97]   applies_to u8
+                //   sub_data[98]   windows_count u8
+                //   sub_data[99..105]  _pad
+                //   sub_data[105..297] windows_flat (4 × 48 bytes)
+                let count = sub_data[98] as usize;
+                require!(count <= 4, PolicyEngineError::InvalidRuleHeader);
+
+                // Pass 1: read + validate, collect (next_count, next_start)
+                // for each window.
+                let mut to_apply = [(0u64, 0i64); 4];
+                for i in 0..count {
+                    let base = 105 + i * 48;
+                    let window_seconds = u64::from_le_bytes(
+                        sub_data[base..base + 8]
+                            .try_into()
+                            .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
+                    );
+                    let cap = u64::from_le_bytes(
+                        sub_data[base + 8..base + 16]
+                            .try_into()
+                            .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
+                    );
+                    let current_count = u64::from_le_bytes(
+                        sub_data[base + 16..base + 24]
+                            .try_into()
+                            .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
+                    );
+                    let window_start = i64::from_le_bytes(
+                        sub_data[base + 32..base + 40]
+                            .try_into()
+                            .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
+                    );
+                    require!(
+                        window_seconds > 0 && cap > 0,
+                        PolicyEngineError::InvalidRuleHeader
+                    );
+                    let elapsed = current_ts >= window_start.saturating_add(window_seconds as i64);
+                    let (next_count, next_start) = if elapsed {
+                        (1u64, current_ts)
+                    } else {
+                        (current_count.saturating_add(1), window_start)
+                    };
+                    require!(next_count <= cap, PolicyEngineError::VelocityCapExceeded);
+                    to_apply[i] = (next_count, next_start);
+                }
+                let data_len = sub_data.len();
+                drop(sub_data);
+
+                // Pass 2: write back the new counters via Quasar's
+                // unsafe data_mut_ptr API.
+                //
+                // A2 audit fix (2026-05-25): fail closed if the caller did
+                // not pass the sub-PDA as writable, rather than depending on
+                // the SVM runtime to fault on the raw write below.
+                require!(
+                    sub_view.is_writable(),
+                    PolicyEngineError::RuleAccountNotWritable
+                );
+                // SAFETY: the remaining-account sub_view is declared
+                // writable (checked above), the immutable borrow above was
+                // released, and no other alias exists. We only touch bytes
+                // inside the existing data buffer; we do not resize. This is
+                // the same pattern Quasar uses internally for cross-account
+                // mutations (cf. `set_lamports` in quasar-lang).
+                let data_mut: &mut [u8] = unsafe {
+                    core::slice::from_raw_parts_mut(sub_view.data_ptr() as *mut u8, data_len)
+                };
+                for i in 0..count {
+                    let (next_count, next_start) = to_apply[i];
+                    let base = 105 + i * 48;
+                    data_mut[base + 16..base + 24].copy_from_slice(&next_count.to_le_bytes());
+                    data_mut[base + 32..base + 40].copy_from_slice(&next_start.to_le_bytes());
+                }
+            }
+            KIND_TIME_LOCK => {
+                // F4: read-only dispatch (no mutation). Layout:
+                //   sub_data[97]   applies_to u8
+                //   sub_data[98]   mode u8 (0=absolute, 1=delay)
+                //   sub_data[99..105]  _pad
+                //   sub_data[105..113] unlock_ts i64
+                //   sub_data[113..121] delay_seconds u64
+                //   sub_data[121..129] created_at_ts i64
+                let mode = sub_data[98];
+                let unlock_ts = i64::from_le_bytes(
+                    sub_data[105..113]
+                        .try_into()
+                        .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
+                );
+                let delay_seconds = u64::from_le_bytes(
+                    sub_data[113..121]
+                        .try_into()
+                        .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
+                );
+                let created_at_ts = i64::from_le_bytes(
+                    sub_data[121..129]
+                        .try_into()
+                        .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
+                );
+                let effective_unlock = match mode {
+                    TIME_LOCK_MODE_ABSOLUTE => unlock_ts,
+                    TIME_LOCK_MODE_DELAY => created_at_ts.saturating_add(delay_seconds as i64),
+                    _ => return Err(PolicyEngineError::InvalidRuleHeader.into()),
+                };
+                require!(
+                    current_ts >= effective_unlock,
+                    PolicyEngineError::TimeLocked
+                );
+            }
+            KIND_ORACLE => {
+                // F5b — Oracle dispatch.
+                //
+                // Layout (mirror of ABI §3.5.4):
+                //   sub_data[97]   config_applies_to u8
+                //   sub_data[98]   feeds_count u8
+                //   sub_data[99]   freshness_seconds_div16 u8
+                //   sub_data[100]  min_confidence_bps_div4 u8
+                //   sub_data[101..105] _pad_cfg0
+                //   sub_data[105..105 + 80*N] feeds_flat
+                //     each OracleFeed (80 B):
+                //       [..32] feed_account Address
+                //       [32..64] feed_owner Address
+                //       [64..72] min_q64 i64 LE
+                //       [72..80] max_q64 i64 LE
+                //
+                // For each feed, the caller must attach one trailing
+                // aux account in `remaining_accounts` (after the sub-PDA)
+                // whose `address` matches `feed_account` and whose `owner`
+                // matches `feed_owner`. The aux account's data MUST start
+                // with the canonical price layout (Andromeda v1):
+                //   [0..32]  feed_id (opaque, not checked here)
+                //   [32..40] price i64 LE
+                //   [40..48] confidence u64 LE
+                //   [48..56] _reserved
+                //   [56..64] publish_time i64 LE
+                //
+                // Real Pyth `PriceUpdateV2` accounts ship the same three
+                // critical fields (price / confidence / publish_time) but
+                // at provider-defined offsets — an adapter layer on the
+                // off-chain side normalises them into this canonical
+                // 64-byte view before the tx is signed. Keeps the on-chain
+                // dispatch cheap and protocol-agnostic.
+                let count = sub_data[98] as usize;
+                require!(
+                    count <= MAX_ORACLE_FEEDS,
+                    PolicyEngineError::InvalidRuleHeader
+                );
+                let freshness_secs = (sub_data[99] as i64).saturating_mul(16);
+                // H3 fix: the rule's `min_confidence_bps_div4` (legacy name)
+                // is an UPPER bound on accepted price uncertainty. A value
+                // of 0 disables the check (back-compat for rules created
+                // before H3 landed). max_confidence_bps fits in u64 even
+                // for u8::MAX * 4 = 1020 bps.
+                let max_confidence_bps_div4 = sub_data[100] as u64;
+                // Collect feed metadata into a local buffer because we
+                // need to drop the immutable sub_data borrow before
+                // pulling aux accounts (some sub_data references can
+                // still be live across the loop).
+                let mut feeds: [([u8; 32], [u8; 32], i64, i64); MAX_ORACLE_FEEDS] =
+                    [([0u8; 32], [0u8; 32], 0i64, 0i64); MAX_ORACLE_FEEDS];
+                for i in 0..count {
+                    let base = 105 + i * ORACLE_FEED_BYTES;
+                    let mut feed_acct = [0u8; 32];
+                    feed_acct.copy_from_slice(&sub_data[base..base + 32]);
+                    let mut feed_owner = [0u8; 32];
+                    feed_owner.copy_from_slice(&sub_data[base + 32..base + 64]);
+                    let min_q64 = i64::from_le_bytes(
+                        sub_data[base + 64..base + 72]
+                            .try_into()
+                            .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
+                    );
+                    let max_q64 = i64::from_le_bytes(
+                        sub_data[base + 72..base + 80]
+                            .try_into()
+                            .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
+                    );
+                    feeds[i] = (feed_acct, feed_owner, min_q64, max_q64);
+                }
+                drop(sub_data);
+
+                let max_confidence_bps = max_confidence_bps_div4.saturating_mul(4);
+                for i in 0..count {
+                    let (expected_acct, expected_owner, min_q64, max_q64) = feeds[i];
+                    // H1 fix: defense-in-depth allowlist. A rule whose
+                    // feed_owner is outside the allowed set is rejected
+                    // even if the rule itself was created by a legit
+                    // owner (which lowers the blast radius of a
+                    // gateway/owner-key compromise that registers a
+                    // malicious feed_owner).
+                    require!(
+                        is_oracle_owner_allowed(&expected_owner),
+                        PolicyEngineError::OracleOwnerMismatch
+                    );
+                    let aux_view = rem_iter
+                        .next()
+                        .ok_or(PolicyEngineError::InvalidRuleHeader)?
+                        .map_err(|_| PolicyEngineError::InvalidRuleHeader)?;
+                    require!(
+                        aux_view.address().as_array() == &expected_acct,
+                        PolicyEngineError::InvalidRuleHeader
+                    );
+                    require!(
+                        aux_view.owner().as_array() == &expected_owner,
+                        PolicyEngineError::OracleOwnerMismatch
+                    );
+                    let aux_data = aux_view
+                        .try_borrow()
+                        .map_err(|_| PolicyEngineError::InvalidRuleHeader)?;
+                    require!(aux_data.len() >= 64, PolicyEngineError::InvalidRuleHeader);
+                    let price = i64::from_le_bytes(
+                        aux_data[32..40]
+                            .try_into()
+                            .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
+                    );
+                    let confidence = u64::from_le_bytes(
+                        aux_data[40..48]
+                            .try_into()
+                            .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
+                    );
+                    let publish_time = i64::from_le_bytes(
+                        aux_data[56..64]
+                            .try_into()
+                            .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
+                    );
+                    require!(
+                        publish_time.saturating_add(freshness_secs) >= current_ts,
+                        PolicyEngineError::OracleStale
+                    );
+                    require!(
+                        price >= min_q64 && price <= max_q64,
+                        PolicyEngineError::OracleOutOfBand
+                    );
+                    // H3: confidence_bps = confidence * 10_000 / |price|.
+                    // Skipped when the rule sets `max_confidence_bps_div4 = 0`.
+                    if max_confidence_bps > 0 {
+                        let abs_price = if price < 0 {
+                            (price as i128).unsigned_abs() as u64
+                        } else {
+                            price as u64
+                        };
+                        // price == 0 with confidence > 0 means infinite
+                        // uncertainty — reject unconditionally. price == 0
+                        // with confidence == 0 is degenerate but not the
+                        // adversarial case we care about (oracle would
+                        // already fail OracleOutOfBand for any non-trivial
+                        // band).
+                        if abs_price == 0 {
+                            require!(confidence == 0, PolicyEngineError::OracleConfidenceExceeded);
+                        } else {
+                            let confidence_bps = confidence.saturating_mul(10_000) / abs_price;
+                            require!(
+                                confidence_bps <= max_confidence_bps,
+                                PolicyEngineError::OracleConfidenceExceeded
+                            );
+                        }
+                    }
+                }
+            }
+            KIND_SPENDING_USD => {
+                // Update 3 — USD spending-limit dispatch.
+                //
+                // Fase 2 (2026-05-25): SPENDING_USD needs a TRUSTED per-tx
+                // `amount`, which only the normal path carries (bound into
+                // metadata_digest + owner signature). The session / OIDC
+                // paths don't plumb a per-tx amount, so enforcing here with
+                // amount = 0 would silently pass every spend — a forbidden
+                // silent bypass of a spending limit. Fail closed instead:
+                // owners must keep SPENDING_USD on the normal path only.
+                require!(path == PATH_NORMAL, PolicyEngineError::InvalidRuleKind);
+                //
+                // Reads ONE feed (the moved asset, `asset_index`) from the
+                // allowlist, converts `amount` (asset base units) → USD 1e8
+                // via the Pyth adapter FeedCache price, and enforces the
+                // per-tx / per-day / per-week ceilings. Day/week accumulators
+                // are mutated in place (KIND_VELOCITY data_mut_ptr pattern).
+                // Layout mirror: see `SpendingUsdRule`.
+                //
+                // Defense-in-depth: the address binding + header drift checks
+                // above already constrain this to a full sub-PDA written by
+                // add_rule_spending_usd (always 689 bytes), but assert the
+                // exact size so any future refactor or undersized account
+                // fails closed instead of panicking on the offset reads below.
+                require!(
+                    sub_data.len() >= 1 + RULE_HEADER_BYTES + SPENDING_USD_CONFIG_BYTES,
+                    PolicyEngineError::InvalidRuleHeader
+                );
+                let feeds_count = sub_data[98] as usize;
+                require!(
+                    feeds_count <= MAX_SPENDING_USD_FEEDS,
+                    PolicyEngineError::InvalidRuleHeader
+                );
+                let aidx = asset_index as usize;
+                require!(
+                    aidx < feeds_count,
+                    PolicyEngineError::SpendingAssetNotAllowed
+                );
+
+                let freshness_secs = (sub_data[99] as i64).saturating_mul(16);
+                let max_confidence_bps = (sub_data[100] as u64).saturating_mul(4);
+                let max_per_tx = u64::from_le_bytes(
+                    sub_data[105..113]
+                        .try_into()
+                        .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
+                );
+                let max_per_day = u64::from_le_bytes(
+                    sub_data[113..121]
+                        .try_into()
+                        .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
+                );
+                let max_per_week = u64::from_le_bytes(
+                    sub_data[121..129]
+                        .try_into()
+                        .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
+                );
+                let cur_day_unix = i64::from_le_bytes(
+                    sub_data[129..137]
+                        .try_into()
+                        .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
+                );
+                let cur_day_sum = u64::from_le_bytes(
+                    sub_data[137..145]
+                        .try_into()
+                        .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
+                );
+                let cur_week_unix = i64::from_le_bytes(
+                    sub_data[145..153]
+                        .try_into()
+                        .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
+                );
+                let cur_week_sum = u64::from_le_bytes(
+                    sub_data[153..161]
+                        .try_into()
+                        .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
+                );
+                // Read only the moved asset's feed entry (stack budget: never
+                // load all 16 — read just `asset_index` straight from data).
+                let fbase = 161 + aidx * SPENDING_USD_FEED_BYTES;
+                let mut feed_cache_account = [0u8; 32];
+                feed_cache_account.copy_from_slice(&sub_data[fbase..fbase + 32]);
+                let decimals = sub_data[fbase + 32];
+                let data_len = sub_data.len();
+                drop(sub_data);
+
+                // Pull the single aux FeedCache account for the moved asset.
+                let aux_view = rem_iter
+                    .next()
+                    .ok_or(PolicyEngineError::InvalidRuleHeader)?
+                    .map_err(|_| PolicyEngineError::InvalidRuleHeader)?;
+                require!(
+                    aux_view.address().as_array() == &feed_cache_account,
+                    PolicyEngineError::SpendingAssetNotAllowed
+                );
+                require!(
+                    is_oracle_owner_allowed(aux_view.owner().as_array()),
+                    PolicyEngineError::OracleOwnerMismatch
+                );
+                let aux_data = aux_view
+                    .try_borrow()
+                    .map_err(|_| PolicyEngineError::InvalidRuleHeader)?;
+                require!(aux_data.len() >= 64, PolicyEngineError::InvalidRuleHeader);
+                let price = i64::from_le_bytes(
+                    aux_data[32..40]
+                        .try_into()
+                        .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
+                );
+                let confidence = u64::from_le_bytes(
+                    aux_data[40..48]
+                        .try_into()
+                        .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
+                );
+                let publish_time = i64::from_le_bytes(
+                    aux_data[56..64]
+                        .try_into()
+                        .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
+                );
+                drop(aux_data);
+
+                // Frescor fail-closed: an old price is never assumed valid.
+                require!(
+                    publish_time.saturating_add(freshness_secs) >= current_ts,
+                    PolicyEngineError::SpendingPriceStale
+                );
+                // A non-positive price cannot value a spend — reject.
+                require!(price > 0, PolicyEngineError::SpendingConversionOverflow);
+                // Optional confidence ceiling (same maths as KIND_ORACLE).
+                if max_confidence_bps > 0 {
+                    let abs_price = price as u64; // price > 0 guaranteed above
+                    let confidence_bps = confidence.saturating_mul(10_000) / abs_price;
+                    require!(
+                        confidence_bps <= max_confidence_bps,
+                        PolicyEngineError::SpendingConfidenceExceeded
+                    );
+                }
+
+                // Convert: amount_usd_1e8 = amount * price / 10^decimals.
+                // u128 intermediate; price already USD 1e8; dividing by the
+                // asset's base-unit scale brings it back to USD 1e8.
+                let pow10 = 10u128
+                    .checked_pow(decimals as u32)
+                    .ok_or(PolicyEngineError::SpendingConversionOverflow)?;
+                let numer = (amount as u128)
+                    .checked_mul(price as u128)
+                    .ok_or(PolicyEngineError::SpendingConversionOverflow)?;
+                let amount_usd_1e8: u64 = (numer / pow10)
+                    .try_into()
+                    .map_err(|_| PolicyEngineError::SpendingConversionOverflow)?;
+
+                // Per-tx ceiling.
+                if max_per_tx > 0 {
+                    require!(
+                        amount_usd_1e8 <= max_per_tx,
+                        PolicyEngineError::SpendingPerTxExceeded
+                    );
+                }
+
+                // Daily bucket: floor(ts/86400)*86400. Reset on a new bucket.
+                let day_bucket = (current_ts / 86_400).saturating_mul(86_400);
+                let next_day_sum = if day_bucket != cur_day_unix {
+                    amount_usd_1e8
+                } else {
+                    cur_day_sum.saturating_add(amount_usd_1e8)
+                };
+                if max_per_day > 0 {
+                    require!(
+                        next_day_sum <= max_per_day,
+                        PolicyEngineError::SpendingDailyExceeded
+                    );
+                }
+
+                // Weekly bucket: floor(ts/604800)*604800.
+                let week_bucket = (current_ts / 604_800).saturating_mul(604_800);
+                let next_week_sum = if week_bucket != cur_week_unix {
+                    amount_usd_1e8
+                } else {
+                    cur_week_sum.saturating_add(amount_usd_1e8)
+                };
+                if max_per_week > 0 {
+                    require!(
+                        next_week_sum <= max_per_week,
+                        PolicyEngineError::SpendingWeeklyExceeded
+                    );
+                }
+
+                // Write back the accumulators.
+                //
+                // A2 audit fix (2026-05-25): fail closed if the caller did
+                // not pass the sub-PDA as writable.
+                require!(
+                    sub_view.is_writable(),
+                    PolicyEngineError::RuleAccountNotWritable
+                );
+                // SAFETY: the sub_view is declared writable (checked above),
+                // the immutable borrow above was dropped, and no other alias
+                // exists. We only touch existing bytes (no resize). Same
+                // pattern as KIND_VELOCITY.
+                let data_mut: &mut [u8] = unsafe {
+                    core::slice::from_raw_parts_mut(sub_view.data_ptr() as *mut u8, data_len)
+                };
+                data_mut[129..137].copy_from_slice(&day_bucket.to_le_bytes());
+                data_mut[137..145].copy_from_slice(&next_day_sum.to_le_bytes());
+                data_mut[145..153].copy_from_slice(&week_bucket.to_le_bytes());
+                data_mut[153..161].copy_from_slice(&next_week_sum.to_le_bytes());
+            }
+            KIND_PASSKEY => {
+                // F6b — Passkey dispatch.
+                //
+                // Layout (ABI §3.5.5):
+                //   sub_data[97]  config_applies_to u8
+                //   sub_data[98]  credentials_count u8
+                //   sub_data[99..105] _pad_cfg0
+                //   sub_data[105..105 + 128 * N] credentials_flat
+                //     each PasskeyCredential (128 B):
+                //       [..33]  pubkey (33 B compressed P-256)
+                //       [33..64] _pad
+                //       [64..96]  rp_id_hash
+                //       [96..128] credential_id_hash
+                //
+                // The user signs the canonical `metadata_digest` via
+                // WebAuthn — the caller attaches a Secp256r1 precompile
+                // invocation in the same tx whose `(pubkey, message)` is
+                // `(credential.pubkey, auth_data || sha256(cdj))`. The
+                // clientDataJSON.challenge field MUST embed the
+                // base64url-no-pad form of `metadata_digest`. The
+                // dispatch routes through `andromeda_auth::verify_signature`
+                // scheme=WEBAUTHN, which already handles the anchor check
+                // + reconstruction + sysvar lookup.
+                //
+                // The caller attaches two trailing aux accounts per
+                // passkey slot in `remaining_accounts`:
+                //   aux[0].data = raw `authenticatorData` bytes
+                //   aux[1].data = raw `clientDataJSON` bytes
+                // The aux addresses are opaque (any pubkey); only the
+                // data content matters. This avoids bloating the ix data
+                // with two 192-byte fields on every `request_signature`.
+                let count = sub_data[98] as usize;
+                require!(
+                    count > 0 && count <= MAX_PASSKEY_CREDENTIALS,
+                    PolicyEngineError::InvalidRuleHeader
+                );
+                // Snapshot credential pubkeys (we need them after dropping
+                // `sub_data`).
+                let mut credentials: [[u8; 33]; MAX_PASSKEY_CREDENTIALS] =
+                    [[0u8; 33]; MAX_PASSKEY_CREDENTIALS];
+                for i in 0..count {
+                    let base = 105 + i * PASSKEY_CREDENTIAL_BYTES;
+                    credentials[i].copy_from_slice(&sub_data[base..base + 33]);
+                }
+                drop(sub_data);
+
+                // Pull aux accounts: auth_data first, then cdj.
+                let auth_view = rem_iter
+                    .next()
+                    .ok_or(PolicyEngineError::PasskeyAssertionInvalid)?
+                    .map_err(|_| PolicyEngineError::PasskeyAssertionInvalid)?;
+                let cdj_view = rem_iter
+                    .next()
+                    .ok_or(PolicyEngineError::PasskeyAssertionInvalid)?
+                    .map_err(|_| PolicyEngineError::PasskeyAssertionInvalid)?;
+                let auth_data_ref = auth_view
+                    .try_borrow()
+                    .map_err(|_| PolicyEngineError::PasskeyAssertionInvalid)?;
+                let cdj_ref = cdj_view
+                    .try_borrow()
+                    .map_err(|_| PolicyEngineError::PasskeyAssertionInvalid)?;
+
+                // Verify the WebAuthn assertion using the metadata digest
+                // as the canonical challenge.
+                check_sysvar_addr(sysvar_view.address())?;
+                let sysvar_data_ref = sysvar_view
+                    .try_borrow()
+                    .map_err(|_| PolicyEngineError::AuthFailed)?;
+
+                // Walk the registered credentials and accept the first one
+                // whose pubkey matches a Secp256r1 precompile invocation
+                // signing `(auth_data || sha256(cdj))`. `verify_signature`
+                // also enforces the cdj anchor check on `metadata_digest`.
+                let mut accepted = false;
+                for i in 0..count {
+                    let mut slot = [0u8; MEMBER_SLOT_LEN];
+                    slot[0] = SCHEME_WEBAUTHN;
+                    slot[1..34].copy_from_slice(&credentials[i]);
+                    if verify_signature(VerifyInput {
+                        member_slot: &slot,
+                        challenge: metadata_digest,
+                        instructions_sysvar_data: &sysvar_data_ref,
+                        webauthn_auth_data: &auth_data_ref,
+                        webauthn_client_data_json: &cdj_ref,
+                    })
+                    .is_ok()
+                    {
+                        accepted = true;
+                        break;
+                    }
+                }
+                drop(sysvar_data_ref);
+                drop(cdj_ref);
+                drop(auth_data_ref);
+                require!(accepted, PolicyEngineError::PasskeyAssertionInvalid);
+            }
+            KIND_FHE_GATED => {
+                // F7b — FHE-Gated dispatch.
+                //
+                // Layout (ABI §3.5.6):
+                //   sub_data[97]  config_applies_to u8
+                //   sub_data[98]  authorities_count u8
+                //   sub_data[99]  freshness_seconds_div16 u8
+                //   sub_data[100..105] _pad_cfg0
+                //   sub_data[105..105 + 32 * N] authorities_flat
+                //     each authority = 32-byte Ed25519 pubkey.
+                //
+                // The on-chain check looks for an Ed25519 precompile
+                // invocation in the same tx whose `(pubkey, message)`
+                // matches one of the configured authorities and a
+                // canonical decision body of:
+                //   `andromeda::fhe-decision::v1`
+                //   || dwallet (32)
+                //   || metadata_digest (32)
+                //   || decision_timestamp (8 LE i64)
+                //   || authorize (1 byte; MUST be 1)
+                //
+                // Total decision body = 27 + 32 + 32 + 8 + 1 = 100 bytes.
+                let count = sub_data[98] as usize;
+                require!(
+                    count > 0 && count <= MAX_FHE_AUTHORITIES,
+                    PolicyEngineError::InvalidRuleHeader
+                );
+                let freshness_secs = (sub_data[99] as i64).saturating_mul(16);
+                let mut authorities: [[u8; 32]; MAX_FHE_AUTHORITIES] =
+                    [[0u8; 32]; MAX_FHE_AUTHORITIES];
+                for i in 0..count {
+                    let base = 105 + i * 32;
+                    authorities[i].copy_from_slice(&sub_data[base..base + 32]);
+                }
+                drop(sub_data);
+
+                check_sysvar_addr(sysvar_view.address())?;
+                let sysvar_data_ref = sysvar_view
+                    .try_borrow()
+                    .map_err(|_| PolicyEngineError::AuthFailed)?;
+
+                const FHE_DECISION_DOMAIN: &[u8] = b"andromeda::fhe-decision::v1";
+                const FHE_DECISION_LEN: usize = FHE_DECISION_DOMAIN.len() + 32 + 32 + 8 + 1;
+                // Try every authority. For the matched authority, the
+                // precompile lookup also enforces message-byte equality,
+                // so we rebuild the canonical decision body for each
+                // candidate timestamp range… actually the message has the
+                // timestamp embedded, which we don't know up-front. We
+                // therefore rely on `precompile::verify_ed25519` returning
+                // `NoMatchingInvocation` when (pubkey, prefix) don't match
+                // and parse the matched message ourselves once it does.
+                //
+                // Strategy: walk the Ed25519 precompile invocations in the
+                // sysvar, parse each `(pubkey, message)`, and accept if
+                // (a) pubkey ∈ authorities, (b) message length == 100,
+                // (c) prefix == DOMAIN || dwallet || metadata_digest,
+                // (d) authorize == 1, (e) age within freshness window.
+                let dwallet_bytes = *dwallet_addr.as_array();
+                let mut accepted = false;
+                let mut idx = 0usize;
+                while let Some((program_id, ix_data)) = read_ix_body_for_fhe(&sysvar_data_ref, idx)
+                    .map_err(|_| PolicyEngineError::FheDecisionInvalid)?
+                {
+                    idx += 1;
+                    if program_id != ED25519_PRECOMPILE_ID.as_array().as_slice() {
+                        continue;
+                    }
+                    // Walk every record in this Ed25519 precompile ix
+                    // looking for a match. Records use the long-record
+                    // 14-byte offsets format documented in
+                    // `andromeda_auth::precompile`.
+                    if let Some((pk, msg)) = first_ed25519_record_self(ix_data) {
+                        if msg.len() != FHE_DECISION_LEN {
+                            continue;
+                        }
+                        // Match pubkey ∈ authorities.
+                        let mut found_authority = false;
+                        for a in authorities.iter().take(count) {
+                            if pk == a.as_slice() {
+                                found_authority = true;
+                                break;
+                            }
+                        }
+                        if !found_authority {
+                            continue;
+                        }
+                        if &msg[..FHE_DECISION_DOMAIN.len()] != FHE_DECISION_DOMAIN {
+                            continue;
+                        }
+                        let mut off = FHE_DECISION_DOMAIN.len();
+                        if &msg[off..off + 32] != &dwallet_bytes[..] {
+                            continue;
+                        }
+                        off += 32;
+                        if &msg[off..off + 32] != &metadata_digest[..] {
+                            continue;
+                        }
+                        off += 32;
+                        let ts_bytes: [u8; 8] = msg[off..off + 8]
+                            .try_into()
+                            .map_err(|_| PolicyEngineError::FheDecisionInvalid)?;
+                        let decision_ts = i64::from_le_bytes(ts_bytes);
+                        off += 8;
+                        let authorize = msg[off];
+                        if authorize != 1 {
+                            continue;
+                        }
+                        if decision_ts.saturating_add(freshness_secs) < current_ts {
+                            continue;
+                        }
+                        accepted = true;
+                        break;
+                    }
+                }
+                drop(sysvar_data_ref);
+                require!(accepted, PolicyEngineError::FheDecisionMissing);
+            }
+            KIND_SESSION_KEY => {
+                // The SessionKey rule authenticates the session itself —
+                // it is created by `session_open` (disc 100) and enforced
+                // by the session entrypoints, never re-run as a dispatch
+                // rule. In the NORMAL path a SessionKey rule must never
+                // carry APPLIES_NORMAL, so reaching this arm means it was
+                // misconfigured -> reject. In the SESSION path it is the
+                // expected self-rule (already authenticated by the session
+                // signer / OIDC primary) and is skipped here.
+                require!(path == PATH_SESSION, PolicyEngineError::InvalidRuleKind);
+            }
+            KIND_RECOVERY => {
+                // Recovery rules belong exclusively to the recovery
+                // entrypoints (disc 80/81/87); never enforced here.
+                return Err(PolicyEngineError::InvalidRuleKind.into());
+            }
+            _ => {
+                return Err(PolicyEngineError::InvalidRuleKind.into());
+            }
+        }
+        // `sub_data` (if still alive) is dropped here on scope exit.
+    }
+
+    // Reject extra trailing accounts: caller must attach exactly one
+    // sub-PDA per active rule, no more.
+    require!(
+        rem_iter.next().is_none(),
+        PolicyEngineError::InvalidRuleHeader
+    );
+    Ok(())
+}
 
 #[program]
 mod policy_engine_program {
@@ -1642,6 +2521,52 @@ mod policy_engine_program {
             PolicyEngineError::AuthFailed
         );
 
+        // Fase 1 (A1, 2026-05-25): zero-trust owner authorization. The gateway
+        // can never relay a normal-path signature without the dWallet owner's
+        // consent — the `owner_slot` must sign the `normal_use_challenge` (which
+        // binds `metadata_digest` = the full request) via a precompile in THIS
+        // transaction. There is no per-request nonce in the challenge by design:
+        // anti-replay is the Ika MessageApproval PDA (derived from
+        // `message_digest`, so re-approving the same message fails) plus the
+        // destination-chain tx's own nonce/blockhash. WebAuthn/passkey primaries authorize
+        // via the KIND_PASSKEY rule (step-up) or a session, not here — same
+        // exclusion `verify_owner_admin` applies to the admin path.
+        let owner_slot = ctx.accounts.engine.owner_slot;
+        require!(
+            owner_slot[0] != SCHEME_WEBAUTHN,
+            PolicyEngineError::UnsupportedScheme
+        );
+        let mut human_buf = [0u8; MAX_HUMAN_MESSAGE_BYTES];
+        let human_len = human_message::normal_sign_message(
+            &mut human_buf,
+            &dwallet_addr,
+            &destination,
+            amount,
+            signature_scheme,
+        )
+        .map_err(PolicyEngineError::from)?;
+        let auth_challenge = normal_use_challenge(
+            &human_buf[..human_len],
+            &engine_addr,
+            &dwallet_addr,
+            &metadata_digest,
+            &owner_slot,
+        );
+        check_sysvar_addr(ctx.accounts.instructions_sysvar.address())?;
+        let sysvar_view = ctx.accounts.instructions_sysvar.to_account_view();
+        let sysvar_data_ref = sysvar_view
+            .try_borrow()
+            .map_err(|_| PolicyEngineError::AuthFailed)?;
+        verify_signature(VerifyInput {
+            member_slot: &owner_slot,
+            challenge: &auth_challenge,
+            instructions_sysvar_data: &sysvar_data_ref,
+            webauthn_auth_data: &[],
+            webauthn_client_data_json: &[],
+        })
+        .map_err(|_| PolicyEngineError::AuthFailed)?;
+        drop(sysvar_data_ref);
+
         // Local CPI defense (mirror of allowlist-destinations).
         require!(
             validate_ika_cpi_accounts(
@@ -1651,786 +2576,32 @@ mod policy_engine_program {
             PolicyEngineError::IkaCpiAccountMismatch
         );
 
-        // F8a: dispatch loop over every active slot. The caller must attach
-        // exactly one remaining account per active slot, in ascending slot
-        // order. Any drift, missing account, or extra account → reject.
+        // F8a: dispatch loop factored into `dispatch_active_rules` so the
+        // session (disc 101) and OIDC-session (disc 107) paths enforce the
+        // same rules (Fase 2). The caller attaches exactly one remaining
+        // account per active slot in ascending order; PATH_NORMAL enforces
+        // rules whose `applies_to` mask includes the normal path.
         let remaining = ctx.remaining_accounts();
         let mut rem_iter = remaining.iter();
-        for slot in 0..MAX_RULES {
-            let entry = read_rule_entry(&ctx.accounts.engine.rules_flat, slot);
-            if entry.kind == KIND_EMPTY || entry.enabled != 1 {
-                continue;
-            }
-
-            // Pull the matching sub-PDA from the remaining accounts.
-            let sub_view = rem_iter
-                .next()
-                .ok_or(PolicyEngineError::InvalidRuleHeader)?
-                .map_err(|_| PolicyEngineError::InvalidRuleHeader)?;
-
-            // Address binding: account passed in MUST be the recorded sub-PDA.
-            require!(
-                *sub_view.address() == entry.rule_pda,
-                PolicyEngineError::InvalidRuleHeader
-            );
-            // Ownership: sub-PDA must be owned by this program.
-            require!(
-                sub_view.owner() == &ID,
-                PolicyEngineError::InvalidRuleHeader
-            );
-
-            // Borrow the sub-PDA bytes and validate header drift.
-            let sub_data = sub_view
-                .try_borrow()
-                .map_err(|_| PolicyEngineError::InvalidRuleHeader)?;
-            require!(
-                sub_data.len() >= RULE_HEADER_BYTES + 1,
-                PolicyEngineError::InvalidRuleHeader
-            );
-            // sub_data[0] = account discriminator (= 2 for rules). Offsets
-            // below are 1-based relative to the start of the account data.
-            // (Mirror of ABI §3.4 RuleHeader layout.)
-            //
-            // M1 audit fix (2026-05-16): defense-in-depth — the address binding
-            // + owner check above already constrain this to a sub-PDA written
-            // by `add_rule_*`, but explicitly checking the discriminator
-            // hardens the loop against any future refactor that changes how
-            // rule PDAs are derived or owned.
-            require!(sub_data[0] == 2, PolicyEngineError::InvalidRuleHeader);
-            let header_kind = sub_data[1];
-            let header_index = sub_data[2];
-            let header_enabled = sub_data[3];
-            let mut gen_b = [0u8; 4];
-            gen_b.copy_from_slice(&sub_data[5..9]);
-            let header_gen = u32::from_le_bytes(gen_b);
-            let header_config_hash = &sub_data[57..89]; // offset 56 + 1 (disc)
-
-            require!(
-                header_kind == entry.kind
-                    && header_index == slot as u8
-                    && header_enabled == 1
-                    && header_gen == entry.generation
-                    && header_config_hash == entry.config_hash,
-                PolicyEngineError::InvalidRuleHeader
-            );
-
-            // Applies_to gate: rules whose mask excludes PATH_NORMAL are
-            // header-validated above (drift check) but skip enforcement here.
-            let applies_to = sub_data[97];
-            if (applies_to & PATH_NORMAL) == 0 {
-                continue;
-            }
-
-            // Per-kind dispatch (only when applies_to includes PATH_NORMAL).
-            match entry.kind {
-                KIND_ALLOWLIST => {
-                    // AllowlistConfig payload starts at offset 96 + 1 (disc) = 97:
-                    //   97  applies_to u8
-                    //   98  destinations_count u8
-                    //   99..105 _pad
-                    //   105..1129 destinations_flat (32 destinations × 32)
-                    let count = sub_data[98] as usize;
-                    require!(count <= 32, PolicyEngineError::InvalidRuleHeader);
-                    let mut allowed = false;
-                    for i in 0..count {
-                        let off = 105 + i * 32;
-                        if &sub_data[off..off + 32] == destination.as_slice() {
-                            allowed = true;
-                            break;
-                        }
-                    }
-                    require!(allowed, PolicyEngineError::AllowlistDestinationNotAllowed);
-                }
-                KIND_VELOCITY => {
-                    // F3b: count-based rate limit with real mutation via
-                    // unsafe data_mut_ptr (same pattern Quasar uses
-                    // internally for `set_lamports` / `resize` / `realloc`).
-                    // sub-PDA layout mirror of ABI §3.5.2:
-                    //   sub_data[97]   applies_to u8
-                    //   sub_data[98]   windows_count u8
-                    //   sub_data[99..105]  _pad
-                    //   sub_data[105..297] windows_flat (4 × 48 bytes)
-                    let count = sub_data[98] as usize;
-                    require!(count <= 4, PolicyEngineError::InvalidRuleHeader);
-
-                    // Pass 1: read + validate, collect (next_count, next_start)
-                    // for each window.
-                    let mut to_apply = [(0u64, 0i64); 4];
-                    for i in 0..count {
-                        let base = 105 + i * 48;
-                        let window_seconds = u64::from_le_bytes(
-                            sub_data[base..base + 8]
-                                .try_into()
-                                .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
-                        );
-                        let cap = u64::from_le_bytes(
-                            sub_data[base + 8..base + 16]
-                                .try_into()
-                                .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
-                        );
-                        let current_count = u64::from_le_bytes(
-                            sub_data[base + 16..base + 24]
-                                .try_into()
-                                .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
-                        );
-                        let window_start = i64::from_le_bytes(
-                            sub_data[base + 32..base + 40]
-                                .try_into()
-                                .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
-                        );
-                        require!(
-                            window_seconds > 0 && cap > 0,
-                            PolicyEngineError::InvalidRuleHeader
-                        );
-                        let elapsed =
-                            current_ts >= window_start.saturating_add(window_seconds as i64);
-                        let (next_count, next_start) = if elapsed {
-                            (1u64, current_ts)
-                        } else {
-                            (current_count.saturating_add(1), window_start)
-                        };
-                        require!(next_count <= cap, PolicyEngineError::VelocityCapExceeded);
-                        to_apply[i] = (next_count, next_start);
-                    }
-                    let data_len = sub_data.len();
-                    drop(sub_data);
-
-                    // Pass 2: write back the new counters via Quasar's
-                    // unsafe data_mut_ptr API.
-                    //
-                    // SAFETY: the remaining-account sub_view is declared
-                    // writable (caller attaches AccountMeta as `mut`), the
-                    // immutable borrow above was released, and no other
-                    // alias exists. We only touch bytes inside the existing
-                    // data buffer; we do not resize. This is the same pattern
-                    // Quasar uses internally for cross-account mutations
-                    // (cf. `set_lamports` in quasar-lang/accounts/account.rs).
-                    let data_mut: &mut [u8] = unsafe {
-                        core::slice::from_raw_parts_mut(sub_view.data_ptr() as *mut u8, data_len)
-                    };
-                    for i in 0..count {
-                        let (next_count, next_start) = to_apply[i];
-                        let base = 105 + i * 48;
-                        data_mut[base + 16..base + 24].copy_from_slice(&next_count.to_le_bytes());
-                        data_mut[base + 32..base + 40].copy_from_slice(&next_start.to_le_bytes());
-                    }
-                }
-                KIND_TIME_LOCK => {
-                    // F4: read-only dispatch (no mutation). Layout:
-                    //   sub_data[97]   applies_to u8
-                    //   sub_data[98]   mode u8 (0=absolute, 1=delay)
-                    //   sub_data[99..105]  _pad
-                    //   sub_data[105..113] unlock_ts i64
-                    //   sub_data[113..121] delay_seconds u64
-                    //   sub_data[121..129] created_at_ts i64
-                    let mode = sub_data[98];
-                    let unlock_ts = i64::from_le_bytes(
-                        sub_data[105..113]
-                            .try_into()
-                            .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
-                    );
-                    let delay_seconds = u64::from_le_bytes(
-                        sub_data[113..121]
-                            .try_into()
-                            .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
-                    );
-                    let created_at_ts = i64::from_le_bytes(
-                        sub_data[121..129]
-                            .try_into()
-                            .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
-                    );
-                    let effective_unlock = match mode {
-                        TIME_LOCK_MODE_ABSOLUTE => unlock_ts,
-                        TIME_LOCK_MODE_DELAY => created_at_ts.saturating_add(delay_seconds as i64),
-                        _ => return Err(PolicyEngineError::InvalidRuleHeader.into()),
-                    };
-                    require!(
-                        current_ts >= effective_unlock,
-                        PolicyEngineError::TimeLocked
-                    );
-                }
-                KIND_ORACLE => {
-                    // F5b — Oracle dispatch.
-                    //
-                    // Layout (mirror of ABI §3.5.4):
-                    //   sub_data[97]   config_applies_to u8
-                    //   sub_data[98]   feeds_count u8
-                    //   sub_data[99]   freshness_seconds_div16 u8
-                    //   sub_data[100]  min_confidence_bps_div4 u8
-                    //   sub_data[101..105] _pad_cfg0
-                    //   sub_data[105..105 + 80*N] feeds_flat
-                    //     each OracleFeed (80 B):
-                    //       [..32] feed_account Address
-                    //       [32..64] feed_owner Address
-                    //       [64..72] min_q64 i64 LE
-                    //       [72..80] max_q64 i64 LE
-                    //
-                    // For each feed, the caller must attach one trailing
-                    // aux account in `remaining_accounts` (after the sub-PDA)
-                    // whose `address` matches `feed_account` and whose `owner`
-                    // matches `feed_owner`. The aux account's data MUST start
-                    // with the canonical price layout (Andromeda v1):
-                    //   [0..32]  feed_id (opaque, not checked here)
-                    //   [32..40] price i64 LE
-                    //   [40..48] confidence u64 LE
-                    //   [48..56] _reserved
-                    //   [56..64] publish_time i64 LE
-                    //
-                    // Real Pyth `PriceUpdateV2` accounts ship the same three
-                    // critical fields (price / confidence / publish_time) but
-                    // at provider-defined offsets — an adapter layer on the
-                    // off-chain side normalises them into this canonical
-                    // 64-byte view before the tx is signed. Keeps the on-chain
-                    // dispatch cheap and protocol-agnostic.
-                    let count = sub_data[98] as usize;
-                    require!(
-                        count <= MAX_ORACLE_FEEDS,
-                        PolicyEngineError::InvalidRuleHeader
-                    );
-                    let freshness_secs = (sub_data[99] as i64).saturating_mul(16);
-                    // H3 fix: the rule's `min_confidence_bps_div4` (legacy name)
-                    // is an UPPER bound on accepted price uncertainty. A value
-                    // of 0 disables the check (back-compat for rules created
-                    // before H3 landed). max_confidence_bps fits in u64 even
-                    // for u8::MAX * 4 = 1020 bps.
-                    let max_confidence_bps_div4 = sub_data[100] as u64;
-                    // Collect feed metadata into a local buffer because we
-                    // need to drop the immutable sub_data borrow before
-                    // pulling aux accounts (some sub_data references can
-                    // still be live across the loop).
-                    let mut feeds: [([u8; 32], [u8; 32], i64, i64); MAX_ORACLE_FEEDS] =
-                        [([0u8; 32], [0u8; 32], 0i64, 0i64); MAX_ORACLE_FEEDS];
-                    for i in 0..count {
-                        let base = 105 + i * ORACLE_FEED_BYTES;
-                        let mut feed_acct = [0u8; 32];
-                        feed_acct.copy_from_slice(&sub_data[base..base + 32]);
-                        let mut feed_owner = [0u8; 32];
-                        feed_owner.copy_from_slice(&sub_data[base + 32..base + 64]);
-                        let min_q64 = i64::from_le_bytes(
-                            sub_data[base + 64..base + 72]
-                                .try_into()
-                                .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
-                        );
-                        let max_q64 = i64::from_le_bytes(
-                            sub_data[base + 72..base + 80]
-                                .try_into()
-                                .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
-                        );
-                        feeds[i] = (feed_acct, feed_owner, min_q64, max_q64);
-                    }
-                    drop(sub_data);
-
-                    let max_confidence_bps = max_confidence_bps_div4.saturating_mul(4);
-                    for i in 0..count {
-                        let (expected_acct, expected_owner, min_q64, max_q64) = feeds[i];
-                        // H1 fix: defense-in-depth allowlist. A rule whose
-                        // feed_owner is outside the allowed set is rejected
-                        // even if the rule itself was created by a legit
-                        // owner (which lowers the blast radius of a
-                        // gateway/owner-key compromise that registers a
-                        // malicious feed_owner).
-                        require!(
-                            is_oracle_owner_allowed(&expected_owner),
-                            PolicyEngineError::OracleOwnerMismatch
-                        );
-                        let aux_view = rem_iter
-                            .next()
-                            .ok_or(PolicyEngineError::InvalidRuleHeader)?
-                            .map_err(|_| PolicyEngineError::InvalidRuleHeader)?;
-                        require!(
-                            aux_view.address().as_array() == &expected_acct,
-                            PolicyEngineError::InvalidRuleHeader
-                        );
-                        require!(
-                            aux_view.owner().as_array() == &expected_owner,
-                            PolicyEngineError::OracleOwnerMismatch
-                        );
-                        let aux_data = aux_view
-                            .try_borrow()
-                            .map_err(|_| PolicyEngineError::InvalidRuleHeader)?;
-                        require!(aux_data.len() >= 64, PolicyEngineError::InvalidRuleHeader);
-                        let price = i64::from_le_bytes(
-                            aux_data[32..40]
-                                .try_into()
-                                .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
-                        );
-                        let confidence = u64::from_le_bytes(
-                            aux_data[40..48]
-                                .try_into()
-                                .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
-                        );
-                        let publish_time = i64::from_le_bytes(
-                            aux_data[56..64]
-                                .try_into()
-                                .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
-                        );
-                        require!(
-                            publish_time.saturating_add(freshness_secs) >= current_ts,
-                            PolicyEngineError::OracleStale
-                        );
-                        require!(
-                            price >= min_q64 && price <= max_q64,
-                            PolicyEngineError::OracleOutOfBand
-                        );
-                        // H3: confidence_bps = confidence * 10_000 / |price|.
-                        // Skipped when the rule sets `max_confidence_bps_div4 = 0`.
-                        if max_confidence_bps > 0 {
-                            let abs_price = if price < 0 {
-                                (price as i128).unsigned_abs() as u64
-                            } else {
-                                price as u64
-                            };
-                            // price == 0 with confidence > 0 means infinite
-                            // uncertainty — reject unconditionally. price == 0
-                            // with confidence == 0 is degenerate but not the
-                            // adversarial case we care about (oracle would
-                            // already fail OracleOutOfBand for any non-trivial
-                            // band).
-                            if abs_price == 0 {
-                                require!(
-                                    confidence == 0,
-                                    PolicyEngineError::OracleConfidenceExceeded
-                                );
-                            } else {
-                                let confidence_bps = confidence.saturating_mul(10_000) / abs_price;
-                                require!(
-                                    confidence_bps <= max_confidence_bps,
-                                    PolicyEngineError::OracleConfidenceExceeded
-                                );
-                            }
-                        }
-                    }
-                }
-                KIND_SPENDING_USD => {
-                    // Update 3 — USD spending-limit dispatch.
-                    //
-                    // Reads ONE feed (the moved asset, `asset_index`) from the
-                    // allowlist, converts `amount` (asset base units) → USD 1e8
-                    // via the Pyth adapter FeedCache price, and enforces the
-                    // per-tx / per-day / per-week ceilings. Day/week accumulators
-                    // are mutated in place (KIND_VELOCITY data_mut_ptr pattern).
-                    // Layout mirror: see `SpendingUsdRule`.
-                    //
-                    // Defense-in-depth: the address binding + header drift checks
-                    // above already constrain this to a full sub-PDA written by
-                    // add_rule_spending_usd (always 689 bytes), but assert the
-                    // exact size so any future refactor or undersized account
-                    // fails closed instead of panicking on the offset reads below.
-                    require!(
-                        sub_data.len()
-                            >= 1 + RULE_HEADER_BYTES
-                                + SPENDING_USD_CONFIG_BYTES,
-                        PolicyEngineError::InvalidRuleHeader
-                    );
-                    let feeds_count = sub_data[98] as usize;
-                    require!(
-                        feeds_count <= MAX_SPENDING_USD_FEEDS,
-                        PolicyEngineError::InvalidRuleHeader
-                    );
-                    let aidx = asset_index as usize;
-                    require!(
-                        aidx < feeds_count,
-                        PolicyEngineError::SpendingAssetNotAllowed
-                    );
-
-                    let freshness_secs = (sub_data[99] as i64).saturating_mul(16);
-                    let max_confidence_bps = (sub_data[100] as u64).saturating_mul(4);
-                    let max_per_tx = u64::from_le_bytes(
-                        sub_data[105..113]
-                            .try_into()
-                            .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
-                    );
-                    let max_per_day = u64::from_le_bytes(
-                        sub_data[113..121]
-                            .try_into()
-                            .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
-                    );
-                    let max_per_week = u64::from_le_bytes(
-                        sub_data[121..129]
-                            .try_into()
-                            .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
-                    );
-                    let cur_day_unix = i64::from_le_bytes(
-                        sub_data[129..137]
-                            .try_into()
-                            .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
-                    );
-                    let cur_day_sum = u64::from_le_bytes(
-                        sub_data[137..145]
-                            .try_into()
-                            .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
-                    );
-                    let cur_week_unix = i64::from_le_bytes(
-                        sub_data[145..153]
-                            .try_into()
-                            .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
-                    );
-                    let cur_week_sum = u64::from_le_bytes(
-                        sub_data[153..161]
-                            .try_into()
-                            .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
-                    );
-                    // Read only the moved asset's feed entry (stack budget: never
-                    // load all 16 — read just `asset_index` straight from data).
-                    let fbase = 161 + aidx * SPENDING_USD_FEED_BYTES;
-                    let mut feed_cache_account = [0u8; 32];
-                    feed_cache_account.copy_from_slice(&sub_data[fbase..fbase + 32]);
-                    let decimals = sub_data[fbase + 32];
-                    let data_len = sub_data.len();
-                    drop(sub_data);
-
-                    // Pull the single aux FeedCache account for the moved asset.
-                    let aux_view = rem_iter
-                        .next()
-                        .ok_or(PolicyEngineError::InvalidRuleHeader)?
-                        .map_err(|_| PolicyEngineError::InvalidRuleHeader)?;
-                    require!(
-                        aux_view.address().as_array() == &feed_cache_account,
-                        PolicyEngineError::SpendingAssetNotAllowed
-                    );
-                    require!(
-                        is_oracle_owner_allowed(aux_view.owner().as_array()),
-                        PolicyEngineError::OracleOwnerMismatch
-                    );
-                    let aux_data = aux_view
-                        .try_borrow()
-                        .map_err(|_| PolicyEngineError::InvalidRuleHeader)?;
-                    require!(aux_data.len() >= 64, PolicyEngineError::InvalidRuleHeader);
-                    let price = i64::from_le_bytes(
-                        aux_data[32..40]
-                            .try_into()
-                            .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
-                    );
-                    let confidence = u64::from_le_bytes(
-                        aux_data[40..48]
-                            .try_into()
-                            .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
-                    );
-                    let publish_time = i64::from_le_bytes(
-                        aux_data[56..64]
-                            .try_into()
-                            .map_err(|_| PolicyEngineError::InvalidRuleHeader)?,
-                    );
-                    drop(aux_data);
-
-                    // Frescor fail-closed: an old price is never assumed valid.
-                    require!(
-                        publish_time.saturating_add(freshness_secs) >= current_ts,
-                        PolicyEngineError::SpendingPriceStale
-                    );
-                    // A non-positive price cannot value a spend — reject.
-                    require!(price > 0, PolicyEngineError::SpendingConversionOverflow);
-                    // Optional confidence ceiling (same maths as KIND_ORACLE).
-                    if max_confidence_bps > 0 {
-                        let abs_price = price as u64; // price > 0 guaranteed above
-                        let confidence_bps = confidence.saturating_mul(10_000) / abs_price;
-                        require!(
-                            confidence_bps <= max_confidence_bps,
-                            PolicyEngineError::SpendingConfidenceExceeded
-                        );
-                    }
-
-                    // Convert: amount_usd_1e8 = amount * price / 10^decimals.
-                    // u128 intermediate; price already USD 1e8; dividing by the
-                    // asset's base-unit scale brings it back to USD 1e8.
-                    let pow10 = 10u128
-                        .checked_pow(decimals as u32)
-                        .ok_or(PolicyEngineError::SpendingConversionOverflow)?;
-                    let numer = (amount as u128)
-                        .checked_mul(price as u128)
-                        .ok_or(PolicyEngineError::SpendingConversionOverflow)?;
-                    let amount_usd_1e8: u64 = (numer / pow10)
-                        .try_into()
-                        .map_err(|_| PolicyEngineError::SpendingConversionOverflow)?;
-
-                    // Per-tx ceiling.
-                    if max_per_tx > 0 {
-                        require!(
-                            amount_usd_1e8 <= max_per_tx,
-                            PolicyEngineError::SpendingPerTxExceeded
-                        );
-                    }
-
-                    // Daily bucket: floor(ts/86400)*86400. Reset on a new bucket.
-                    let day_bucket = (current_ts / 86_400).saturating_mul(86_400);
-                    let next_day_sum = if day_bucket != cur_day_unix {
-                        amount_usd_1e8
-                    } else {
-                        cur_day_sum.saturating_add(amount_usd_1e8)
-                    };
-                    if max_per_day > 0 {
-                        require!(
-                            next_day_sum <= max_per_day,
-                            PolicyEngineError::SpendingDailyExceeded
-                        );
-                    }
-
-                    // Weekly bucket: floor(ts/604800)*604800.
-                    let week_bucket = (current_ts / 604_800).saturating_mul(604_800);
-                    let next_week_sum = if week_bucket != cur_week_unix {
-                        amount_usd_1e8
-                    } else {
-                        cur_week_sum.saturating_add(amount_usd_1e8)
-                    };
-                    if max_per_week > 0 {
-                        require!(
-                            next_week_sum <= max_per_week,
-                            PolicyEngineError::SpendingWeeklyExceeded
-                        );
-                    }
-
-                    // Write back the accumulators.
-                    //
-                    // SAFETY: the sub_view is declared writable, the immutable
-                    // borrow above was dropped, and no other alias exists. We
-                    // only touch existing bytes (no resize). Same pattern as
-                    // KIND_VELOCITY.
-                    let data_mut: &mut [u8] = unsafe {
-                        core::slice::from_raw_parts_mut(sub_view.data_ptr() as *mut u8, data_len)
-                    };
-                    data_mut[129..137].copy_from_slice(&day_bucket.to_le_bytes());
-                    data_mut[137..145].copy_from_slice(&next_day_sum.to_le_bytes());
-                    data_mut[145..153].copy_from_slice(&week_bucket.to_le_bytes());
-                    data_mut[153..161].copy_from_slice(&next_week_sum.to_le_bytes());
-                }
-                KIND_PASSKEY => {
-                    // F6b — Passkey dispatch.
-                    //
-                    // Layout (ABI §3.5.5):
-                    //   sub_data[97]  config_applies_to u8
-                    //   sub_data[98]  credentials_count u8
-                    //   sub_data[99..105] _pad_cfg0
-                    //   sub_data[105..105 + 128 * N] credentials_flat
-                    //     each PasskeyCredential (128 B):
-                    //       [..33]  pubkey (33 B compressed P-256)
-                    //       [33..64] _pad
-                    //       [64..96]  rp_id_hash
-                    //       [96..128] credential_id_hash
-                    //
-                    // The user signs the canonical `metadata_digest` via
-                    // WebAuthn — the caller attaches a Secp256r1 precompile
-                    // invocation in the same tx whose `(pubkey, message)` is
-                    // `(credential.pubkey, auth_data || sha256(cdj))`. The
-                    // clientDataJSON.challenge field MUST embed the
-                    // base64url-no-pad form of `metadata_digest`. The
-                    // dispatch routes through `andromeda_auth::verify_signature`
-                    // scheme=WEBAUTHN, which already handles the anchor check
-                    // + reconstruction + sysvar lookup.
-                    //
-                    // The caller attaches two trailing aux accounts per
-                    // passkey slot in `remaining_accounts`:
-                    //   aux[0].data = raw `authenticatorData` bytes
-                    //   aux[1].data = raw `clientDataJSON` bytes
-                    // The aux addresses are opaque (any pubkey); only the
-                    // data content matters. This avoids bloating the ix data
-                    // with two 192-byte fields on every `request_signature`.
-                    let count = sub_data[98] as usize;
-                    require!(
-                        count > 0 && count <= MAX_PASSKEY_CREDENTIALS,
-                        PolicyEngineError::InvalidRuleHeader
-                    );
-                    // Snapshot credential pubkeys (we need them after dropping
-                    // `sub_data`).
-                    let mut credentials: [[u8; 33]; MAX_PASSKEY_CREDENTIALS] =
-                        [[0u8; 33]; MAX_PASSKEY_CREDENTIALS];
-                    for i in 0..count {
-                        let base = 105 + i * PASSKEY_CREDENTIAL_BYTES;
-                        credentials[i].copy_from_slice(&sub_data[base..base + 33]);
-                    }
-                    drop(sub_data);
-
-                    // Pull aux accounts: auth_data first, then cdj.
-                    let auth_view = rem_iter
-                        .next()
-                        .ok_or(PolicyEngineError::PasskeyAssertionInvalid)?
-                        .map_err(|_| PolicyEngineError::PasskeyAssertionInvalid)?;
-                    let cdj_view = rem_iter
-                        .next()
-                        .ok_or(PolicyEngineError::PasskeyAssertionInvalid)?
-                        .map_err(|_| PolicyEngineError::PasskeyAssertionInvalid)?;
-                    let auth_data_ref = auth_view
-                        .try_borrow()
-                        .map_err(|_| PolicyEngineError::PasskeyAssertionInvalid)?;
-                    let cdj_ref = cdj_view
-                        .try_borrow()
-                        .map_err(|_| PolicyEngineError::PasskeyAssertionInvalid)?;
-
-                    // Verify the WebAuthn assertion using the metadata digest
-                    // as the canonical challenge.
-                    check_sysvar_addr(ctx.accounts.instructions_sysvar.address())?;
-                    let sysvar_view = ctx.accounts.instructions_sysvar.to_account_view();
-                    let sysvar_data_ref = sysvar_view
-                        .try_borrow()
-                        .map_err(|_| PolicyEngineError::AuthFailed)?;
-
-                    // Walk the registered credentials and accept the first one
-                    // whose pubkey matches a Secp256r1 precompile invocation
-                    // signing `(auth_data || sha256(cdj))`. `verify_signature`
-                    // also enforces the cdj anchor check on `metadata_digest`.
-                    let mut accepted = false;
-                    for i in 0..count {
-                        let mut slot = [0u8; MEMBER_SLOT_LEN];
-                        slot[0] = SCHEME_WEBAUTHN;
-                        slot[1..34].copy_from_slice(&credentials[i]);
-                        if verify_signature(VerifyInput {
-                            member_slot: &slot,
-                            challenge: &metadata_digest,
-                            instructions_sysvar_data: &sysvar_data_ref,
-                            webauthn_auth_data: &auth_data_ref,
-                            webauthn_client_data_json: &cdj_ref,
-                        })
-                        .is_ok()
-                        {
-                            accepted = true;
-                            break;
-                        }
-                    }
-                    drop(sysvar_data_ref);
-                    drop(cdj_ref);
-                    drop(auth_data_ref);
-                    require!(accepted, PolicyEngineError::PasskeyAssertionInvalid);
-                }
-                KIND_FHE_GATED => {
-                    // F7b — FHE-Gated dispatch.
-                    //
-                    // Layout (ABI §3.5.6):
-                    //   sub_data[97]  config_applies_to u8
-                    //   sub_data[98]  authorities_count u8
-                    //   sub_data[99]  freshness_seconds_div16 u8
-                    //   sub_data[100..105] _pad_cfg0
-                    //   sub_data[105..105 + 32 * N] authorities_flat
-                    //     each authority = 32-byte Ed25519 pubkey.
-                    //
-                    // The on-chain check looks for an Ed25519 precompile
-                    // invocation in the same tx whose `(pubkey, message)`
-                    // matches one of the configured authorities and a
-                    // canonical decision body of:
-                    //   `andromeda::fhe-decision::v1`
-                    //   || dwallet (32)
-                    //   || metadata_digest (32)
-                    //   || decision_timestamp (8 LE i64)
-                    //   || authorize (1 byte; MUST be 1)
-                    //
-                    // Total decision body = 27 + 32 + 32 + 8 + 1 = 100 bytes.
-                    let count = sub_data[98] as usize;
-                    require!(
-                        count > 0 && count <= MAX_FHE_AUTHORITIES,
-                        PolicyEngineError::InvalidRuleHeader
-                    );
-                    let freshness_secs = (sub_data[99] as i64).saturating_mul(16);
-                    let mut authorities: [[u8; 32]; MAX_FHE_AUTHORITIES] =
-                        [[0u8; 32]; MAX_FHE_AUTHORITIES];
-                    for i in 0..count {
-                        let base = 105 + i * 32;
-                        authorities[i].copy_from_slice(&sub_data[base..base + 32]);
-                    }
-                    drop(sub_data);
-
-                    check_sysvar_addr(ctx.accounts.instructions_sysvar.address())?;
-                    let sysvar_view = ctx.accounts.instructions_sysvar.to_account_view();
-                    let sysvar_data_ref = sysvar_view
-                        .try_borrow()
-                        .map_err(|_| PolicyEngineError::AuthFailed)?;
-
-                    const FHE_DECISION_DOMAIN: &[u8] = b"andromeda::fhe-decision::v1";
-                    const FHE_DECISION_LEN: usize = FHE_DECISION_DOMAIN.len() + 32 + 32 + 8 + 1;
-                    // Try every authority. For the matched authority, the
-                    // precompile lookup also enforces message-byte equality,
-                    // so we rebuild the canonical decision body for each
-                    // candidate timestamp range… actually the message has the
-                    // timestamp embedded, which we don't know up-front. We
-                    // therefore rely on `precompile::verify_ed25519` returning
-                    // `NoMatchingInvocation` when (pubkey, prefix) don't match
-                    // and parse the matched message ourselves once it does.
-                    //
-                    // Strategy: walk the Ed25519 precompile invocations in the
-                    // sysvar, parse each `(pubkey, message)`, and accept if
-                    // (a) pubkey ∈ authorities, (b) message length == 100,
-                    // (c) prefix == DOMAIN || dwallet || metadata_digest,
-                    // (d) authorize == 1, (e) age within freshness window.
-                    let dwallet_bytes = *dwallet_addr.as_array();
-                    let mut accepted = false;
-                    let mut idx = 0usize;
-                    while let Some((program_id, ix_data)) =
-                        read_ix_body_for_fhe(&sysvar_data_ref, idx)
-                            .map_err(|_| PolicyEngineError::FheDecisionInvalid)?
-                    {
-                        idx += 1;
-                        if program_id != ED25519_PRECOMPILE_ID.as_array().as_slice() {
-                            continue;
-                        }
-                        // Walk every record in this Ed25519 precompile ix
-                        // looking for a match. Records use the long-record
-                        // 14-byte offsets format documented in
-                        // `andromeda_auth::precompile`.
-                        if let Some((pk, msg)) = first_ed25519_record_self(ix_data) {
-                            if msg.len() != FHE_DECISION_LEN {
-                                continue;
-                            }
-                            // Match pubkey ∈ authorities.
-                            let mut found_authority = false;
-                            for a in authorities.iter().take(count) {
-                                if pk == a.as_slice() {
-                                    found_authority = true;
-                                    break;
-                                }
-                            }
-                            if !found_authority {
-                                continue;
-                            }
-                            if &msg[..FHE_DECISION_DOMAIN.len()] != FHE_DECISION_DOMAIN {
-                                continue;
-                            }
-                            let mut off = FHE_DECISION_DOMAIN.len();
-                            if &msg[off..off + 32] != &dwallet_bytes[..] {
-                                continue;
-                            }
-                            off += 32;
-                            if &msg[off..off + 32] != &metadata_digest[..] {
-                                continue;
-                            }
-                            off += 32;
-                            let ts_bytes: [u8; 8] = msg[off..off + 8]
-                                .try_into()
-                                .map_err(|_| PolicyEngineError::FheDecisionInvalid)?;
-                            let decision_ts = i64::from_le_bytes(ts_bytes);
-                            off += 8;
-                            let authorize = msg[off];
-                            if authorize != 1 {
-                                continue;
-                            }
-                            if decision_ts.saturating_add(freshness_secs) < current_ts {
-                                continue;
-                            }
-                            accepted = true;
-                            break;
-                        }
-                    }
-                    drop(sysvar_data_ref);
-                    require!(accepted, PolicyEngineError::FheDecisionMissing);
-                }
-                KIND_SESSION_KEY | KIND_RECOVERY => {
-                    // F8b/F9: dedicated entrypoints handle session and
-                    // recovery signing paths. They should not appear in the
-                    // normal `request_signature` dispatch with applies_to
-                    // including PATH_NORMAL. If they do, reject.
-                    return Err(PolicyEngineError::InvalidRuleKind.into());
-                }
-                _ => {
-                    return Err(PolicyEngineError::InvalidRuleKind.into());
-                }
-            }
-            // `sub_data` (if still alive) is dropped here on scope exit.
-        }
-
-        // Reject extra trailing accounts: caller must attach exactly one
-        // sub-PDA per active rule, no more.
-        require!(
-            rem_iter.next().is_none(),
-            PolicyEngineError::InvalidRuleHeader
-        );
+        dispatch_active_rules(
+            &ctx.accounts.engine.rules_flat,
+            &mut rem_iter,
+            &sysvar_view,
+            current_ts,
+            &dwallet_addr,
+            &destination,
+            amount,
+            asset_index,
+            &metadata_digest,
+            PATH_NORMAL,
+            None,
+        )?;
 
         // CPI Ika approve_message — the last side-effect of the instruction.
+        // Anti-replay of this normal-path authorization is the Ika MessageApproval
+        // PDA (derived from message_digest): re-approving the same message fails
+        // because the PDA already exists. The owner authorization above binds the
+        // full request via metadata_digest, so the gateway cannot alter any field.
         invoke_ika_approve_message(
             &ctx.accounts.dwallet_program.to_account_view(),
             &ctx.accounts.cpi_authority.to_account_view(),
@@ -2980,6 +3151,13 @@ mod policy_engine_program {
             (config_applies_to & !APPLIES_ALL) == 0 && config_applies_to != 0,
             PolicyEngineError::RuleNotApplicable
         );
+        // B4 audit fix (2026-05-25): freshness == 0 makes the dispatch require
+        // `publish_time >= now`, which rejects every real (past-timestamped)
+        // price — a silent fail-closed footgun. Reject at creation time.
+        require!(
+            freshness_seconds_div16 > 0,
+            PolicyEngineError::InvalidRuleHeader
+        );
         for s in 0..MAX_RULES {
             let entry = read_rule_entry(&ctx.accounts.engine.rules_flat, s);
             if entry.kind == KIND_ORACLE && entry.enabled == 1 {
@@ -3130,9 +3308,23 @@ mod policy_engine_program {
             (rule_index as usize) < MAX_RULES,
             PolicyEngineError::TooManyRules
         );
+        // Review fix (2026-05-25): SPENDING_USD can only be ENFORCED on the
+        // NORMAL path — it needs a trusted per-tx `amount` (bound into
+        // metadata_digest + owner signature), which the session / OIDC paths do
+        // not carry. Restrict the mask to exactly APPLIES_NORMAL so a
+        // misconfigured rule fails HERE with a clear error instead of silently
+        // bricking session signing later (the dispatch's `path == PATH_NORMAL`
+        // guard remains as runtime defense-in-depth). Subsumes the generic
+        // `(applies_to & !APPLIES_ALL) == 0 && != 0` validity check.
         require!(
-            (config_applies_to & !APPLIES_ALL) == 0 && config_applies_to != 0,
+            config_applies_to == APPLIES_NORMAL,
             PolicyEngineError::RuleNotApplicable
+        );
+        // B4 audit fix (2026-05-25): freshness == 0 would make the spending
+        // dispatch require `publish_time >= now`, rejecting every real price.
+        require!(
+            freshness_seconds_div16 > 0,
+            PolicyEngineError::InvalidRuleHeader
         );
         for s in 0..MAX_RULES {
             let entry = read_rule_entry(&ctx.accounts.engine.rules_flat, s);
@@ -4040,6 +4232,154 @@ mod policy_engine_program {
             &EngineResumed {
                 engine: engine_addr,
                 ts: current_ts,
+            },
+            &ctx.accounts.event_authority,
+            EventAuthority::BUMP,
+        )?;
+        Ok(())
+    }
+
+    /// Disc 110 — `remove_rule` (B1 audit fix, 2026-05-25).
+    ///
+    /// Owner-authenticated removal of an active rule of ANY kind. Closes the
+    /// rule sub-PDA (rent → recipient bound in the challenge), clears the
+    /// `RuleEntry` slot in `engine.rules_flat`, decrements `rules_count`, and
+    /// bumps `rules_generation`. This frees the slot so the same `(kind,
+    /// rule_index)` can be recreated (the singleton-per-kind guard reads the
+    /// live `rules_flat`, so a removed rule no longer blocks re-adding its kind).
+    ///
+    /// The `rule_pda` is an `UncheckedAccount` because the kind (and thus the
+    /// concrete account type and seeds) is only known at runtime; it is
+    /// validated manually against the recorded `RuleEntry` (address + owner +
+    /// discriminator + header drift) exactly like the `request_signature`
+    /// dispatch loop does, before being closed.
+    #[instruction(discriminator = 110)]
+    pub fn remove_rule(
+        ctx: Ctx<RemoveRule>,
+        _init_authority_hash: Address,
+        expected_nonce: u64,
+        rule_index: u8,
+    ) -> Result<(), ProgramError> {
+        let current_ts: i64 = ctx.accounts.clock.unix_timestamp.into();
+        let engine_addr = *ctx.accounts.engine.address();
+        let dwallet_addr = *ctx.accounts.dwallet_account.address();
+        let owner_slot = ctx.accounts.engine.owner_slot;
+        let on_chain_nonce: u64 = ctx.accounts.engine.next_admin_nonce.into();
+        let recipient_addr = *ctx.accounts.recipient.address();
+
+        let slot = rule_index as usize;
+        require!(slot < MAX_RULES, PolicyEngineError::TooManyRules);
+        let entry = read_rule_entry(&ctx.accounts.engine.rules_flat, slot);
+        require!(!entry.is_empty(), PolicyEngineError::RuleNotFound);
+
+        // Validate the rule sub-PDA against the recorded RuleEntry (mirror of the
+        // request_signature dispatch checks). Borrow is scoped + dropped before
+        // the close below.
+        let rule_addr = *ctx.accounts.rule_pda.address();
+        require!(
+            rule_addr == entry.rule_pda,
+            PolicyEngineError::InvalidRuleHeader
+        );
+        {
+            let rule_view = ctx.accounts.rule_pda.to_account_view();
+            require!(
+                rule_view.owner() == &ID,
+                PolicyEngineError::InvalidRuleHeader
+            );
+            let rule_data = rule_view
+                .try_borrow()
+                .map_err(|_| PolicyEngineError::InvalidRuleHeader)?;
+            require!(
+                rule_data.len() >= RULE_HEADER_BYTES + 1,
+                PolicyEngineError::InvalidRuleHeader
+            );
+            require!(rule_data[0] == 2, PolicyEngineError::InvalidRuleHeader);
+            require!(
+                rule_data[1] == entry.kind,
+                PolicyEngineError::InvalidRuleHeader
+            );
+            require!(
+                rule_data[2] == slot as u8,
+                PolicyEngineError::InvalidRuleHeader
+            );
+            let mut gen_b = [0u8; 4];
+            gen_b.copy_from_slice(&rule_data[5..9]);
+            require!(
+                u32::from_le_bytes(gen_b) == entry.generation,
+                PolicyEngineError::InvalidRuleHeader
+            );
+            require!(
+                rule_data[57..89] == entry.config_hash,
+                PolicyEngineError::InvalidRuleHeader
+            );
+        }
+
+        // Owner challenge (clear-signing). Binds the recipient so a stolen
+        // signature cannot redirect the reclaimed rent.
+        let new_generation = entry.generation.saturating_add(1);
+        let mut human_buf = [0u8; MAX_HUMAN_MESSAGE_BYTES];
+        let human_len =
+            human_message::allowlist_pause_message(&mut human_buf, &engine_addr, &dwallet_addr)
+                .map_err(PolicyEngineError::from)?;
+        let human = &human_buf[..human_len];
+        let gen_le = new_generation.to_le_bytes();
+        let challenge = admin_challenge(
+            OP_REMOVE_RULE,
+            human,
+            &engine_addr,
+            &dwallet_addr,
+            entry.kind,
+            rule_index,
+            new_generation,
+            on_chain_nonce,
+            &entry.config_hash,
+            &owner_slot,
+            &[recipient_addr.as_array().as_slice(), &gen_le],
+        );
+        check_sysvar_addr(ctx.accounts.instructions_sysvar.address())?;
+        let sysvar_view = ctx.accounts.instructions_sysvar.to_account_view();
+        let sysvar_data_ref = sysvar_view
+            .try_borrow()
+            .map_err(|_| PolicyEngineError::AuthFailed)?;
+        let new_nonce = verify_owner_admin(
+            expected_nonce,
+            on_chain_nonce,
+            &owner_slot,
+            &challenge,
+            &sysvar_data_ref,
+        )
+        .map_err(PolicyEngineError::from)?;
+        drop(sysvar_data_ref);
+
+        // Close the rule sub-PDA, routing reclaimed rent to the recipient.
+        // disc_len = 1 (rule accounts use a 1-byte discriminator).
+        {
+            let recipient_view = ctx.accounts.recipient.to_account_view();
+            // SAFETY: rule_pda is the instruction's own (mut) account; this is
+            // the sole mutable view taken in scope, and recipient_view is a view
+            // of a different account (recipient), so no aliasing occurs.
+            let rule_view_mut = unsafe { ctx.accounts.rule_pda.to_account_view_mut() };
+            quasar_lang::ops::close::close_account(rule_view_mut, recipient_view, 1)?;
+        }
+
+        // Clear the slot, decrement count, bump generation, advance nonce.
+        write_rule_entry(&mut ctx.accounts.engine.rules_flat, slot, &RuleEntry::EMPTY);
+        let cur_count: u8 = ctx.accounts.engine.rules_count;
+        ctx.accounts.engine.rules_count = cur_count.saturating_sub(1);
+        let cur_gen: u32 = ctx.accounts.engine.rules_generation.into();
+        ctx.accounts.engine.rules_generation = cur_gen
+            .checked_add(1)
+            .ok_or(PolicyEngineError::TooManyRules)?
+            .into();
+        ctx.accounts.engine.next_admin_nonce = new_nonce.into();
+
+        ctx.accounts.program.emit_event(
+            &RuleRemoved {
+                engine: engine_addr,
+                ts: current_ts,
+                kind: entry.kind as u64,
+                rule_index: rule_index as u64,
+                generation: new_generation as u64,
             },
             &ctx.accounts.event_authority,
             EventAuthority::BUMP,
@@ -5446,7 +5786,7 @@ mod policy_engine_program {
     #[instruction(discriminator = 101)]
     #[allow(clippy::too_many_arguments)]
     pub fn request_signature_via_session(
-        ctx: Ctx<RequestSignatureViaSession>,
+        ctx: CtxWithRemaining<RequestSignatureViaSession>,
         _init_authority_hash: Address,
         _session_index: u32,
         message_digest: [u8; 32],
@@ -5457,6 +5797,11 @@ mod policy_engine_program {
         cpi_authority_bump: u8,
         destination: [u8; 32],
         expected_signature_nonce: u64,
+        // Review fix (2026-05-25): per-tx transfer amount (base units), enforced
+        // against the session's `max_amount_per_tx` cap below. Authorized by the
+        // session signer's native tx signature (the session key signs the whole
+        // tx, including this param). Off-chain Risk Layer verifies amount↔tx.
+        amount: u64,
     ) -> Result<(), ProgramError> {
         let current_ts: i64 = ctx.accounts.clock.unix_timestamp.into();
         let engine_addr = *ctx.accounts.engine.address();
@@ -5499,6 +5844,16 @@ mod policy_engine_program {
         let used: u32 = ctx.accounts.session.used_count.into();
         let cap: u32 = ctx.accounts.session.max_uses.into();
         require!(used < cap, PolicyEngineError::SessionCapExceeded);
+
+        // Per-tx amount cap (set by the owner at session_open, always > 0).
+        // Review fix (2026-05-25): previously the cap was stored but never
+        // enforced because this entrypoint carried no `amount`. The session
+        // signer's tx signature authorizes `amount`; on-chain we cap it here.
+        let max_amount: u64 = ctx.accounts.session.max_amount_per_tx.into();
+        require!(
+            amount <= max_amount,
+            PolicyEngineError::SessionAmountExceeded
+        );
 
         // F8c: optional per-session destination whitelist. `destinations_count
         // == 0` means unrestricted (any destination allowed). When > 0, the
@@ -5552,6 +5907,34 @@ mod policy_engine_program {
             PolicyEngineError::IkaCpiAccountMismatch
         );
 
+        // Fase 2 (2026-05-25): enforce the engine's APPLIES_SESSION rules on the
+        // session signing path too. The caller attaches one remaining account
+        // per ENABLED slot (ascending order); only rules whose `applies_to` mask
+        // includes PATH_SESSION are enforced. The SessionKey rule that
+        // authenticates this session is header-validated and then skipped (it is
+        // already enforced by `session_signer` above). SPENDING_USD fails closed
+        // (no trusted per-tx amount on the session path). Scoped in a block so
+        // the immutable `remaining_accounts` borrow ends before the mutable
+        // session counter writes below.
+        {
+            let sysvar_view = ctx.accounts.instructions_sysvar.to_account_view();
+            let remaining = ctx.remaining_accounts();
+            let mut rem_iter = remaining.iter();
+            dispatch_active_rules(
+                &ctx.accounts.engine.rules_flat,
+                &mut rem_iter,
+                &sysvar_view,
+                current_ts,
+                &dwallet_addr,
+                &destination,
+                0,
+                0,
+                &metadata_digest,
+                PATH_SESSION,
+                None,
+            )?;
+        }
+
         // Atomic counter bumps before CPI.
         // M1 audit fix: monotonic counters with explicit overflow guards.
         ctx.accounts.session.next_signature_nonce = on_chain_nonce
@@ -5586,6 +5969,270 @@ mod policy_engine_program {
             // binding it into the Ika MessageApproval here is both redundant and
             // breaks the Ika Sign step (the network derives the approval with empty
             // metadata → otherwise "MessageApproval PDA not found").
+            [0u8; 32],
+            user_pubkey,
+            signature_scheme,
+            message_approval_bump,
+        )?;
+
+        ctx.accounts.program.emit_event(
+            &SignatureApproved {
+                engine: engine_addr,
+                request_hash,
+                ts: current_ts,
+            },
+            &ctx.accounts.event_authority,
+            EventAuthority::BUMP,
+        )?;
+        Ok(())
+    }
+
+    /// Disc 107 — `request_signature_via_oidc_session` (Fase 2, 2026-05-25).
+    ///
+    /// OIDC-session NORMAL signing with the engine's `APPLIES_SESSION` rules
+    /// enforced. Mirrors `recover_as_primary_oidc` (disc 81) for the OIDC
+    /// session validation (open / not-expired / verifier pin / use-nonce /
+    /// addr_seed == rule primary), but binds the `destination` into the
+    /// canonical `metadata_digest` (PATH_SESSION) and runs the shared
+    /// `dispatch_active_rules` over every active slot BEFORE the CPI — so an
+    /// OIDC session is gated by the same Allowlist / Velocity / TimeLock /
+    /// Oracle rules a session signer would be. SPENDING_USD fails closed
+    /// (no trusted per-tx amount on the session path).
+    ///
+    /// The recovery rule that backs the session occupies a rules_flat slot but
+    /// is EXCLUDED from the dispatch (`skip_slot = rule_index`): it is validated
+    /// as the named `rule_pda` and is APPLIES_RECOVERY (never a session gate).
+    ///
+    /// Unlike `oidc_session_open` (JWT verify, RSA-gated), this entrypoint only
+    /// checks the already-open `OidcSession` state + an Ed25519 precompile from
+    /// the session's `eph_pk`, so it works on clusters without `sol_big_mod_exp`.
+    #[instruction(discriminator = 107)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn request_signature_via_oidc_session(
+        ctx: CtxWithRemaining<RequestSignatureViaOidcSessionAccts>,
+        _init_authority_hash: Address,
+        rule_index: u8,
+        _oidc_session_nonce: u64,
+        message_digest: [u8; 32],
+        metadata_digest: [u8; 32],
+        user_pubkey: [u8; 32],
+        signature_scheme: u16,
+        message_approval_bump: u8,
+        cpi_authority_bump: u8,
+        expected_use_nonce: u64,
+        destination: [u8; 32],
+    ) -> Result<(), ProgramError> {
+        let current_ts: i64 = ctx.accounts.clock.unix_timestamp.into();
+        let engine_addr = *ctx.accounts.engine.address();
+        let request_hash = Address::from(message_digest);
+        let dwallet_addr = *ctx.accounts.dwallet_account.address();
+        let session_addr = *ctx.accounts.session.address();
+        let rule_addr = *ctx.accounts.rule_pda.address();
+        let message_approval_addr = *ctx.accounts.message_approval.address();
+
+        ctx.accounts.program.emit_event(
+            &SignatureRequested {
+                engine: engine_addr,
+                request_hash,
+                ts: current_ts,
+            },
+            &ctx.accounts.event_authority,
+            EventAuthority::BUMP,
+        )?;
+
+        require!(
+            ctx.accounts.engine.paused == 0,
+            PolicyEngineError::EnginePaused
+        );
+
+        // Session must reference this rule_pda (defense in depth).
+        require!(
+            ctx.accounts.session.rule_pda == rule_addr,
+            PolicyEngineError::InvalidRuleHeader
+        );
+
+        // 1. session open + not expired.
+        require!(
+            ctx.accounts.session.is_closed == 0,
+            PolicyEngineError::OidcSessionExpired
+        );
+        let expires_at: i64 = ctx.accounts.session.expires_at.into();
+        require!(
+            current_ts < expires_at,
+            PolicyEngineError::OidcSessionExpired
+        );
+
+        // 2. verifier version pin — downgrade guard.
+        let pinned_ver: u32 = ctx.accounts.session.verifier_version.into();
+        require!(
+            pinned_ver == oidc_verifier::OIDC_VERIFIER_V1,
+            PolicyEngineError::OidcVerifierMismatch
+        );
+
+        // 3. use-nonce.
+        let use_nonce: u64 = ctx.accounts.session.next_use_nonce.into();
+        require!(
+            expected_use_nonce == use_nonce,
+            PolicyEngineError::InvalidNonce
+        );
+
+        // 4. policy primary must still match the bound addr_seed. `rule_pda` is
+        // an UncheckedAccount (it is re-read by the dispatch as a trailing
+        // remaining_account, so a typed `Account<T>` would deadlock the shared
+        // borrow). Read `primary_slot` under a scoped borrow released here.
+        let bound_addr_seed = ctx.accounts.session.addr_seed;
+        let mut expected_primary = [0u8; MEMBER_SLOT_LEN];
+        expected_primary[0] = SCHEME_OIDC_JWT;
+        expected_primary[1..33].copy_from_slice(&bound_addr_seed);
+        let rule_view = ctx.accounts.rule_pda.to_account_view();
+        require!(
+            rule_view.owner() == &ID,
+            PolicyEngineError::InvalidRuleHeader
+        );
+        let primary_slot = {
+            let rule_data = rule_view
+                .try_borrow()
+                .map_err(|_| PolicyEngineError::InvalidRuleHeader)?;
+            // RecoveryRule: disc(1) + header(96) + 8 config bytes
+            // (config_applies_to, primary_present, members_count,
+            // quorum_threshold, daily_limit_present, destinations_count,
+            // pending_change_kind, _pad_cfg0) + primary_slot(34).
+            const PRIMARY_SLOT_OFF: usize = 1 + RULE_HEADER_BYTES + 8;
+            require!(
+                rule_data.len() >= PRIMARY_SLOT_OFF + MEMBER_SLOT_LEN,
+                PolicyEngineError::InvalidRuleHeader
+            );
+            require!(rule_data[0] == 2, PolicyEngineError::InvalidRuleHeader);
+            require!(
+                rule_data[1] == KIND_RECOVERY,
+                PolicyEngineError::InvalidRuleKind
+            );
+            let mut ps = [0u8; MEMBER_SLOT_LEN];
+            ps.copy_from_slice(&rule_data[PRIMARY_SLOT_OFF..PRIMARY_SLOT_OFF + MEMBER_SLOT_LEN]);
+            ps
+        };
+        require!(
+            primary_slot == expected_primary,
+            PolicyEngineError::OidcAddrSeedMismatch
+        );
+
+        // 5. metadata_digest canonical binding — PATH_SESSION + destination, so
+        // the eph_pk authorization below covers the exact spend and the digest
+        // can't be replayed onto the normal path. Amount carried by the rules,
+        // not here (0/0 for the V2 binding; SPENDING_USD fails closed below).
+        let rules_generation: u32 = ctx.accounts.engine.rules_generation.into();
+        let expected_md = request_metadata_digest(
+            &engine_addr,
+            &dwallet_addr,
+            &message_digest,
+            &destination,
+            &user_pubkey,
+            signature_scheme,
+            PATH_SESSION,
+            rules_generation,
+            0,
+            0,
+        );
+        require!(
+            metadata_digest == expected_md,
+            PolicyEngineError::AuthFailed
+        );
+
+        // 6. Ed25519 precompile over the per-use challenge with the session eph_pk.
+        let eph_pk = ctx.accounts.session.eph_pk;
+        let challenge = oidc_primary_use_challenge(
+            &session_addr,
+            &dwallet_addr,
+            &message_approval_addr,
+            &message_digest,
+            &metadata_digest,
+            &user_pubkey,
+            signature_scheme,
+            message_approval_bump,
+            use_nonce,
+            &expected_primary,
+        )
+        .map_err(PolicyEngineError::from)?;
+        check_sysvar_addr(ctx.accounts.instructions_sysvar.address())?;
+        let sysvar_view = ctx.accounts.instructions_sysvar.to_account_view();
+        let sysvar_data_ref = sysvar_view
+            .try_borrow()
+            .map_err(|_| PolicyEngineError::AuthFailed)?;
+        let mut eph_slot = [0u8; MEMBER_SLOT_LEN];
+        eph_slot[0] = SCHEME_ED25519;
+        eph_slot[1..33].copy_from_slice(&eph_pk);
+        verify_signature(VerifyInput {
+            member_slot: &eph_slot,
+            challenge: &challenge,
+            instructions_sysvar_data: &sysvar_data_ref,
+            webauthn_auth_data: &[],
+            webauthn_client_data_json: &[],
+        })
+        .map_err(|_| PolicyEngineError::AuthFailed)?;
+        drop(sysvar_data_ref);
+
+        // 7. consume use-nonce BEFORE CPI (single-use per signature).
+        ctx.accounts.session.next_use_nonce = use_nonce
+            .checked_add(1)
+            .ok_or(PolicyEngineError::InvalidNonce)?
+            .into();
+
+        // 8. CPI Ika defense.
+        require!(
+            validate_ika_cpi_accounts(
+                &ctx.accounts.dwallet_program.to_account_view(),
+                &ctx.accounts.dwallet_account.to_account_view(),
+            ),
+            PolicyEngineError::IkaCpiAccountMismatch
+        );
+
+        // 9. Fase 2: enforce the engine's APPLIES_SESSION rules (same shared
+        // dispatch as disc 1 / disc 101). The caller attaches one remaining
+        // account per ENABLED slot (ascending) plus per-kind aux. The recovery
+        // rule that backs this OIDC session is EXCLUDED from the dispatch
+        // (`skip_slot = rule_index`): it was already validated as the named
+        // `rule_pda` above and is APPLIES_RECOVERY (never a session gate), so
+        // the caller does NOT attach it as a remaining account.
+        //
+        // SECURITY INVARIANT: `skip_slot = rule_index` cannot be abused to skip
+        // a different (session-gating) rule. The `#[account(address =
+        // RecoveryRule::seeds(engine, rule_index))]` constraint on `rule_pda` is
+        // enforced by Quasar at parse time, so `rule_index` is bound to the
+        // recovery rule's PDA; `session.rule_pda == rule_addr` (checked above)
+        // binds it to THIS session's recovery rule. So slot `rule_index` is
+        // provably the recovery slot, never an allowlist/velocity/etc. slot.
+        //
+        // Scoped so the immutable remaining-accounts borrow ends before the CPI.
+        {
+            let remaining = ctx.remaining_accounts();
+            let mut rem_iter = remaining.iter();
+            dispatch_active_rules(
+                &ctx.accounts.engine.rules_flat,
+                &mut rem_iter,
+                &sysvar_view,
+                current_ts,
+                &dwallet_addr,
+                &destination,
+                0,
+                0,
+                &metadata_digest,
+                PATH_SESSION,
+                Some(rule_index as usize),
+            )?;
+        }
+
+        // 10. CPI Ika approve_message (F9-SIGN: ika message_metadata_digest = 0).
+        invoke_ika_approve_message(
+            &ctx.accounts.dwallet_program.to_account_view(),
+            &ctx.accounts.cpi_authority.to_account_view(),
+            &ctx.accounts.program.to_account_view(),
+            cpi_authority_bump,
+            &ctx.accounts.coordinator.to_account_view(),
+            &ctx.accounts.message_approval.to_account_view(),
+            &ctx.accounts.dwallet_account.to_account_view(),
+            &ctx.accounts.payer.to_account_view(),
+            &ctx.accounts.system_program.to_account_view(),
+            message_digest,
             [0u8; 32],
             user_pubkey,
             signature_scheme,
@@ -7474,6 +8121,39 @@ pub struct EngineAdmin {
     pub program: Program<PolicyEngineProgram>, // generated by #[program] mod policy_engine_program
 }
 
+// ── B1 — RemoveRule (disc 110) ─────────────────────────────────────────────
+//
+// `rule_pda` is an `UncheckedAccount` because the kind (and thus the concrete
+// account type + seeds) is only known at runtime; the handler validates it
+// against the engine's recorded `RuleEntry` before closing it.
+#[derive(Accounts)]
+#[instruction(init_authority_hash: Address)]
+pub struct RemoveRule {
+    pub dwallet_account: UncheckedAccount,
+
+    #[account(mut, address = PolicyEngine::seeds(
+        dwallet_account.address(),
+        &init_authority_hash
+    ))]
+    pub engine: Account<PolicyEngine>,
+
+    #[account(mut)]
+    pub rule_pda: UncheckedAccount,
+
+    /// Receives the reclaimed rent. MUST equal the address bound into the owner
+    /// challenge.
+    #[account(mut)]
+    pub recipient: UncheckedAccount,
+
+    pub instructions_sysvar: UncheckedAccount,
+    pub clock: Sysvar<Clock>,
+
+    #[account(mut)]
+    pub payer: Signer,
+    pub event_authority: EventAuthority,
+    pub program: Program<PolicyEngineProgram>,
+}
+
 #[derive(Accounts)]
 #[instruction(init_authority_hash: Address, _expected_nonce: u64, rule_index: u8)]
 pub struct AddRuleAllowlist {
@@ -7642,6 +8322,10 @@ pub struct AddRuleVelocity {
     pub program: Program<PolicyEngineProgram>,
 }
 
+// rustfmt does not converge on attribute-macro args inside macro_rules! bodies
+// (it would reindent the `#[account(...)]` PDA-seed args on every --check pass).
+// Skip it so the crate stays rustfmt-clean / hook-safe; the body is hand-aligned.
+#[rustfmt::skip]
 macro_rules! add_rule_accounts {
     ($name:ident, $rule_ty:ident) => {
         #[derive(Accounts)]
@@ -7649,14 +8333,14 @@ macro_rules! add_rule_accounts {
         pub struct $name {
             pub dwallet_account: UncheckedAccount,
             #[account(mut, address = PolicyEngine::seeds(
-                        dwallet_account.address(),
-                        &init_authority_hash
-                    ))]
+                                dwallet_account.address(),
+                                &init_authority_hash
+                            ))]
             pub engine: Account<PolicyEngine>,
             #[account(init, payer = payer, address = $rule_ty::seeds(
-                        engine.address(),
-                        rule_index
-                    ))]
+                                engine.address(),
+                                rule_index
+                            ))]
             pub rule_pda: Account<$rule_ty>,
             #[account(mut)]
             pub payer: Signer,
@@ -7811,10 +8495,19 @@ pub struct RequestSignatureViaSession {
     pub cpi_authority: UncheckedAccount,
     pub caller_program: UncheckedAccount,
     pub dwallet_program: UncheckedAccount,
+    // Fase 2: the session dispatch loop reads the sysvar for `KIND_PASSKEY` /
+    // `KIND_FHE_GATED` session rules with APPLIES_SESSION (to locate the
+    // precompile invocation that signed the metadata digest / FHE decision).
+    // Sessions using only Allowlist / Velocity / TimeLock / Oracle slots still
+    // must attach the slot (all-ones sentinel ok) — it is just not read.
+    pub instructions_sysvar: UncheckedAccount,
     pub clock: Sysvar<Clock>,
     pub system_program: Program<SystemProgram>,
     pub event_authority: EventAuthority,
     pub program: Program<PolicyEngineProgram>,
+    // Fase 2: sub-PDAs for active rules travel as trailing `remaining_accounts`
+    // (read via `CtxWithRemaining::remaining_accounts()`), one per active slot
+    // in ascending `rule_index` order — identical convention to disc 1.
 }
 
 // ── F8c — SessionAdminAction (revoke / add_destination / remove_destination)
@@ -8267,6 +8960,59 @@ pub struct RecoverAsPrimaryOidcAccts {
         rule_index
     ))]
     pub rule_pda: Account<RecoveryRule>,
+
+    #[account(mut, address = OidcSession::seeds(
+        engine.address(),
+        oidc_session_nonce
+    ))]
+    pub session: Account<OidcSession>,
+
+    pub coordinator: UncheckedAccount,
+
+    #[account(mut)]
+    pub message_approval: UncheckedAccount,
+
+    #[account(mut)]
+    pub payer: Signer,
+
+    pub cpi_authority: UncheckedAccount,
+    pub caller_program: UncheckedAccount,
+    pub dwallet_program: UncheckedAccount,
+
+    pub instructions_sysvar: UncheckedAccount,
+    pub clock: Sysvar<Clock>,
+    pub system_program: Program<SystemProgram>,
+    pub event_authority: EventAuthority,
+    pub program: Program<PolicyEngineProgram>,
+}
+
+// Fase 2 (2026-05-25) — accounts for `request_signature_via_oidc_session`
+// (disc 107). Identical to `RecoverAsPrimaryOidcAccts` EXCEPT `rule_pda` is an
+// `UncheckedAccount` (not `Account<RecoveryRule>`): the recovery rule occupies a
+// rules_flat slot, and a typed `Account<T>` holds a persistent data borrow for
+// the whole instruction. We read `primary_slot` under a scoped borrow that is
+// released before the shared dispatch runs (the dispatch excludes this slot via
+// `skip_slot`, so the recovery rule is NOT re-passed as a remaining account).
+#[derive(Accounts)]
+#[instruction(
+    init_authority_hash: Address,
+    rule_index: u8,
+    oidc_session_nonce: u64
+)]
+pub struct RequestSignatureViaOidcSessionAccts {
+    pub dwallet_account: UncheckedAccount,
+
+    #[account(mut, address = PolicyEngine::seeds(
+        dwallet_account.address(),
+        &init_authority_hash
+    ))]
+    pub engine: Account<PolicyEngine>,
+
+    #[account(address = RecoveryRule::seeds(
+        engine.address(),
+        rule_index
+    ))]
+    pub rule_pda: UncheckedAccount,
 
     #[account(mut, address = OidcSession::seeds(
         engine.address(),

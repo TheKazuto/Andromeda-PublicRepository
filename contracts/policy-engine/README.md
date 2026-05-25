@@ -4,7 +4,7 @@
 > **Authority:** `B98zhthMGHUexMAwuJvud83M4LKTQgw6CbtgXS5vPgBZ`
 > **Compiled:** `cargo build-sbf --no-default-features` (devnet pre-alpha, `sol_big_mod_exp` not active — Login Social OIDC verification is rejected on-chain until the syscall lights up and the program is rebuilt with `--features oidc-rsa`).
 
-Unified Quasar program that holds the authority of any Andromeda dWallet and dispatches at signing time across 8 composable rule kinds. The hot-path `request_signature` walks every active rule slot in order, runs the per-kind dispatch, and CPIs Ika `approve_message` as the last side-effect — fail-closed by design (a single failing rule fails the whole signature).
+Unified Quasar program that holds the authority of any Andromeda dWallet and dispatches at signing time across 9 composable rule kinds. The hot-path `request_signature` walks every active rule slot in order, runs the per-kind dispatch, and CPIs Ika `approve_message` as the last side-effect — fail-closed by design (a single failing rule fails the whole signature).
 
 ## Rule kinds
 
@@ -13,11 +13,12 @@ Unified Quasar program that holds the authority of any Andromeda dWallet and dis
 | Allowlist | `KIND_ALLOWLIST = 1` | `[b"rule_allowlist", engine, rule_index]` | Destination whitelist for normal-path signing. |
 | Velocity | `KIND_VELOCITY = 2` | `[b"rule_velocity", engine, rule_index]` | Count-based rate limit across rolling windows. |
 | TimeLock | `KIND_TIME_LOCK = 3` | `[b"rule_time_lock", engine, rule_index]` | Window restrictions (cron-style time gates). |
-| Oracle | `KIND_ORACLE = 4` | `[b"rule_oracle", engine, rule_index]` | Pyth Pull V2 conditional gating with confidence cap. |
+| Oracle | `KIND_ORACLE = 4` | `[b"rule_oracle", engine, rule_index]` | Price gating: reads the adapter's canonical `FeedCache` (see `contracts/pyth-adapter/`); enforces price band + freshness + confidence cap. |
 | Passkey | `KIND_PASSKEY = 5` | `[b"rule_passkey", engine, rule_index]` | WebAuthn step-up assertion required for the tx. |
 | FheGated | `KIND_FHE_GATED = 6` | `[b"rule_fhe_gated", engine, rule_index]` | Decision body signed by an FHE authority. |
 | SessionKey | `KIND_SESSION_KEY = 7` | `[b"rule_session_key", engine, rule_index]` | Ephemeral keypair authorized for bounded signing. |
 | Recovery | `KIND_RECOVERY = 8` | `[b"rule_recovery", engine, rule_index]` | Primary recovery + multi-member quorum. Includes OIDC primary (`scheme = 4`), WebAuthn primary, and Ed25519/Secp256k1/Secp256r1 quorum members. |
+| SpendingUsd | `KIND_SPENDING_USD = 9` | `[b"rule_spending_usd", engine, rule_index]` | USD-denominated spending cap: per-tx / per-day / per-week ceilings, converted on-chain from the moved asset's `amount` via the Pyth `FeedCache` price (canonical 1e8). Up to 16 assets per rule; exactly one feed (the moved asset) is attached + verified per signature; day/week accumulators are mutated in the sub-PDA. |
 
 Up to 16 active slots per dWallet. Each rule lives in its own sub-PDA; the engine indexes them through a flat 96-byte `RuleEntry` per slot (`rules_flat`).
 
@@ -28,11 +29,11 @@ Hot path + admin:
 | Disc | Name | Notes |
 |---|---|---|
 | 0 | `init_engine` | Init authority signs the canonical init challenge over `sha256(init_authority_slot)` so the engine PDA cannot be front-run. |
-| 1 | `request_signature` | Walks every active rule's sub-PDA in order. Caller MUST attach exactly one remaining account per active slot. Header drift + discriminator + ownership checks before per-kind dispatch. |
+| 1 | `request_signature` | Walks every active rule's sub-PDA in order. Caller MUST attach exactly one remaining account per active slot. Header drift + discriminator + ownership checks before per-kind dispatch. **ABI V2:** carries `amount: u64` + `asset_index: u8` (bound into the metadata digest under `andromeda::policy-engine::request::v2`) so a `KIND_SPENDING_USD` rule can be enforced end-to-end; both are 0 when no spending rule is active. **ABI V3 (Update 6):** also carries `ika_msg_metadata_digest: [u8; 32]` — opaque, forwarded verbatim to Ika `approve_message`; `0` (the default for every chain except Zcash) reproduces the prior behaviour. Independent of the Andromeda metadata digest. |
 | 60 / 61 | `pause` / `resume` | Engine-wide. While paused, ALL signing and session-open paths reject. |
 | 80 | `recover_as_primary` | Ed25519/Secp256k1/Secp256r1 primary signs the canonical primary-recover challenge off-chain; precompile verifies; CPIs Ika after destination + daily-limit + cooldown enforcement. |
 
-Add rule (one disc per kind, 10..17):
+Add rule (one disc per kind, 10..18):
 
 | Disc | Name |
 |---|---|
@@ -44,6 +45,7 @@ Add rule (one disc per kind, 10..17):
 | 15 | `add_rule_fhe_gated` |
 | 16 | `add_rule_session_key` |
 | 17 | `add_rule_recovery` |
+| 18 | `add_rule_spending_usd` — creates the rule with `feeds_count = 0` + the USD ceilings; assets are added via disc 19. |
 
 OIDC session flow (Login Social):
 
@@ -85,6 +87,8 @@ Incremental updates (list-style configs):
 | Disc | Name |
 |---|---|
 | 120 / 121 | `update_rule_allowlist_add_destination` / `..._remove_destination` |
+| 122 | `update_rule_oracle_add_feed` — append a `(feed_account, feed_owner, min, max)` feed to a `KIND_ORACLE` rule (feeds are added incrementally after `add_rule_oracle`). |
+| 19 | `update_rule_spending_usd_add_feed` — append a `(feed_cache_account, decimals)` asset to a `KIND_SPENDING_USD` rule. The `feed_cache` account is passed in and its owner is checked against `ALLOWED_ORACLE_OWNERS` (defense-in-depth). |
 | 126 | `update_rule_fhe_gated_update_authorities` |
 | 130 / 131 | `update_rule_recovery_add_member` / `..._remove_member` |
 | 132 / 133 | `update_rule_recovery_add_destination` / `..._remove_destination` |
