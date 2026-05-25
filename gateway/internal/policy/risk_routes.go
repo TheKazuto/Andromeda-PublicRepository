@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"encoding/json"
 	"log/slog"
 	"net/http"
 
@@ -49,9 +50,9 @@ type riskEvaluateRequest struct {
 }
 
 type riskEvaluateResponse struct {
-	Risk           *riskAdvisory `json:"risk,omitempty"`            // optional risk level + reasons
-	Simulation     interface{}   `json:"simulation,omitempty"`      // optional simulation result
-	DigestVerified bool          `json:"digest_verified,omitempty"` // whether digest was verified
+	Risk           *riskAdvisory   `json:"risk,omitempty"`            // optional risk level + reasons
+	Simulation     json.RawMessage `json:"simulation,omitempty"`      // optional simulation result (passthrough)
+	DigestVerified bool            `json:"digest_verified,omitempty"` // whether digest was verified
 }
 
 // --- Request/Response DTOs for risk configuration ---
@@ -159,8 +160,6 @@ func (s *Service) getRiskConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Cast the interface{} back to RiskConfig (this is safe because riskConfigService
-	// returns the concrete type). In production, you'd define a proper struct here.
 	httpx.WriteJSON(w, http.StatusOK, cfg)
 }
 

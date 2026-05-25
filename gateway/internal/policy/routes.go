@@ -2,6 +2,7 @@ package policy
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/hex"
 	"net/http"
 	"strconv"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/shinkalabs/andromeda-gateway/internal/gasponsor"
 	"github.com/shinkalabs/andromeda-gateway/internal/httpx"
+	"github.com/shinkalabs/andromeda-gateway/internal/risk"
 )
 
 // Service wires the PolicyEngine v3 REST surface.
@@ -98,33 +100,32 @@ type OracleRefresher interface {
 	RefreshIxs(ctx context.Context, feedCaches []solana.PublicKey) ([]solana.Instruction, error)
 }
 
-// RiskService is the minimal contract for RT2 risk scoring.
-// Evaluates transaction risk and returns a score with action.
-// Declared here to avoid import cycles from internal/risk.
+// RiskService is the contract for RT2 risk scoring. Evaluates transaction risk
+// and returns a score with action. Satisfied directly by *risk.Service (no
+// import cycle — internal/risk does not import internal/policy).
 type RiskService interface {
-	Evaluate(ctx context.Context, input interface{}) (interface{}, error)
+	Evaluate(ctx context.Context, input *risk.EvaluateInput) (*risk.Score, error)
 }
 
-// RiskConfigService is the minimal contract for RT2 policy management.
-// Handles CRUD operations on dWallet and tenant risk configurations.
-// Risk Layer is advisory-only: only warn_level is configurable.
-// Declared here to avoid import cycles from internal/risk.
+// RiskConfigService is the contract for RT2 policy management. Handles CRUD on
+// dWallet and tenant risk configurations. Risk Layer is advisory-only: only
+// warn_level is configurable. Satisfied directly by *risk.ConfigService.
 type RiskConfigService interface {
-	UpsertDWalletConfig(ctx context.Context, dwalletAddress, tenantID, warnLevel string, simulationEnabled bool) (interface{}, error)
-	GetDWalletConfig(ctx context.Context, dwalletAddress string) (interface{}, error)
+	UpsertDWalletConfig(ctx context.Context, dwalletAddress, tenantID, warnLevel string, simulationEnabled bool) (*risk.RiskConfig, error)
+	GetDWalletConfig(ctx context.Context, dwalletAddress string) (*risk.RiskConfig, error)
 	DeleteDWalletConfig(ctx context.Context, dwalletAddress string) error
-	UpsertTenantDefaults(ctx context.Context, tenantID, warnLevel string) (interface{}, error)
-	GetTenantDefaults(ctx context.Context, tenantID string) (interface{}, error)
+	UpsertTenantDefaults(ctx context.Context, tenantID, warnLevel string) (*risk.RiskTenantDefaults, error)
+	GetTenantDefaults(ctx context.Context, tenantID string) (*risk.RiskTenantDefaults, error)
 	AddToDenylist(ctx context.Context, tenantID, destination, reason string) error
 	RemoveFromDenylist(ctx context.Context, tenantID, destination string) error
 	AddToAllowlist(ctx context.Context, tenantID, destination, reason string) error
 	RemoveFromAllowlist(ctx context.Context, tenantID, destination string) error
 }
 
-// IkaSimulateClient is the minimal contract for calling ika-backend simulation.
-// Used to verify digest matches before risk evaluation.
+// IkaSimulateClient is the contract for calling ika-backend simulation. Used to
+// verify the digest matches before risk evaluation.
 type IkaSimulateClient interface {
-	SimulateTransaction(ctx context.Context, req interface{}) (interface{}, error)
+	SimulateTransaction(ctx context.Context, req *SimulateTransactionRequest) (*SimulateTransactionResponse, error)
 }
 
 // WithOracleRefresher wires refresh-on-sign for the gas-sponsored
@@ -487,7 +488,7 @@ func (s *Service) addRuleAllowlistChallenge(w http.ResponseWriter, req addRuleRe
 		gen = 1 // first add bumps generation 0 → 1
 	}
 	var genLE [4]byte
-	binaryLittleEndianPutUint32Local(genLE[:], gen)
+	binary.LittleEndian.PutUint32(genLE[:], gen)
 
 	ch := &AdminChallengeInput{
 		OpTag:          OpAddAllowlist,
@@ -555,7 +556,7 @@ func (s *Service) addRuleOracleChallenge(w http.ResponseWriter, req addRuleReque
 		gen = 1 // first add bumps generation 0 → 1
 	}
 	var genLE [4]byte
-	binaryLittleEndianPutUint32Local(genLE[:], gen)
+	binary.LittleEndian.PutUint32(genLE[:], gen)
 
 	ch := &AdminChallengeInput{
 		OpTag:          OpAddOracle,
@@ -674,7 +675,7 @@ func (s *Service) itemsAddAllowlistChallenge(w http.ResponseWriter, req itemsAdd
 
 	human := HumanMessageAllowlistAddDestination(dest, engine, dwallet)
 	var genLE [4]byte
-	binaryLittleEndianPutUint32Local(genLE[:], req.RuleGeneration)
+	binary.LittleEndian.PutUint32(genLE[:], req.RuleGeneration)
 
 	ch := &AdminChallengeInput{
 		OpTag:          OpAllowlistAddDest,
@@ -733,7 +734,7 @@ func (s *Service) itemsAddOracleChallenge(w http.ResponseWriter, req itemsAddReq
 
 	human := HumanMessageOracleAddFeed(feedAccount, feedOwner, req.MinQ64, req.MaxQ64, engine, dwallet)
 	var genLE [4]byte
-	binaryLittleEndianPutUint32Local(genLE[:], req.RuleGeneration)
+	binary.LittleEndian.PutUint32(genLE[:], req.RuleGeneration)
 	minLE, maxLE := int64LE(req.MinQ64), int64LE(req.MaxQ64)
 	fa, fo := feedAccount.Bytes(), feedOwner.Bytes()
 
@@ -795,7 +796,7 @@ func decodeOracleFeed(w http.ResponseWriter, feedAccountStr, feedOwnerStr string
 
 func int64LE(v int64) [8]byte {
 	var b [8]byte
-	binaryLittleEndianPutUint64Local(b[:], uint64(v))
+	binary.LittleEndian.PutUint64(b[:], uint64(v))
 	return b
 }
 
@@ -891,28 +892,5 @@ func initChallengePreimageAndHash(
 	pre = append(pre, ownerSlot[:]...)
 	pre = append(pre, defaultRecoveryPresent)
 	pre = append(pre, defaultRecoveryHash[:]...)
-	return pre, sha256SumLocal(pre)
-}
-
-func sha256SumLocal(b []byte) [32]byte {
-	// pulled out so this file doesn't import crypto/sha256 directly twice.
-	return sha256Sum(b)
-}
-
-func binaryLittleEndianPutUint32Local(dst []byte, v uint32) {
-	dst[0] = byte(v)
-	dst[1] = byte(v >> 8)
-	dst[2] = byte(v >> 16)
-	dst[3] = byte(v >> 24)
-}
-
-func binaryLittleEndianPutUint64Local(dst []byte, v uint64) {
-	dst[0] = byte(v)
-	dst[1] = byte(v >> 8)
-	dst[2] = byte(v >> 16)
-	dst[3] = byte(v >> 24)
-	dst[4] = byte(v >> 32)
-	dst[5] = byte(v >> 40)
-	dst[6] = byte(v >> 48)
-	dst[7] = byte(v >> 56)
+	return pre, sha256Sum(pre)
 }

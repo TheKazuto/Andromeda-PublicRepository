@@ -9,15 +9,15 @@ import (
 
 // Discriminators for F9d (passkey recovery — Secp256r1 + WebAuthn).
 const (
-	DiscPasskeySessionOpen              uint8 = 89
-	DiscRecoverAsPrimaryPasskeySession  uint8 = 90
-	DiscPasskeySessionClose             uint8 = 91
+	DiscPasskeySessionOpen             uint8 = 89
+	DiscRecoverAsPrimaryPasskeySession uint8 = 90
+	DiscPasskeySessionClose            uint8 = 91
 )
 
 // WebAuthn payload caps (mirror lib.rs).
 const (
-	WebAuthnAuthDataMax        = 192
-	WebAuthnClientDataJSONMax  = 192
+	WebAuthnAuthDataMax       = 192
+	WebAuthnClientDataJSONMax = 192
 )
 
 // SeedPasskeySession — mirror of `SEED_PASSKEY_SESSION` in lib.rs.
@@ -39,19 +39,19 @@ func PasskeySessionPDA(
 // ── Disc 89 — passkey_session_open ────────────────────────────────────────
 
 type PasskeySessionOpenParams struct {
-	ProgramID                      solana.PublicKey
-	Engine                         solana.PublicKey
-	DWallet                        solana.PublicKey
-	Payer                          solana.PublicKey
-	InitAuthorityHash              [32]byte
-	RuleIndex                      uint8
-	PasskeySessionNonce            uint64
-	EphPk                          [32]byte
-	NotAfterUnixTs                 uint64
-	CredentialIdHash               [32]byte
-	ExpectedPasskeySessionNonce    uint64
-	WebAuthnAuthData               []byte // length-prefixed; padded to WebAuthnAuthDataMax
-	WebAuthnClientDataJSON         []byte // length-prefixed; padded to WebAuthnClientDataJSONMax
+	ProgramID                   solana.PublicKey
+	Engine                      solana.PublicKey
+	DWallet                     solana.PublicKey
+	Payer                       solana.PublicKey
+	InitAuthorityHash           [32]byte
+	RuleIndex                   uint8
+	PasskeySessionNonce         uint64
+	EphPk                       [32]byte
+	NotAfterUnixTs              uint64
+	CredentialIdHash            [32]byte
+	ExpectedPasskeySessionNonce uint64
+	WebAuthnAuthData            []byte // length-prefixed; padded to WebAuthnAuthDataMax
+	WebAuthnClientDataJSON      []byte // length-prefixed; padded to WebAuthnClientDataJSONMax
 }
 
 func PasskeySessionOpen(p PasskeySessionOpenParams) (solana.Instruction, error) {
@@ -122,27 +122,27 @@ func PasskeySessionOpen(p PasskeySessionOpenParams) (solana.Instruction, error) 
 // ── Disc 90 — recover_as_primary_passkey_session ─────────────────────────
 
 type RecoverAsPrimaryPasskeySessionParams struct {
-	ProgramID            solana.PublicKey
-	Engine               solana.PublicKey
-	DWallet              solana.PublicKey
-	Coordinator          solana.PublicKey
-	MessageApproval      solana.PublicKey
-	Payer                solana.PublicKey
-	CPIAuthority         solana.PublicKey
-	CallerProgram        solana.PublicKey
-	DWalletProgram       solana.PublicKey
-	InitAuthorityHash    [32]byte
+	ProgramID         solana.PublicKey
+	Engine            solana.PublicKey
+	DWallet           solana.PublicKey
+	Coordinator       solana.PublicKey
+	MessageApproval   solana.PublicKey
+	Payer             solana.PublicKey
+	CPIAuthority      solana.PublicKey
+	CallerProgram     solana.PublicKey
+	DWalletProgram    solana.PublicKey
+	InitAuthorityHash [32]byte
 	// H2 audit fix (2026-05-16): rule_index is now part of the wire format —
 	// must match the slot the RecoveryRule was created at.
-	RuleIndex            uint8
-	PasskeySessionNonce  uint64
-	MessageDigest        [32]byte
-	MetadataDigest       [32]byte
-	UserPubkey           [32]byte
-	SignatureScheme      uint16
-	MessageApprovalBump  uint8
-	CPIAuthorityBump     uint8
-	ExpectedUseNonce     uint64
+	RuleIndex           uint8
+	PasskeySessionNonce uint64
+	MessageDigest       [32]byte
+	MetadataDigest      [32]byte
+	UserPubkey          [32]byte
+	SignatureScheme     uint16
+	MessageApprovalBump uint8
+	CPIAuthorityBump    uint8
+	ExpectedUseNonce    uint64
 }
 
 func RecoverAsPrimaryPasskeySession(p RecoverAsPrimaryPasskeySessionParams) (solana.Instruction, error) {
@@ -198,12 +198,12 @@ func RecoverAsPrimaryPasskeySession(p RecoverAsPrimaryPasskeySessionParams) (sol
 // ── Disc 91 — passkey_session_close ──────────────────────────────────────
 
 type PasskeySessionCloseParams struct {
-	ProgramID            solana.PublicKey
-	Engine               solana.PublicKey
-	DWallet              solana.PublicKey
-	Recipient            solana.PublicKey // signs + receives rent (must == payer_for_close)
-	InitAuthorityHash    [32]byte
-	PasskeySessionNonce  uint64
+	ProgramID           solana.PublicKey
+	Engine              solana.PublicKey
+	DWallet             solana.PublicKey
+	Recipient           solana.PublicKey // signs + receives rent (must == payer_for_close)
+	InitAuthorityHash   [32]byte
+	PasskeySessionNonce uint64
 }
 
 func PasskeySessionClose(p PasskeySessionCloseParams) (solana.Instruction, error) {

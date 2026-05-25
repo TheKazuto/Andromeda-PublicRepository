@@ -271,7 +271,7 @@ func (s *Service) deriveRecoverAsPrimary(
 	if err != nil {
 		return nil, &httpError{http.StatusBadRequest, "invalid_field", "destination_hex: " + err.Error()}
 	}
-	ikaPK, err := decodeHex(req.IkaDWalletPubkey)
+	ikaPK, err := hex.DecodeString(req.IkaDWalletPubkey)
 	if err != nil || len(ikaPK) == 0 || len(ikaPK) > 96 {
 		return nil, &httpError{http.StatusBadRequest, "invalid_field",
 			"ika_dwallet_pubkey_hex must be 1..96-byte hex (curve pubkey)"}

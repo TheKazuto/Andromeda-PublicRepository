@@ -14,15 +14,15 @@ const DiscInitEngine uint8 = 0
 // F2.6b limitation: `DefaultRecoveryPresent` must be 0 for now — when 1, the
 // caller would also need to pass a `rule_recovery_pda` account (planned for F9).
 type InitEngineParams struct {
-	ProgramID               solana.PublicKey
-	DWallet                 solana.PublicKey
-	Engine                  solana.PublicKey
-	Payer                   solana.PublicKey
-	InitAuthoritySlot       [MemberSlotLen]byte
-	InitAuthorityHash       [32]byte
-	OwnerSlot               [MemberSlotLen]byte
-	DefaultRecoveryPresent  uint8
-	DefaultRecoveryHash     [32]byte
+	ProgramID              solana.PublicKey
+	DWallet                solana.PublicKey
+	Engine                 solana.PublicKey
+	Payer                  solana.PublicKey
+	InitAuthoritySlot      [MemberSlotLen]byte
+	InitAuthorityHash      [32]byte
+	OwnerSlot              [MemberSlotLen]byte
+	DefaultRecoveryPresent uint8
+	DefaultRecoveryHash    [32]byte
 }
 
 func InitEngine(p InitEngineParams) (solana.Instruction, error) {

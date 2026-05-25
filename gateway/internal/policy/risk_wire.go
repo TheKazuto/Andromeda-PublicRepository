@@ -261,189 +261,12 @@ func (a *StoreAdapter) GetDestHistoryEntry(ctx context.Context, dwalletAddress, 
 }
 
 // =============================================================================
-// RiskServiceAdapter implements policy.RiskService interface
-// =============================================================================
-
-// RiskServiceAdapter wraps risk.Service as a policy.RiskService,
-// converting between policy layer (map[string]interface{}) and risk layer (typed structs).
-type RiskServiceAdapter struct {
-	svc *risk.Service
-}
-
-// NewRiskServiceAdapter creates an adapter wrapping a risk.Service.
-func NewRiskServiceAdapter(svc *risk.Service) *RiskServiceAdapter {
-	return &RiskServiceAdapter{svc: svc}
-}
-
-// Evaluate implements policy.RiskService.Evaluate by converting map input → struct,
-// calling risk.Service.Evaluate, and converting result back to map.
-func (a *RiskServiceAdapter) Evaluate(ctx context.Context, input interface{}) (interface{}, error) {
-	evalInput, err := mapToEvaluateInput(input)
-	if err != nil {
-		return nil, fmt.Errorf("invalid evaluate input: %w", err)
-	}
-
-	score, err := a.svc.Evaluate(ctx, evalInput)
-	if err != nil {
-		return nil, err
-	}
-
-	return scoreToMap(score), nil
-}
-
-// mapToEvaluateInput converts map[string]interface{} → risk.EvaluateInput.
-// Expected keys: tenant_id, dwallet_address, destination, request_id.
-// Optional: simulation, calldata_risk (populated by RT5 sources).
-func mapToEvaluateInput(input interface{}) (*risk.EvaluateInput, error) {
-	m, ok := input.(map[string]interface{})
-	if !ok {
-		return nil, fmt.Errorf("input must be map[string]interface{}, got %T", input)
-	}
-
-	evalInput := &risk.EvaluateInput{}
-
-	if v, ok := m["tenant_id"].(string); ok {
-		evalInput.TenantID = v
-	}
-	if v, ok := m["dwallet_address"].(string); ok {
-		evalInput.DWalletAddress = v
-	}
-	if v, ok := m["destination"].(string); ok {
-		evalInput.Destination = v
-	}
-	if v, ok := m["request_id"].(string); ok {
-		evalInput.RequestID = v
-	}
-
-	return evalInput, nil
-}
-
-// scoreToMap converts risk.Score → map[string]interface{} for JSON response.
-func scoreToMap(score *risk.Score) map[string]interface{} {
-	if score == nil {
-		return map[string]interface{}{
-			"level":   "none",
-			"action":  "allow",
-			"reasons": []string{},
-		}
-	}
-
-	return map[string]interface{}{
-		"level":   score.Level,
-		"action":  score.Action,
-		"reasons": score.Reasons,
-	}
-}
-
-// =============================================================================
-// RiskConfigServiceAdapter implements policy.RiskConfigService interface
-// =============================================================================
-
-// RiskConfigServiceAdapter wraps risk.ConfigService as a policy.RiskConfigService.
-type RiskConfigServiceAdapter struct {
-	svc *risk.ConfigService
-}
-
-// NewRiskConfigServiceAdapter creates an adapter wrapping a risk.ConfigService.
-func NewRiskConfigServiceAdapter(svc *risk.ConfigService) *RiskConfigServiceAdapter {
-	return &RiskConfigServiceAdapter{svc: svc}
-}
-
-// UpsertDWalletConfig creates or updates dWallet risk configuration.
-func (a *RiskConfigServiceAdapter) UpsertDWalletConfig(ctx context.Context, dwalletAddress, tenantID string,
-	warnLevel string, simulationEnabled bool) (interface{}, error) {
-	cfg, err := a.svc.UpsertDWalletConfig(ctx, dwalletAddress, tenantID, warnLevel, simulationEnabled)
-	if err != nil {
-		return nil, err
-	}
-	// Convert to map for interface{} compatibility
-	if cfg == nil {
-		return nil, nil
-	}
-	return map[string]interface{}{
-		"dWalletAddress":    cfg.DWalletAddress,
-		"tenantId":          cfg.TenantID,
-		"warnLevel":         cfg.WarnLevel,
-		"simulationEnabled": cfg.SimulationEnabled,
-	}, nil
-}
-
-// GetDWalletConfig retrieves dWallet risk configuration.
-func (a *RiskConfigServiceAdapter) GetDWalletConfig(ctx context.Context, dwalletAddress string) (interface{}, error) {
-	cfg, err := a.svc.GetDWalletConfig(ctx, dwalletAddress)
-	if err != nil {
-		return nil, err
-	}
-	if cfg == nil {
-		return nil, nil
-	}
-	return map[string]interface{}{
-		"dWalletAddress":    cfg.DWalletAddress,
-		"tenantId":          cfg.TenantID,
-		"warnLevel":         cfg.WarnLevel,
-		"simulationEnabled": cfg.SimulationEnabled,
-	}, nil
-}
-
-// DeleteDWalletConfig removes dWallet risk configuration.
-func (a *RiskConfigServiceAdapter) DeleteDWalletConfig(ctx context.Context, dwalletAddress string) error {
-	return a.svc.DeleteDWalletConfig(ctx, dwalletAddress)
-}
-
-// UpsertTenantDefaults creates or updates tenant default risk configuration.
-func (a *RiskConfigServiceAdapter) UpsertTenantDefaults(ctx context.Context, tenantID string,
-	warnLevel string) (interface{}, error) {
-	defaults, err := a.svc.UpsertTenantDefaults(ctx, tenantID, warnLevel)
-	if err != nil {
-		return nil, err
-	}
-	if defaults == nil {
-		return nil, nil
-	}
-	return map[string]interface{}{
-		"tenantId":  defaults.TenantID,
-		"warnLevel": defaults.WarnLevel,
-	}, nil
-}
-
-// GetTenantDefaults retrieves tenant default risk configuration.
-func (a *RiskConfigServiceAdapter) GetTenantDefaults(ctx context.Context, tenantID string) (interface{}, error) {
-	defaults, err := a.svc.GetTenantDefaults(ctx, tenantID)
-	if err != nil {
-		return nil, err
-	}
-	if defaults == nil {
-		return nil, nil
-	}
-	return map[string]interface{}{
-		"tenantId":  defaults.TenantID,
-		"warnLevel": defaults.WarnLevel,
-	}, nil
-}
-
-// AddToDenylist adds a destination to the tenant's denylist.
-func (a *RiskConfigServiceAdapter) AddToDenylist(ctx context.Context, tenantID, destination, reason string) error {
-	return a.svc.AddToDenylist(ctx, tenantID, destination, reason)
-}
-
-// RemoveFromDenylist removes a destination from the tenant's denylist.
-func (a *RiskConfigServiceAdapter) RemoveFromDenylist(ctx context.Context, tenantID, destination string) error {
-	return a.svc.RemoveFromDenylist(ctx, tenantID, destination)
-}
-
-// AddToAllowlist adds a destination to the tenant's allowlist.
-func (a *RiskConfigServiceAdapter) AddToAllowlist(ctx context.Context, tenantID, destination, reason string) error {
-	return a.svc.AddToAllowlist(ctx, tenantID, destination, reason)
-}
-
-// RemoveFromAllowlist removes a destination from the tenant's allowlist.
-func (a *RiskConfigServiceAdapter) RemoveFromAllowlist(ctx context.Context, tenantID, destination string) error {
-	return a.svc.RemoveFromAllowlist(ctx, tenantID, destination)
-}
-
-// =============================================================================
 // Helper functions for wiring in main.go
 // =============================================================================
+//
+// *risk.Service and *risk.ConfigService satisfy policy.RiskService and
+// policy.RiskConfigService directly (their method sets already use the concrete
+// risk types), so no adapter layer is needed — main wires them straight in.
 
 // NewRiskRegistry creates a source registry for risk evaluation.
 func NewRiskRegistry() *risk.Registry {
@@ -451,17 +274,10 @@ func NewRiskRegistry() *risk.Registry {
 }
 
 // NewRiskService creates the core risk scoring service.
-// enabled: feature flag
 // store: configuration store interface
-// logger: slog logger
-func NewRiskService(store risk.ConfigStore, logger interface{}) *risk.Service {
-	// Logger parameter is interface{} because Go doesn't allow slog import in tests easily.
-	// In main.go context, it's always *slog.Logger.
-	var slogger *slog.Logger
-	if l, ok := logger.(*slog.Logger); ok {
-		slogger = l
-	}
-	return risk.NewService(store, slogger)
+// logger: slog logger (nil falls back to slog.Default inside risk.NewService)
+func NewRiskService(store risk.ConfigStore, logger *slog.Logger) *risk.Service {
+	return risk.NewService(store, logger)
 }
 
 // NewRiskConfigService creates the config management service.

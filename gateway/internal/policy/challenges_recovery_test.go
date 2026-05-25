@@ -309,19 +309,19 @@ type passkeyFixture struct {
 	OpSessionOpen string `json:"op_session_open"`
 	OpPrimaryUse  string `json:"op_primary_use"`
 	Inputs        struct {
-		Dwallet            string `json:"dwallet"`
-		PrimarySlot        string `json:"primary_slot"`
-		EphPk              string `json:"eph_pk"`
-		NotAfterUnixTs     string `json:"not_after_unix_ts"`
-		CredentialIDHash   string `json:"credential_id_hash"`
-		SessionNonce       string `json:"session_nonce"`
-		UseNonce           string `json:"use_nonce"`
-		SignatureScheme    int    `json:"signature_scheme"`
-		MessageApprovalBump int   `json:"message_approval_bump"`
-		MessageApproval    string `json:"message_approval"`
-		MessageDigest      string `json:"message_digest"`
-		MetadataDigest     string `json:"metadata_digest"`
-		UserPubkey         string `json:"user_pubkey"`
+		Dwallet             string `json:"dwallet"`
+		PrimarySlot         string `json:"primary_slot"`
+		EphPk               string `json:"eph_pk"`
+		NotAfterUnixTs      string `json:"not_after_unix_ts"`
+		CredentialIDHash    string `json:"credential_id_hash"`
+		SessionNonce        string `json:"session_nonce"`
+		UseNonce            string `json:"use_nonce"`
+		SignatureScheme     int    `json:"signature_scheme"`
+		MessageApprovalBump int    `json:"message_approval_bump"`
+		MessageApproval     string `json:"message_approval"`
+		MessageDigest       string `json:"message_digest"`
+		MetadataDigest      string `json:"metadata_digest"`
+		UserPubkey          string `json:"user_pubkey"`
 	} `json:"inputs"`
 	Pdas struct {
 		Session struct {

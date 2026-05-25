@@ -18,7 +18,7 @@ type IkaSimulateClientImpl struct {
 	httpClient  *http.Client
 	baseURL     string
 	internalKey string
-	breaker     *gobreaker.CircuitBreaker[interface{}]
+	breaker     *gobreaker.CircuitBreaker[*SimulateTransactionResponse]
 	timeout     time.Duration
 }
 
@@ -37,7 +37,7 @@ func NewIkaSimulateClient(baseURL, internalKey string, settings gobreaker.Settin
 		timeout = 10 * time.Second
 	}
 
-	breaker := gobreaker.NewCircuitBreaker[interface{}](settings)
+	breaker := gobreaker.NewCircuitBreaker[*SimulateTransactionResponse](settings)
 
 	return &IkaSimulateClientImpl{
 		httpClient:  &http.Client{Timeout: timeout},
@@ -60,43 +60,27 @@ type SimulateTransactionRequest struct {
 
 // SimulateTransactionResponse is the response from ika-backend simulate endpoint.
 type SimulateTransactionResponse struct {
-	DigestMatches   bool        `json:"digest_matches"`
-	ActualDigestHex string      `json:"actual_digest_hex,omitempty"`
-	Destination     string      `json:"destination,omitempty"`
-	Simulation      interface{} `json:"simulation,omitempty"`    // raw simulation result
-	CalldataRisk    interface{} `json:"calldata_risk,omitempty"` // heuristic risk
-	Error           string      `json:"error,omitempty"`
+	DigestMatches   bool            `json:"digest_matches"`
+	ActualDigestHex string          `json:"actual_digest_hex,omitempty"`
+	Destination     string          `json:"destination,omitempty"`
+	Simulation      json.RawMessage `json:"simulation,omitempty"`    // raw simulation result (passthrough)
+	CalldataRisk    json.RawMessage `json:"calldata_risk,omitempty"` // heuristic risk (passthrough)
+	Error           string          `json:"error,omitempty"`
 }
 
-// SimulateTransaction calls the internal ika-backend simulate endpoint with circuit breaker.
-// Returns the response (as map[string]interface{} to match the interface contract) or error.
-func (c *IkaSimulateClientImpl) SimulateTransaction(ctx context.Context, req interface{}) (interface{}, error) {
-	// Convert req to the proper typed request (caller passes a map, we convert it).
-	var simReq SimulateTransactionRequest
-	if reqMap, ok := req.(map[string]interface{}); ok {
-		// Marshal and unmarshal to convert map to typed struct.
-		data, _ := json.Marshal(reqMap)
-		if err := json.Unmarshal(data, &simReq); err != nil {
-			return nil, fmt.Errorf("invalid request format: %w", err)
-		}
-	} else {
-		return nil, fmt.Errorf("request must be map[string]interface{}")
+// SimulateTransaction calls the internal ika-backend simulate endpoint with
+// circuit breaker protection. Returns the typed response or an error.
+func (c *IkaSimulateClientImpl) SimulateTransaction(ctx context.Context, req *SimulateTransactionRequest) (*SimulateTransactionResponse, error) {
+	if req == nil {
+		return nil, fmt.Errorf("request must not be nil")
 	}
-
-	// Use circuit breaker to protect the HTTP call.
-	result, err := c.breaker.Execute(func() (interface{}, error) {
-		return c.simulateInternal(ctx, &simReq)
+	return c.breaker.Execute(func() (*SimulateTransactionResponse, error) {
+		return c.simulateInternal(ctx, req)
 	})
-
-	if err != nil {
-		return nil, err
-	}
-
-	return result, nil
 }
 
 // simulateInternal performs the actual HTTP call without circuit breaker.
-func (c *IkaSimulateClientImpl) simulateInternal(ctx context.Context, req *SimulateTransactionRequest) (interface{}, error) {
+func (c *IkaSimulateClientImpl) simulateInternal(ctx context.Context, req *SimulateTransactionRequest) (*SimulateTransactionResponse, error) {
 	url := c.baseURL + "/v1/dwallet/simulate"
 
 	body, err := json.Marshal(req)
@@ -131,12 +115,5 @@ func (c *IkaSimulateClientImpl) simulateInternal(ctx context.Context, req *Simul
 	if err := json.Unmarshal(respBody, &simResp); err != nil {
 		return nil, fmt.Errorf("parse response: %w", err)
 	}
-
-	// Return response as map for interface{} compatibility.
-	var result map[string]interface{}
-	if err := json.Unmarshal(respBody, &result); err != nil {
-		return nil, fmt.Errorf("convert response to map: %w", err)
-	}
-
-	return result, nil
+	return &simResp, nil
 }

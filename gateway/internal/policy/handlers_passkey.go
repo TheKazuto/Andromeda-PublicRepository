@@ -321,7 +321,7 @@ func (s *Service) passkeyUseChallenge(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusBadRequest, "invalid_field", "user_pubkey_hex: "+err.Error())
 		return
 	}
-	ikaPK, err := decodeHex(req.IkaDWalletPubkey)
+	ikaPK, err := hex.DecodeString(req.IkaDWalletPubkey)
 	if err != nil || len(ikaPK) == 0 || len(ikaPK) > 96 {
 		httpx.WriteError(w, http.StatusBadRequest, "invalid_field",
 			"ika_dwallet_pubkey_hex must be 1..96-byte hex (curve pubkey)")
@@ -414,7 +414,7 @@ func (s *Service) passkeyUseSubmit(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusBadRequest, "invalid_field", "user_pubkey_hex: "+err.Error())
 		return
 	}
-	ikaPK, err := decodeHex(req.IkaDWalletPubkey)
+	ikaPK, err := hex.DecodeString(req.IkaDWalletPubkey)
 	if err != nil || len(ikaPK) == 0 || len(ikaPK) > 96 {
 		httpx.WriteError(w, http.StatusBadRequest, "invalid_field",
 			"ika_dwallet_pubkey_hex must be 1..96-byte hex (curve pubkey)")

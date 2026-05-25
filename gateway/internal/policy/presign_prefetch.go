@@ -133,13 +133,20 @@ func presignLockKey(tenant, challengeHex string) string {
 }
 
 // firePresignPrefetch dispatches a presign in the background and caches it under
-// (tenant, challengeHex). Fully non-fatal.
+// (tenant, challengeHex). Fully non-fatal. Delegates to the tenant-string
+// variant so the HTTP and server-side (orchestrator) paths share one impl.
 func (s *Service) firePresignPrefetch(r *http.Request, dwalletAddress, challengeHex string) {
-	if !s.presignPrefetchEnabled() || dwalletAddress == "" || challengeHex == "" {
+	if !s.presignPrefetchEnabled() {
 		return
 	}
-	tenant := s.resolveTenant(r)
-	if tenant == "" {
+	s.FirePresignPrefetchDirect(s.resolveTenant(r), dwalletAddress, challengeHex)
+}
+
+// FirePresignPrefetchDirect is the server-side variant: the caller supplies the
+// authenticated tenant directly (no *http.Request). Used by the intents
+// orchestrator to start a presign at prepare time. Fully non-fatal.
+func (s *Service) FirePresignPrefetchDirect(tenant, dwalletAddress, challengeHex string) {
+	if !s.presignPrefetchEnabled() || tenant == "" || dwalletAddress == "" || challengeHex == "" {
 		return
 	}
 	key := presignCacheKey(tenant, challengeHex)
@@ -207,11 +214,18 @@ func (s *Service) harvestPresign(r *http.Request, challengeHex string) string {
 	if !s.presignPrefetchEnabled() || challengeHex == "" {
 		return ""
 	}
-	tenant := s.resolveTenant(r)
-	if tenant == "" {
+	return s.HarvestPresignDirect(r.Context(), s.resolveTenant(r), challengeHex)
+}
+
+// HarvestPresignDirect is the server-side variant of harvestPresign: the caller
+// supplies the tenant directly (no *http.Request). Used by the intents
+// orchestrator at submit time. Atomically reads + deletes; "" on miss / disabled
+// / stale epoch.
+func (s *Service) HarvestPresignDirect(ctx context.Context, tenant, challengeHex string) string {
+	if !s.presignPrefetchEnabled() || tenant == "" || challengeHex == "" {
 		return ""
 	}
-	res, ok := s.presignCache.GetDel(r.Context(), presignCacheKey(tenant, challengeHex))
+	res, ok := s.presignCache.GetDel(ctx, presignCacheKey(tenant, challengeHex))
 	if !ok || res.Hex == "" {
 		s.recordHarvest(false)
 		return ""
@@ -221,7 +235,7 @@ func (s *Service) harvestPresign(r *http.Request, challengeHex string) string {
 	// inline instead of forwarding an id the network would reject opaquely.
 	// We paid for it and never used it → count the leak.
 	if res.Epoch > 0 {
-		if cur := s.presignCache.CurrentEpoch(r.Context()); cur > res.Epoch {
+		if cur := s.presignCache.CurrentEpoch(ctx); cur > res.Epoch {
 			s.recordHarvest(false)
 			s.recordLeak("stale_epoch")
 			return ""

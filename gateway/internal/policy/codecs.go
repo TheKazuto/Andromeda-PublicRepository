@@ -15,31 +15,31 @@ import (
 // PolicyEngineState is the decoded view of a `PolicyEngine` PDA. Sizes and
 // offsets match the byte layout in the on-chain handler.
 type PolicyEngineState struct {
-	AccountDiscriminator         uint8
-	Version                      uint8
-	DWallet                      solana.PublicKey
-	InitAuthoritySlot            [MemberSlotLen]byte
-	OwnerSlot                    [MemberSlotLen]byte
-	NextAdminNonce               uint64
-	NextPrimaryRecoverNonce      uint64
-	NextQuorumSessionNonce       uint64
-	NextOidcSessionNonce         uint64
-	NextPasskeySessionNonce      uint64
-	Paused                       uint8
-	RulesCount                   uint8
-	RulesGeneration              uint32
-	Rules                        [MaxRules]RuleEntryView
+	AccountDiscriminator    uint8
+	Version                 uint8
+	DWallet                 solana.PublicKey
+	InitAuthoritySlot       [MemberSlotLen]byte
+	OwnerSlot               [MemberSlotLen]byte
+	NextAdminNonce          uint64
+	NextPrimaryRecoverNonce uint64
+	NextQuorumSessionNonce  uint64
+	NextOidcSessionNonce    uint64
+	NextPasskeySessionNonce uint64
+	Paused                  uint8
+	RulesCount              uint8
+	RulesGeneration         uint32
+	Rules                   [MaxRules]RuleEntryView
 }
 
 // RuleEntryView is the decoded form of one slot in `PolicyEngine.rules_flat`.
 type RuleEntryView struct {
-	Kind           RuleKind
-	Bump           uint8
-	Version        uint8
-	Enabled        bool
-	Generation     uint32
-	RulePDA        solana.PublicKey
-	ConfigHash     [32]byte
+	Kind       RuleKind
+	Bump       uint8
+	Version    uint8
+	Enabled    bool
+	Generation uint32
+	RulePDA    solana.PublicKey
+	ConfigHash [32]byte
 }
 
 const (
@@ -114,9 +114,9 @@ type AllowlistRuleState struct {
 	NextAdminNonce       uint64
 	ConfigHash           [32]byte
 	// Allowlist config.
-	AppliesTo            uint8
-	DestinationsCount    uint8
-	Destinations         [][32]byte // sliced to DestinationsCount entries
+	AppliesTo         uint8
+	DestinationsCount uint8
+	Destinations      [][32]byte // sliced to DestinationsCount entries
 }
 
 const allowlistRuleMinBytes = 1 + 96 + 8 /* applies + count + pad */ + 1024

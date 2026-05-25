@@ -19,8 +19,8 @@ func TestParseOracleFeeds(t *testing.T) {
 	d[0] = 2 // rule account discriminator
 	d[ruleAppliesToOffset] = AppliesNormal
 	d[oracleFeedsCountOff] = 2
-	copy(d[oracleFeedsFlatOff:], feedA[:])                    // feed 0 account
-	copy(d[oracleFeedsFlatOff+oracleFeedBytes:], feedB[:])    // feed 1 account
+	copy(d[oracleFeedsFlatOff:], feedA[:])                 // feed 0 account
+	copy(d[oracleFeedsFlatOff+oracleFeedBytes:], feedB[:]) // feed 1 account
 
 	feeds, applies, err := parseOracleFeeds(d)
 	if err != nil {
@@ -56,17 +56,17 @@ func TestRequestSignature_OracleAuxOrdering(t *testing.T) {
 	rule1 := mustPub(t, "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")
 
 	ix, err := RequestSignature(RequestSignatureParams{
-		ProgramID:        programID,
-		Engine:           engine,
-		DWallet:          dwallet,
-		Coordinator:      dwallet,
-		MessageApproval:  dwallet,
-		Payer:            payer,
-		CPIAuthority:     dwallet,
-		CallerProgram:    payer,
-		DWalletProgram:   payer,
-		RulePDAs:         []solana.PublicKey{rule0, rule1},
-		RuleAux:          [][]solana.PublicKey{{feedCache}, nil}, // slot0 oracle, slot1 none
+		ProgramID:       programID,
+		Engine:          engine,
+		DWallet:         dwallet,
+		Coordinator:     dwallet,
+		MessageApproval: dwallet,
+		Payer:           payer,
+		CPIAuthority:    dwallet,
+		CallerProgram:   payer,
+		DWalletProgram:  payer,
+		RulePDAs:        []solana.PublicKey{rule0, rule1},
+		RuleAux:         [][]solana.PublicKey{{feedCache}, nil}, // slot0 oracle, slot1 none
 	})
 	if err != nil {
 		t.Fatalf("RequestSignature: %v", err)

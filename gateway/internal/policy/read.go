@@ -39,21 +39,21 @@ type allowlistDetailJSON struct {
 }
 
 type readPolicyResponse struct {
-	ProgramID                string          `json:"program_id"`
-	EngineAddress            string          `json:"engine_address"`
-	DwalletAddress           string          `json:"dwallet_address"`
-	Version                  uint8           `json:"version"`
-	Paused                   bool            `json:"paused"`
-	RulesCount               uint8           `json:"rules_count"`
-	RulesGeneration          uint32          `json:"rules_generation"`
-	NextAdminNonce           uint64          `json:"next_admin_nonce"`
-	NextPrimaryRecoverNonce  uint64          `json:"next_primary_recover_nonce"`
-	NextOidcSessionNonce     uint64          `json:"next_oidc_session_nonce"`
-	NextPasskeySessionNonce  uint64          `json:"next_passkey_session_nonce"`
-	NextQuorumSessionNonce   uint64          `json:"next_quorum_session_nonce"`
-	InitAuthoritySlotHex     string          `json:"init_authority_slot_hex"`
-	OwnerSlotHex             string          `json:"owner_slot_hex"`
-	Rules                    []ruleStateJSON `json:"rules"`
+	ProgramID               string          `json:"program_id"`
+	EngineAddress           string          `json:"engine_address"`
+	DwalletAddress          string          `json:"dwallet_address"`
+	Version                 uint8           `json:"version"`
+	Paused                  bool            `json:"paused"`
+	RulesCount              uint8           `json:"rules_count"`
+	RulesGeneration         uint32          `json:"rules_generation"`
+	NextAdminNonce          uint64          `json:"next_admin_nonce"`
+	NextPrimaryRecoverNonce uint64          `json:"next_primary_recover_nonce"`
+	NextOidcSessionNonce    uint64          `json:"next_oidc_session_nonce"`
+	NextPasskeySessionNonce uint64          `json:"next_passkey_session_nonce"`
+	NextQuorumSessionNonce  uint64          `json:"next_quorum_session_nonce"`
+	InitAuthoritySlotHex    string          `json:"init_authority_slot_hex"`
+	OwnerSlotHex            string          `json:"owner_slot_hex"`
+	Rules                   []ruleStateJSON `json:"rules"`
 }
 
 func (s *Service) readPolicy(w http.ResponseWriter, r *http.Request) {

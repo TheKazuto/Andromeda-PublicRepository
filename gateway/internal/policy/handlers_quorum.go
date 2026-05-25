@@ -86,7 +86,7 @@ func (s *Service) deriveQuorum(in *quorumCommonInputs) (*quorumDerived, *httpErr
 	if err != nil {
 		return nil, &httpError{http.StatusBadRequest, "invalid_field", "destination_hex: " + err.Error()}
 	}
-	ikaPK, err := decodeHex(in.IkaDWalletPubkey)
+	ikaPK, err := hex.DecodeString(in.IkaDWalletPubkey)
 	if err != nil || len(ikaPK) == 0 || len(ikaPK) > 96 {
 		return nil, &httpError{http.StatusBadRequest, "invalid_field",
 			"ika_dwallet_pubkey_hex must be 1..96-byte hex (curve pubkey)"}

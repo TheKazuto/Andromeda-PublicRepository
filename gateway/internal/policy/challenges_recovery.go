@@ -30,11 +30,11 @@ var DomainRulesPolicyV2 = []byte("andromeda::rules-policy::v2")
 
 // OP tags for recovery operations (mirror of `contracts/auth/src/challenge.rs`).
 var (
-	OpTagPrimaryRecover       = []byte("primary-recover")
-	OpTagQuorumSessionOpen    = []byte("quorum-session-open")
-	OpTagQuorumContribute     = []byte("quorum-contribute")
-	OpTagPasskeySessionOpen   = []byte("passkey-session-open")
-	OpTagPasskeyPrimaryUse    = []byte("passkey-primary-use")
+	OpTagPrimaryRecover     = []byte("primary-recover")
+	OpTagQuorumSessionOpen  = []byte("quorum-session-open")
+	OpTagQuorumContribute   = []byte("quorum-contribute")
+	OpTagPasskeySessionOpen = []byte("passkey-session-open")
+	OpTagPasskeyPrimaryUse  = []byte("passkey-primary-use")
 )
 
 // MaxHumanMessageBytes mirrors `andromeda_auth::human_message::MAX_HUMAN_MESSAGE_BYTES`.
@@ -396,12 +396,12 @@ func HumanMessagePasskeySessionOpen(
 // (Secp256r1 + WebAuthn) when opening a short-lived session bound to an
 // ephemeral Ed25519 key.
 type PasskeySessionOpenChallengeInput struct {
-	DWallet            solana.PublicKey
-	PrimarySlot        [MemberSlotLen]byte // SCHEME_WEBAUTHN(3) || credential_pubkey(33)
-	EphPk              [32]byte
-	NotAfterUnixTs     uint64
-	CredentialIDHash   [32]byte
-	SessionNonce       uint64
+	DWallet          solana.PublicKey
+	PrimarySlot      [MemberSlotLen]byte // SCHEME_WEBAUTHN(3) || credential_pubkey(33)
+	EphPk            [32]byte
+	NotAfterUnixTs   uint64
+	CredentialIDHash [32]byte
+	SessionNonce     uint64
 }
 
 func (in *PasskeySessionOpenChallengeInput) Preimage() ([]byte, error) {

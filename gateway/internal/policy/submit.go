@@ -2,7 +2,9 @@ package policy
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -14,10 +16,12 @@ import (
 	"github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/rpc"
 	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
 
 	"github.com/shinkalabs/andromeda-gateway/internal/auth"
 	"github.com/shinkalabs/andromeda-gateway/internal/gasponsor"
 	"github.com/shinkalabs/andromeda-gateway/internal/httpx"
+	"github.com/shinkalabs/andromeda-gateway/internal/risk"
 )
 
 // ServiceWithGasSponsor wires the gasponsor (used as fee payer for every
@@ -247,7 +251,7 @@ func (s *Service) addRuleAllowlistSubmit(w http.ResponseWriter, r *http.Request,
 	human := HumanMessageAllowlistPause(engine, dwallet)
 	gen := uint32(1) // first add — generation 0 → 1
 	var genLE [4]byte
-	binaryLittleEndianPutUint32Local(genLE[:], gen)
+	binary.LittleEndian.PutUint32(genLE[:], gen)
 	ch := &AdminChallengeInput{
 		OpTag:          OpAddAllowlist,
 		HumanMessage:   human,
@@ -329,7 +333,7 @@ func (s *Service) addRuleOracleSubmit(w http.ResponseWriter, r *http.Request, re
 	human := HumanMessageAllowlistPause(engine, dwallet)
 	gen := uint32(1) // first add — generation 0 → 1
 	var genLE [4]byte
-	binaryLittleEndianPutUint32Local(genLE[:], gen)
+	binary.LittleEndian.PutUint32(genLE[:], gen)
 	ch := &AdminChallengeInput{
 		OpTag:          OpAddOracle,
 		HumanMessage:   human,
@@ -456,7 +460,7 @@ func (s *Service) itemsAddAllowlistSubmit(w http.ResponseWriter, r *http.Request
 
 	human := HumanMessageAllowlistAddDestination(dest, engine, dwallet)
 	var genLE [4]byte
-	binaryLittleEndianPutUint32Local(genLE[:], req.RuleGeneration)
+	binary.LittleEndian.PutUint32(genLE[:], req.RuleGeneration)
 	ch := &AdminChallengeInput{
 		OpTag:          OpAllowlistAddDest,
 		HumanMessage:   human,
@@ -533,7 +537,7 @@ func (s *Service) itemsAddOracleSubmit(w http.ResponseWriter, r *http.Request, r
 
 	human := HumanMessageOracleAddFeed(feedAccount, feedOwner, req.MinQ64, req.MaxQ64, engine, dwallet)
 	var genLE [4]byte
-	binaryLittleEndianPutUint32Local(genLE[:], req.RuleGeneration)
+	binary.LittleEndian.PutUint32(genLE[:], req.RuleGeneration)
 	minLE, maxLE := int64LE(req.MinQ64), int64LE(req.MaxQ64)
 	fa, fo := feedAccount.Bytes(), feedOwner.Bytes()
 	ch := &AdminChallengeInput{
@@ -755,7 +759,7 @@ func (s *Service) assembleRequestSignatureIx(
 		ikaMetaDigest, _ = mustHex32(req.IkaMsgMetadataDigestHex)
 	}
 
-	ikaPK, err := decodeHex(req.IkaDWalletPubkey)
+	ikaPK, err := hex.DecodeString(req.IkaDWalletPubkey)
 	if err != nil || len(ikaPK) == 0 || len(ikaPK) > 96 {
 		return nil, zero, zero, nil, &buildError{http.StatusBadRequest, "invalid_field",
 			"ika_dwallet_pubkey_hex must be 1..96-byte hex (curve pubkey)"}
@@ -818,8 +822,13 @@ func (s *Service) assembleRequestSignatureIx(
 
 	// `caller_program` must NOT equal `program` in the account list (Quasar/SVM
 	// rejects AccountBorrowFailed when duplicated). Unique placeholder; the Ika
-	// mock ignores it and the real Ika does not validate it semantically.
-	callerProgram := solana.NewWallet().PublicKey()
+	// mock ignores it and the real Ika does not validate it semantically — so 32
+	// random bytes suffice (no ed25519 keypair derivation needed on this path).
+	var callerProgramBytes [32]byte
+	if _, err := rand.Read(callerProgramBytes[:]); err != nil {
+		return nil, zero, zero, nil, &buildError{http.StatusInternalServerError, "internal", "entropy failure"}
+	}
+	callerProgram := solana.PublicKeyFromBytes(callerProgramBytes[:])
 
 	mainIx, err := RequestSignature(RequestSignatureParams{
 		ProgramID:            s.ProgramID,
@@ -1004,41 +1013,6 @@ func serializeInstruction(ix solana.Instruction) (instructionJSON, error) {
 	return out, nil
 }
 
-func decodeHex(s string) ([]byte, error) {
-	if len(s)%2 != 0 {
-		return nil, fmt.Errorf("hex length must be even")
-	}
-	out := make([]byte, len(s)/2)
-	for i := 0; i < len(out); i++ {
-		var b [2]byte
-		b[0] = s[i*2]
-		b[1] = s[i*2+1]
-		var hi, lo byte
-		switch {
-		case b[0] >= '0' && b[0] <= '9':
-			hi = b[0] - '0'
-		case b[0] >= 'a' && b[0] <= 'f':
-			hi = b[0] - 'a' + 10
-		case b[0] >= 'A' && b[0] <= 'F':
-			hi = b[0] - 'A' + 10
-		default:
-			return nil, fmt.Errorf("invalid hex char %q", b[0])
-		}
-		switch {
-		case b[1] >= '0' && b[1] <= '9':
-			lo = b[1] - '0'
-		case b[1] >= 'a' && b[1] <= 'f':
-			lo = b[1] - 'a' + 10
-		case b[1] >= 'A' && b[1] <= 'F':
-			lo = b[1] - 'A' + 10
-		default:
-			return nil, fmt.Errorf("invalid hex char %q", b[1])
-		}
-		out[i] = hi<<4 | lo
-	}
-	return out, nil
-}
-
 // ─── precompile helper ──────────────────────────────────────────────────────
 
 // buildCredentialPrecompile is a thin wrapper around
@@ -1060,7 +1034,7 @@ func buildCredentialPrecompile(
 
 // evaluateRiskAdvisory is the helper behind the dedicated POST /v1/policy/risk/evaluate
 // endpoint. The signing flow (challenge/submit) does NOT call it — risk is an opt-in,
-// read-only tool. It evaluates transaction risk and returns advisory + simulation + digest_verified.
+// read-only tool. It evaluates transaction risk and returns advisory + simulation + digest_verified
 // (best-effort, never blocks). Parameters:
 //   - rawTxB64: base64-encoded transaction (optional)
 //   - chainID: CAIP-2 chain identifier (optional, paired with rawTxB64)
@@ -1069,141 +1043,119 @@ func buildCredentialPrecompile(
 //   - rpcURL: destination-chain RPC the client funds (optional; enables real EVM simulation; SSRF-checked in ika-backend)
 //   - dwallet: dWallet public key (can be zero if not provided)
 //
-// Returns (advisory, simulation, digestVerified). Both advisory and error are always nil
-// (best-effort); on errors the function logs and returns nil advisory, nil simulation, false.
+// Returns (advisory, simulation, digestVerified). On any best-effort failure it
+// logs and returns a nil advisory with whatever simulation it managed to fetch.
 func (s *Service) evaluateRiskAdvisory(ctx context.Context, r *http.Request,
 	rawTxB64, chainID, destinationHex, expectedDigestHex, rpcURL string, dwallet solana.PublicKey,
-) (*riskAdvisory, interface{}, bool) {
-	if s.riskService == nil {
-		return nil, nil, false // risk service not configured
-	}
-
-	// Parse the raw transaction and call ika-backend simulate endpoint if provided.
-	var simulationResult interface{}
-	var calldataRisk interface{}
-	digestVerified := false
-
+) (*riskAdvisory, json.RawMessage, bool) {
+	var payloadHex string
 	if rawTxB64 != "" {
-		// Decode base64 raw_transaction.
 		txBytes, err := base64.StdEncoding.DecodeString(rawTxB64)
 		if err != nil {
-			// Client sent invalid base64; best-effort: log and proceed without simulation.
 			slog.Warn("evaluateRiskAdvisory: invalid raw_transaction base64", "dwallet", dwallet.String(), "err", err)
 			return nil, nil, false
 		}
-
-		// Call internal ika-backend simulate endpoint to verify digest matches.
-		// This guards against the client trying to submit a different transaction
-		// than what they requested a digest for.
-		if s.ikaSimulateClient != nil {
-			simReq := map[string]interface{}{
-				"chain_id":               chainID,
-				"payload_hex":            hex.EncodeToString(txBytes),
-				"kind":                   "transaction",
-				"expected_digest_hex":    expectedDigestHex,
-				"dwallet_public_key_hex": dwallet.String(),
-			}
-			// Forward the client-funded RPC for real (EVM) simulation; ika-backend
-			// validates it against SSRF before any outbound call.
-			if rpcURL != "" {
-				simReq["rpc_url"] = rpcURL
-			}
-
-			simResp, err := s.ikaSimulateClient.SimulateTransaction(ctx, simReq)
-			if err != nil {
-				// Digest verification failed; return advisory but proceed (not a blocker).
-				slog.Warn("evaluateRiskAdvisory: digest verification failed", "dwallet", dwallet.String(), "err", err)
-				return &riskAdvisory{
-					Level:   "high",
-					Reasons: []string{"transaction could not be verified (digest mismatch); proceeding without simulation"},
-				}, nil, false
-			}
-
-			// Check the response for digest match and extract simulation data.
-			if respMap, ok := simResp.(map[string]interface{}); ok {
-				if digestMatches, ok := respMap["digest_matches"].(bool); ok {
-					if !digestMatches {
-						// Digest does not match; return advisory but proceed (not a blocker).
-						return &riskAdvisory{
-							Level:   "high",
-							Reasons: []string{"transaction could not be verified (digest mismatch); proceeding without simulation"},
-						}, nil, false
-					}
-					digestVerified = true // digest matched
-				}
-
-				// Extract simulation and calldata risk (optional fields) from response.
-				if sim, ok := respMap["simulation"]; ok {
-					simulationResult = sim
-				}
-				if cdRisk, ok := respMap["calldata_risk"]; ok {
-					calldataRisk = cdRisk
-				}
-			}
-		}
+		payloadHex = hex.EncodeToString(txBytes)
 	}
-
-	// Resolve tenant_id from the authenticated request context.
 	var tenantID string
 	if s.tenantResolver != nil {
 		if tid, err := s.tenantResolver(r); err == nil && tid != "" {
 			tenantID = tid
 		}
 	}
-
-	// Extract request_id from middleware context if available.
-	var requestID string
-	if reqIDVal := r.Context().Value("request_id"); reqIDVal != nil {
-		if rid, ok := reqIDVal.(string); ok {
-			requestID = rid
-		}
-	}
-
-	// Construct the EvaluateInput for risk.Service.
-	evalInput := map[string]interface{}{
-		"dwallet_address": dwallet.String(),
-		"destination":     destinationHex,
-		"tenant_id":       tenantID,
-		"request_id":      requestID,
-		"simulation":      simulationResult,
-		"calldata_risk":   calldataRisk,
-	}
-
-	// Evaluate risk using the risk service.
-	// Risk service returns (*Score, error) — we convert to riskAdvisory.
-	scoreResp, err := s.riskService.Evaluate(ctx, evalInput)
-	if err != nil {
-		// Best-effort: on error, proceed without advisory.
-		slog.Warn("evaluateRiskAdvisory: risk evaluation error (proceeding)", "dwallet", dwallet.String(), "err", err)
-		return nil, simulationResult, digestVerified
-	}
-
-	if scoreResp == nil {
-		return nil, simulationResult, digestVerified
-	}
-
-	// Convert map[string]interface{} to riskAdvisory (only attach if level != "none").
-	scoreMap, ok := scoreResp.(map[string]interface{})
-	if !ok {
-		return nil, simulationResult, digestVerified
-	}
-
-	levelVal, ok := scoreMap["level"].(string)
-	if !ok || levelVal == "none" {
-		return nil, simulationResult, digestVerified
-	}
-
-	var reasons []string
-	if reasonsVal, ok := scoreMap["reasons"].([]string); ok {
-		reasons = reasonsVal
-	}
-
-	return &riskAdvisory{
-		Level:   levelVal,
-		Reasons: reasons,
-	}, simulationResult, digestVerified
+	return s.evaluateRiskAdvisoryCore(ctx, tenantID, middleware.GetReqID(r.Context()),
+		payloadHex, chainID, destinationHex, expectedDigestHex, rpcURL, dwallet.String(), dwallet)
 }
 
-// Avoid an unused-import warning when context is referenced only by the
-// closures above.
-var _ = context.Background
+// evaluateRiskAdvisoryCore is the *http.Request-free core: callers pass the
+// already-hex payload + tenant + request id. simDWalletPubkeyHex is the value
+// forwarded to the simulator (used to derive the EVM sender); dwallet is the
+// base58 identity used for risk scoring. Shared by the HTTP path and the
+// server-side intents orchestrator (EvaluateSwapRisk).
+func (s *Service) evaluateRiskAdvisoryCore(ctx context.Context, tenantID, requestID,
+	payloadHex, chainID, destinationHex, expectedDigestHex, rpcURL, simDWalletPubkeyHex string, dwallet solana.PublicKey,
+) (*riskAdvisory, json.RawMessage, bool) {
+	if s.riskService == nil {
+		return nil, nil, false
+	}
+
+	var simulation json.RawMessage
+	digestVerified := false
+
+	if payloadHex != "" && s.ikaSimulateClient != nil {
+		simResp, err := s.ikaSimulateClient.SimulateTransaction(ctx, &SimulateTransactionRequest{
+			ChainID:             chainID,
+			PayloadHex:          payloadHex,
+			Kind:                "transaction",
+			ExpectedDigestHex:   expectedDigestHex,
+			DWalletPublicKeyHex: simDWalletPubkeyHex,
+			RPCURL:              rpcURL,
+		})
+		if err != nil || !simResp.DigestMatches {
+			if err != nil {
+				slog.Warn("evaluateRiskAdvisory: digest verification failed", "dwallet", dwallet.String(), "err", err)
+			}
+			return &riskAdvisory{
+				Level:   "high",
+				Reasons: []string{"transaction could not be verified (digest mismatch); proceeding without simulation"},
+			}, nil, false
+		}
+		digestVerified = true
+		simulation = simResp.Simulation
+	}
+
+	score, err := s.riskService.Evaluate(ctx, &risk.EvaluateInput{
+		DWalletAddress: dwallet.String(),
+		Destination:    destinationHex,
+		TenantID:       tenantID,
+		RequestID:      requestID,
+	})
+	if err != nil {
+		slog.Warn("evaluateRiskAdvisory: risk evaluation error (proceeding)", "dwallet", dwallet.String(), "err", err)
+		return nil, simulation, digestVerified
+	}
+	if score == nil || score.Level == "none" {
+		return nil, simulation, digestVerified
+	}
+	return &riskAdvisory{Level: score.Level, Reasons: score.Reasons}, simulation, digestVerified
+}
+
+// SwapRiskInput is the server-side risk request for an intents swap.
+type SwapRiskInput struct {
+	PayloadHex          string // the signing message hex (preprocessedHex), so the digest check matches
+	ChainID             string // CAIP-2
+	DestinationHex      string
+	MessageDigestHex    string // keccak256(payload); expected by the simulator
+	RPCURL              string
+	DWalletAddress      string // base58 Ika dWallet (risk scoring identity)
+	DWalletPublicKeyHex string // curve pubkey hex (lets the EVM simulator derive the sender)
+	TenantID            string
+}
+
+// EvaluateSwapRisk runs the advisory risk + simulation for a swap and returns a
+// JSON snapshot to persist (risk_snapshot). Advisory-only: it never blocks and
+// never returns an error — on any failure it returns a valid empty object.
+func (s *Service) EvaluateSwapRisk(ctx context.Context, in SwapRiskInput) json.RawMessage {
+	empty := json.RawMessage(`{}`)
+	if s.riskService == nil {
+		return empty
+	}
+	var dwallet solana.PublicKey
+	if in.DWalletAddress != "" {
+		dwallet, _ = solana.PublicKeyFromBase58(in.DWalletAddress)
+	}
+	advisory, simulation, digestVerified := s.evaluateRiskAdvisoryCore(
+		ctx, in.TenantID, "", in.PayloadHex, in.ChainID, in.DestinationHex, in.MessageDigestHex, in.RPCURL, in.DWalletPublicKeyHex, dwallet)
+	snap := map[string]any{"digestVerified": digestVerified}
+	if advisory != nil {
+		snap["risk"] = advisory
+	}
+	if len(simulation) > 0 {
+		snap["simulation"] = simulation
+	}
+	b, err := json.Marshal(snap)
+	if err != nil {
+		return empty
+	}
+	return b
+}

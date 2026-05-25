@@ -32,21 +32,21 @@ func TestDecodePolicyEngine_RoundTrip(t *testing.T) {
 	copy(buf[2:34], dwallet[:])
 	copy(buf[34:68], initSlot[:])
 	copy(buf[68:102], ownerSlot[:])
-	binary.LittleEndian.PutUint64(buf[102:110], 7)  // next_admin_nonce
-	binary.LittleEndian.PutUint64(buf[110:118], 0)  // next_primary_recover
+	binary.LittleEndian.PutUint64(buf[102:110], 7) // next_admin_nonce
+	binary.LittleEndian.PutUint64(buf[110:118], 0) // next_primary_recover
 	binary.LittleEndian.PutUint64(buf[118:126], 0)
 	binary.LittleEndian.PutUint64(buf[126:134], 0)
 	binary.LittleEndian.PutUint64(buf[134:142], 0)
-	buf[142] = 0                                                                   // paused
-	buf[143] = 1                                                                   // rules_count
-	binary.LittleEndian.PutUint32(buf[144:148], 2)                                  // rules_generation
+	buf[142] = 0                                   // paused
+	buf[143] = 1                                   // rules_count
+	binary.LittleEndian.PutUint32(buf[144:148], 2) // rules_generation
 	// pad 148..154
 	// RuleEntry[0] starts at 154.
 	off := 154
 	buf[off+0] = uint8(KindAllowlist)
-	buf[off+1] = 254 // bump
-	buf[off+2] = 1   // version
-	buf[off+3] = 1   // enabled
+	buf[off+1] = 254                                   // bump
+	buf[off+2] = 1                                     // version
+	buf[off+3] = 1                                     // enabled
 	binary.LittleEndian.PutUint32(buf[off+4:off+8], 1) // generation
 	var fakePDA solana.PublicKey
 	for i := range fakePDA {
@@ -108,8 +108,8 @@ func TestDecodeAllowlistRule_RoundTrip(t *testing.T) {
 	buf := make([]byte, allowlistRuleMinBytes)
 	buf[0] = 2 // disc
 	buf[1] = uint8(KindAllowlist)
-	buf[2] = 0    // index
-	buf[3] = 1    // enabled
+	buf[2] = 0 // index
+	buf[3] = 1 // enabled
 	// pad0 at buf[4]
 	binary.LittleEndian.PutUint32(buf[5:9], 3)  // generation
 	binary.LittleEndian.PutUint32(buf[9:13], 1) // config_version

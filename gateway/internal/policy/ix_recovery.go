@@ -9,11 +9,11 @@ import (
 
 // Discriminators for F9a (RecoveryRule lifecycle + recover_as_primary path).
 const (
-	DiscRecoverAsPrimary                  uint8 = 80
-	DiscUpdateRecoveryAddMember           uint8 = 130
-	DiscUpdateRecoveryRemoveMember        uint8 = 131
-	DiscUpdateRecoveryAddDestination      uint8 = 132
-	DiscUpdateRecoveryRemoveDestination   uint8 = 133
+	DiscRecoverAsPrimary                uint8 = 80
+	DiscUpdateRecoveryAddMember         uint8 = 130
+	DiscUpdateRecoveryRemoveMember      uint8 = 131
+	DiscUpdateRecoveryAddDestination    uint8 = 132
+	DiscUpdateRecoveryRemoveDestination uint8 = 133
 )
 
 // Recovery rule sizing caps (mirror lib.rs).
@@ -192,26 +192,26 @@ func buildRecoveryDestinationIx(
 // RecoverAsPrimaryParams — disc 80. Primary keypair signs an Ika
 // approve_message off-chain; this builder packs the on-chain call.
 type RecoverAsPrimaryParams struct {
-	ProgramID              solana.PublicKey
-	Engine                 solana.PublicKey
-	DWallet                solana.PublicKey
-	Coordinator            solana.PublicKey
-	MessageApproval        solana.PublicKey
-	Payer                  solana.PublicKey
-	CPIAuthority           solana.PublicKey
-	CallerProgram          solana.PublicKey
-	DWalletProgram         solana.PublicKey
-	InitAuthorityHash      [32]byte
-	RuleIndex              uint8
-	MessageDigest          [32]byte
-	MetadataDigest         [32]byte
-	UserPubkey             [32]byte
-	SignatureScheme        uint16
-	MessageApprovalBump    uint8
-	CPIAuthorityBump       uint8
-	Destination            [32]byte
-	ExpectedNonce          uint64
-	Amount                 uint64
+	ProgramID           solana.PublicKey
+	Engine              solana.PublicKey
+	DWallet             solana.PublicKey
+	Coordinator         solana.PublicKey
+	MessageApproval     solana.PublicKey
+	Payer               solana.PublicKey
+	CPIAuthority        solana.PublicKey
+	CallerProgram       solana.PublicKey
+	DWalletProgram      solana.PublicKey
+	InitAuthorityHash   [32]byte
+	RuleIndex           uint8
+	MessageDigest       [32]byte
+	MetadataDigest      [32]byte
+	UserPubkey          [32]byte
+	SignatureScheme     uint16
+	MessageApprovalBump uint8
+	CPIAuthorityBump    uint8
+	Destination         [32]byte
+	ExpectedNonce       uint64
+	Amount              uint64
 }
 
 func RecoverAsPrimary(p RecoverAsPrimaryParams) (solana.Instruction, error) {

@@ -29,18 +29,18 @@ const SessionMaxDestinations = 8
 //
 // AppliesTo MUST equal AppliesSession (=4). Other masks are rejected on-chain.
 type AddRuleSessionKeyParams struct {
-	ProgramID                solana.PublicKey
-	Engine                   solana.PublicKey
-	DWallet                  solana.PublicKey
-	Payer                    solana.PublicKey
-	InitAuthorityHash        [32]byte
-	ExpectedNonce            uint64
-	RuleIndex                uint8
-	AppliesTo                uint8
-	MaxSessions              uint8
-	DefaultTTLSeconds        uint64
-	DefaultMaxUses           uint32
-	SessionMaxAmountPerTx    uint64
+	ProgramID             solana.PublicKey
+	Engine                solana.PublicKey
+	DWallet               solana.PublicKey
+	Payer                 solana.PublicKey
+	InitAuthorityHash     [32]byte
+	ExpectedNonce         uint64
+	RuleIndex             uint8
+	AppliesTo             uint8
+	MaxSessions           uint8
+	DefaultTTLSeconds     uint64
+	DefaultMaxUses        uint32
+	SessionMaxAmountPerTx uint64
 }
 
 func AddRuleSessionKey(p AddRuleSessionKeyParams) (solana.Instruction, error) {
@@ -178,26 +178,26 @@ func SessionOpen(p SessionOpenParams) (solana.Instruction, error) {
 // `SessionSigner` MUST be the keypair recorded at `session_open`. The
 // session keypair signs natively here; the gas sponsor (Payer) covers fees.
 type RequestSignatureViaSessionParams struct {
-	ProgramID                solana.PublicKey
-	Engine                   solana.PublicKey
-	DWallet                  solana.PublicKey
-	Coordinator              solana.PublicKey
-	MessageApproval          solana.PublicKey
-	Payer                    solana.PublicKey
-	CPIAuthority             solana.PublicKey
-	CallerProgram            solana.PublicKey
-	DWalletProgram           solana.PublicKey
-	SessionSigner            solana.PublicKey
-	InitAuthorityHash        [32]byte
-	SessionIndex             uint32
-	MessageDigest            [32]byte
-	MetadataDigest           [32]byte
-	UserPubkey               [32]byte
-	SignatureScheme          uint16
-	MessageApprovalBump      uint8
-	CPIAuthorityBump         uint8
-	Destination              [32]byte
-	ExpectedSignatureNonce   uint64
+	ProgramID              solana.PublicKey
+	Engine                 solana.PublicKey
+	DWallet                solana.PublicKey
+	Coordinator            solana.PublicKey
+	MessageApproval        solana.PublicKey
+	Payer                  solana.PublicKey
+	CPIAuthority           solana.PublicKey
+	CallerProgram          solana.PublicKey
+	DWalletProgram         solana.PublicKey
+	SessionSigner          solana.PublicKey
+	InitAuthorityHash      [32]byte
+	SessionIndex           uint32
+	MessageDigest          [32]byte
+	MetadataDigest         [32]byte
+	UserPubkey             [32]byte
+	SignatureScheme        uint16
+	MessageApprovalBump    uint8
+	CPIAuthorityBump       uint8
+	Destination            [32]byte
+	ExpectedSignatureNonce uint64
 }
 
 func RequestSignatureViaSession(p RequestSignatureViaSessionParams) (solana.Instruction, error) {

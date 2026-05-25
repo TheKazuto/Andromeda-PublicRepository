@@ -9,6 +9,8 @@ import (
 
 	"github.com/gagliardetto/solana-go"
 	"github.com/go-chi/chi/v5"
+
+	"github.com/shinkalabs/andromeda-gateway/internal/risk"
 )
 
 // TestResolveTenantID verifies that resolveTenantID uses the wired tenantResolver.
@@ -135,11 +137,11 @@ func TestGetRiskConfigWithoutTenantResolver(t *testing.T) {
 // Mock implementation of RiskConfigService for testing.
 type mockRiskConfigService struct{}
 
-func (m *mockRiskConfigService) UpsertDWalletConfig(ctx context.Context, dwalletAddress, tenantID, warnLevel string, simulationEnabled bool) (interface{}, error) {
+func (m *mockRiskConfigService) UpsertDWalletConfig(ctx context.Context, dwalletAddress, tenantID, warnLevel string, simulationEnabled bool) (*risk.RiskConfig, error) {
 	return nil, nil
 }
 
-func (m *mockRiskConfigService) GetDWalletConfig(ctx context.Context, dwalletAddress string) (interface{}, error) {
+func (m *mockRiskConfigService) GetDWalletConfig(ctx context.Context, dwalletAddress string) (*risk.RiskConfig, error) {
 	return nil, nil
 }
 
@@ -147,11 +149,11 @@ func (m *mockRiskConfigService) DeleteDWalletConfig(ctx context.Context, dwallet
 	return nil
 }
 
-func (m *mockRiskConfigService) UpsertTenantDefaults(ctx context.Context, tenantID, warnLevel string) (interface{}, error) {
+func (m *mockRiskConfigService) UpsertTenantDefaults(ctx context.Context, tenantID, warnLevel string) (*risk.RiskTenantDefaults, error) {
 	return nil, nil
 }
 
-func (m *mockRiskConfigService) GetTenantDefaults(ctx context.Context, tenantID string) (interface{}, error) {
+func (m *mockRiskConfigService) GetTenantDefaults(ctx context.Context, tenantID string) (*risk.RiskTenantDefaults, error) {
 	return nil, nil
 }
 
