@@ -113,7 +113,7 @@ const EO_PROPOSED_AT: usize = 368; // 8   i64 LE
 const EO_VALID_FROM: usize = 376; // 8   i64 LE
 const EO_VALID_UNTIL: usize = 384; // 8   i64 LE
 const EO_REVOKED_AT: usize = 392; // 8   i64 LE
-// 392 + 8 = 400 == JWK_ENTRY_LEN
+                                  // 392 + 8 = 400 == JWK_ENTRY_LEN
 
 const ZERO_ADDRESS: Address = Address::new_from_array([0u8; 32]);
 
@@ -219,8 +219,13 @@ mod andromeda_jwk_registry {
         valid_until_ts: i64,
     ) -> Result<(), ProgramError> {
         let current_ts: i64 = ctx.accounts.clock.unix_timestamp.into();
-        ctx.accounts
-            .activate(&issuer_hash, &audience_hash, &kid_hash, valid_until_ts, current_ts)?;
+        ctx.accounts.activate(
+            &issuer_hash,
+            &audience_hash,
+            &kid_hash,
+            valid_until_ts,
+            current_ts,
+        )?;
         let registry = *ctx.accounts.registry.address();
         ctx.accounts.program.emit_event(
             &JwkActivated {
@@ -616,7 +621,12 @@ fn entry_status(entries: &[u8; ENTRIES_BYTES], idx: usize) -> u8 {
 }
 
 #[inline]
-fn entry_field<'a>(entries: &'a [u8; ENTRIES_BYTES], idx: usize, off: usize, len: usize) -> &'a [u8] {
+fn entry_field<'a>(
+    entries: &'a [u8; ENTRIES_BYTES],
+    idx: usize,
+    off: usize,
+    len: usize,
+) -> &'a [u8] {
     let base = idx * JWK_ENTRY_LEN;
     &entries[base + off..base + off + len]
 }
@@ -755,7 +765,11 @@ fn set_entry_i64(entries: &mut [u8; ENTRIES_BYTES], idx: usize, off: usize, v: i
 }
 
 /// Strict RSA-2048 / RS256 profile check (mirrored by `contracts/oidc-verifier`).
-fn validate_rsa_profile(alg: u8, modulus_n: &[u8; MODULUS_LEN], exponent_e: u32) -> Result<(), ProgramError> {
+fn validate_rsa_profile(
+    alg: u8,
+    modulus_n: &[u8; MODULUS_LEN],
+    exponent_e: u32,
+) -> Result<(), ProgramError> {
     require!(alg == ALG_RS256, JwkRegistryError::UnsupportedAlg);
     // Top bit set ⇒ a full 2048-bit modulus (not a shorter number left-padded
     // with zeros); odd ⇒ a real RSA modulus.
@@ -763,7 +777,10 @@ fn validate_rsa_profile(alg: u8, modulus_n: &[u8; MODULUS_LEN], exponent_e: u32)
         modulus_n[0] & 0x80 != 0 && modulus_n[MODULUS_LEN - 1] & 1 == 1,
         JwkRegistryError::InvalidModulus
     );
-    require!(exponent_e == RSA_EXPONENT, JwkRegistryError::InvalidExponent);
+    require!(
+        exponent_e == RSA_EXPONENT,
+        JwkRegistryError::InvalidExponent
+    );
     Ok(())
 }
 
@@ -889,27 +906,29 @@ impl AuthorityAction {
                 iss,
                 aud,
                 kid,
-                &[STATUS_PENDING, STATUS_ACTIVE, STATUS_REVOKED, STATUS_EXPIRED]
+                &[
+                    STATUS_PENDING,
+                    STATUS_ACTIVE,
+                    STATUS_REVOKED,
+                    STATUS_EXPIRED
+                ]
             )
             .is_none(),
             JwkRegistryError::JwkAlreadyExists
         );
         let grace_post_revoke = u64_to_i64(self.registry.grace_period_post_revoke_seconds.into());
-        let (idx, was_empty) = match find_writable_slot(
-            &self.registry.entries_flat,
-            current_ts,
-            grace_post_revoke,
-        ) {
-            WritableSlot::Empty(i) => (i, true),
-            WritableSlot::Expired(i) | WritableSlot::Revoked(i) => (i, false),
-            WritableSlot::None { revoked_blocked } => {
-                return Err(if revoked_blocked {
-                    JwkRegistryError::RevokeGraceNotElapsed.into()
-                } else {
-                    JwkRegistryError::RegistryFull.into()
-                });
-            }
-        };
+        let (idx, was_empty) =
+            match find_writable_slot(&self.registry.entries_flat, current_ts, grace_post_revoke) {
+                WritableSlot::Empty(i) => (i, true),
+                WritableSlot::Expired(i) | WritableSlot::Revoked(i) => (i, false),
+                WritableSlot::None { revoked_blocked } => {
+                    return Err(if revoked_blocked {
+                        JwkRegistryError::RevokeGraceNotElapsed.into()
+                    } else {
+                        JwkRegistryError::RegistryFull.into()
+                    });
+                }
+            };
         write_entry(
             &mut self.registry.entries_flat,
             idx,
@@ -945,17 +964,38 @@ impl AuthorityAction {
                 && valid_until_ts.saturating_sub(current_ts) <= MAX_VALIDITY_SECONDS,
             JwkRegistryError::InvalidValidity
         );
-        let idx = find_slot(&self.registry.entries_flat, iss, aud, kid, &[STATUS_PENDING])
-            .ok_or(JwkRegistryError::JwkNotPending)?;
-        let proposed_at = read_i64(entry_field(&self.registry.entries_flat, idx, EO_PROPOSED_AT, 8));
+        let idx = find_slot(
+            &self.registry.entries_flat,
+            iss,
+            aud,
+            kid,
+            &[STATUS_PENDING],
+        )
+        .ok_or(JwkRegistryError::JwkNotPending)?;
+        let proposed_at = read_i64(entry_field(
+            &self.registry.entries_flat,
+            idx,
+            EO_PROPOSED_AT,
+            8,
+        ));
         let timelock = u64_to_i64(self.registry.timelock_seconds.into());
         require!(
             current_ts >= proposed_at.saturating_add(timelock),
             JwkRegistryError::TimelockNotElapsed
         );
         set_entry_status(&mut self.registry.entries_flat, idx, STATUS_ACTIVE);
-        set_entry_i64(&mut self.registry.entries_flat, idx, EO_VALID_FROM, current_ts);
-        set_entry_i64(&mut self.registry.entries_flat, idx, EO_VALID_UNTIL, valid_until_ts);
+        set_entry_i64(
+            &mut self.registry.entries_flat,
+            idx,
+            EO_VALID_FROM,
+            current_ts,
+        );
+        set_entry_i64(
+            &mut self.registry.entries_flat,
+            idx,
+            EO_VALID_UNTIL,
+            valid_until_ts,
+        );
         Ok(())
     }
 
@@ -973,7 +1013,10 @@ impl AuthorityAction {
         current_ts: i64,
     ) -> Result<(), ProgramError> {
         self.require_authority()?;
-        require!(self.registry.entry_count == 0, JwkRegistryError::RegistryNotEmpty);
+        require!(
+            self.registry.entry_count == 0,
+            JwkRegistryError::RegistryNotEmpty
+        );
         validate_rsa_profile(alg, modulus_n, exponent_e)?;
         require!(
             valid_until_ts > current_ts
@@ -1000,7 +1043,12 @@ impl AuthorityAction {
     }
 
     #[inline(always)]
-    pub fn rotate(&mut self, role: u8, new_key: Address, current_ts: i64) -> Result<i64, ProgramError> {
+    pub fn rotate(
+        &mut self,
+        role: u8,
+        new_key: Address,
+        current_ts: i64,
+    ) -> Result<i64, ProgramError> {
         self.require_authority()?;
         validate_role(role)?;
         require!(new_key != ZERO_ADDRESS, JwkRegistryError::InvalidKey);
@@ -1021,8 +1069,7 @@ impl AuthorityAction {
         } else {
             // H4 audit fix (2026-05-16): symmetric guard for emergency revoker.
             require!(
-                new_key != self.registry.authority
-                    && new_key != self.registry.pending_authority,
+                new_key != self.registry.authority && new_key != self.registry.pending_authority,
                 JwkRegistryError::InvalidKey
             );
             self.registry.pending_emergency_revoker = new_key;
@@ -1096,7 +1143,12 @@ impl RevokerAction {
         )
         .ok_or(JwkRegistryError::JwkNotRevocable)?;
         set_entry_status(&mut self.registry.entries_flat, idx, STATUS_REVOKED);
-        set_entry_i64(&mut self.registry.entries_flat, idx, EO_REVOKED_AT, current_ts);
+        set_entry_i64(
+            &mut self.registry.entries_flat,
+            idx,
+            EO_REVOKED_AT,
+            current_ts,
+        );
         Ok(())
     }
 }
@@ -1128,7 +1180,12 @@ impl PermissionlessAction {
     ) -> Result<(), ProgramError> {
         let idx = find_slot(&self.registry.entries_flat, iss, aud, kid, &[STATUS_ACTIVE])
             .ok_or(JwkRegistryError::JwkNotExpirable)?;
-        let valid_until = read_i64(entry_field(&self.registry.entries_flat, idx, EO_VALID_UNTIL, 8));
+        let valid_until = read_i64(entry_field(
+            &self.registry.entries_flat,
+            idx,
+            EO_VALID_UNTIL,
+            8,
+        ));
         let grace = u64_to_i64(self.registry.grace_period_seconds.into());
         require!(
             current_ts > valid_until.saturating_add(grace),
@@ -1139,7 +1196,11 @@ impl PermissionlessAction {
     }
 
     #[inline(always)]
-    pub fn activate_rotation(&mut self, role: u8, current_ts: i64) -> Result<Address, ProgramError> {
+    pub fn activate_rotation(
+        &mut self,
+        role: u8,
+        current_ts: i64,
+    ) -> Result<Address, ProgramError> {
         validate_role(role)?;
         if role == ROLE_AUTHORITY {
             let pending = self.registry.pending_authority;
@@ -1166,8 +1227,7 @@ impl PermissionlessAction {
             require!(current_ts >= ready_at, JwkRegistryError::TimelockNotElapsed);
             // H4 audit fix (2026-05-16): symmetric guard.
             require!(
-                pending != self.registry.authority
-                    && pending != self.registry.pending_authority,
+                pending != self.registry.authority && pending != self.registry.pending_authority,
                 JwkRegistryError::InvalidKey
             );
             self.registry.emergency_revoker = pending;
