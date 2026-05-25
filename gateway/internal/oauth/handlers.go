@@ -65,15 +65,15 @@ type TenantInfo struct {
 
 // HandlerOptions wires the handlers to the rest of the gateway.
 type HandlerOptions struct {
-	BaseURL           string                 // OAuthBrokerConfig.BaseURL
-	StateHMACSecret   []byte                 // OAuthBrokerConfig.StateHMACSecret
-	IsProduction      bool                   // cfg.IsProduction()
-	Providers         map[ProviderName]Provider
-	Store             *Store
-	Allowlist         RedirectAllowlist
-	Audit             AuditAppender
-	Logger            *slog.Logger
-	AuthFromRequest   func(*http.Request) (TenantInfo, bool)
+	BaseURL         string // OAuthBrokerConfig.BaseURL
+	StateHMACSecret []byte // OAuthBrokerConfig.StateHMACSecret
+	IsProduction    bool   // cfg.IsProduction()
+	Providers       map[ProviderName]Provider
+	Store           *Store
+	Allowlist       RedirectAllowlist
+	Audit           AuditAppender
+	Logger          *slog.Logger
+	AuthFromRequest func(*http.Request) (TenantInfo, bool)
 }
 
 // Handler bundles the three routes behind helpers that share the same opts.
@@ -129,12 +129,13 @@ func (h *Handler) audit(ctx context.Context, ev AuditEvent) {
 // --- GET /v1/oauth/authorize ---------------------------------------------
 
 // Authorize handler. The browser arrives with:
-//   provider=google|apple
-//   redirect_uri        — exact match against tenant_oauth_redirects
-//   app_state           — opaque, echoed back to tenant app on success
-//   code_challenge      — PKCE S256 challenge (base64url, 43 chars)
-//   code_challenge_method=S256
-//   nonce               — the oidc_nonce already obtained from /v1/oidc/nonce
+//
+//	provider=google|apple
+//	redirect_uri        — exact match against tenant_oauth_redirects
+//	app_state           — opaque, echoed back to tenant app on success
+//	code_challenge      — PKCE S256 challenge (base64url, 43 chars)
+//	code_challenge_method=S256
+//	nonce               — the oidc_nonce already obtained from /v1/oidc/nonce
 func (h *Handler) Authorize(w http.ResponseWriter, r *http.Request) {
 	tenant, ok := h.opts.AuthFromRequest(r)
 	if !ok {
@@ -223,10 +224,10 @@ func (h *Handler) Authorize(w http.ResponseWriter, r *http.Request) {
 
 // Callback handler. The provider redirects the browser back here with
 // `?code=…&state=…`. We:
-//   1. Verify the state cookie + that the query echo matches it.
-//   2. Exchange the provider's code for an id_token (server-side).
-//   3. Mint a 32-byte short_code, store {short_code → {id_token, pkce}} in Redis.
-//   4. Redirect the browser to the tenant's redirect_uri with the short_code.
+//  1. Verify the state cookie + that the query echo matches it.
+//  2. Exchange the provider's code for an id_token (server-side).
+//  3. Mint a 32-byte short_code, store {short_code → {id_token, pkce}} in Redis.
+//  4. Redirect the browser to the tenant's redirect_uri with the short_code.
 //
 // We never log the id_token. The cookie is cleared on the way out.
 func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
@@ -252,7 +253,7 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 		// Provider reported a failure (user denied consent, etc).
 		ClearStateCookie(w, h.opts.IsProduction)
 		h.audit(r.Context(), AuditEvent{
-			TenantID: claims.TenantID,
+			TenantID:  claims.TenantID,
 			EventType: "oauth.handshake.completed", Provider: claims.Provider,
 			Outcome: "rejected", Reason: "provider_error_" + errParam,
 		})
@@ -286,7 +287,7 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 		ClearStateCookie(w, h.opts.IsProduction)
 		h.opts.Logger.Warn("oauth: exchange code failed", "provider", claims.Provider, "err", err)
 		h.audit(r.Context(), AuditEvent{
-			TenantID: claims.TenantID,
+			TenantID:  claims.TenantID,
 			EventType: "oauth.handshake.completed", Provider: claims.Provider,
 			Outcome: "rejected", Reason: "provider_exchange_failed",
 		})
@@ -322,7 +323,7 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 	u.RawQuery = qv.Encode()
 
 	h.audit(r.Context(), AuditEvent{
-		TenantID: claims.TenantID,
+		TenantID:  claims.TenantID,
 		EventType: "oauth.handshake.completed", Provider: claims.Provider,
 		Outcome: "completed",
 	})
@@ -342,7 +343,9 @@ type tokenExchangeResponse struct {
 }
 
 // TokenExchange handler. The tenant app POSTs with X-Api-Key:
-//   { "code": "<short_code from /callback>", "code_verifier": "<PKCE verifier>" }
+//
+//	{ "code": "<short_code from /callback>", "code_verifier": "<PKCE verifier>" }
+//
 // We verify PKCE, atomically take-and-delete the entry from Redis, and return
 // the id_token. A code can be redeemed at most once.
 func (h *Handler) TokenExchange(w http.ResponseWriter, r *http.Request) {

@@ -24,18 +24,21 @@ const (
 )
 
 // resolveTrailingAccounts reads the on-chain PolicyEngine + each active rule
-// sub-PDA and returns the request_signature trailing accounts for PATH_NORMAL:
+// sub-PDA and returns the request_signature trailing accounts for the given
+// `path` (AppliesNormal for disc 1, AppliesSession for disc 101 / OIDC session):
 // one sub-PDA per active slot (in slot order) and, for each oracle slot that
-// applies to PATH_NORMAL, its FeedCache accounts. This mirrors the dispatch's
-// account consumption exactly — the on-chain handler asserts there are no
-// leftover remaining_accounts, so the resolution must be precise.
+// applies to `path`, its FeedCache accounts. This mirrors the shared on-chain
+// `dispatch_active_rules` consumption exactly — the handler asserts there are no
+// leftover remaining_accounts, so the resolution must be precise. Aux accounts
+// are only attached when the slot's `applies_to` mask includes `path` (the
+// dispatch skips enforcement, and thus aux consumption, for other paths).
 //
 // Passkey rules consume runtime aux (auth_data + cdj from the WebAuthn
 // assertion) that cannot be derived from chain. If an active passkey rule
-// applies to PATH_NORMAL, this returns an error so the caller supplies the
-// accounts manually instead.
+// applies to `path`, this returns an error so the caller supplies the accounts
+// manually instead.
 func (s *Service) resolveTrailingAccounts(
-	ctx context.Context, engine solana.PublicKey, assetIndex uint8,
+	ctx context.Context, engine solana.PublicKey, assetIndex uint8, path uint8,
 ) (rulePDAs []solana.PublicKey, ruleAux [][]solana.PublicKey, err error) {
 	acct, err := s.RPCClient.GetAccountInfoWithOpts(ctx, engine, &rpc.GetAccountInfoOpts{
 		Commitment: rpc.CommitmentConfirmed,
@@ -70,8 +73,8 @@ func (s *Service) resolveTrailingAccounts(
 				return nil, nil, fmt.Errorf("rule slot %d (oracle): %w", i, ferr)
 			}
 			// The dispatch only consumes oracle aux when the rule applies to
-			// PATH_NORMAL; otherwise the sub-PDA alone is consumed.
-			if applies&AppliesNormal != 0 {
+			// `path`; otherwise the sub-PDA alone is consumed.
+			if applies&path != 0 {
 				aux = feeds
 			}
 		case KindSpendingUsd:
@@ -82,7 +85,7 @@ func (s *Service) resolveTrailingAccounts(
 			if ferr != nil {
 				return nil, nil, fmt.Errorf("rule slot %d (spending): %w", i, ferr)
 			}
-			if applies&AppliesNormal != 0 {
+			if applies&path != 0 {
 				aux = []solana.PublicKey{feed}
 			}
 		case KindPasskey:
@@ -90,7 +93,7 @@ func (s *Service) resolveTrailingAccounts(
 			if perr != nil {
 				return nil, nil, fmt.Errorf("rule slot %d (passkey): %w", i, perr)
 			}
-			if applies&AppliesNormal != 0 {
+			if applies&path != 0 {
 				return nil, nil, fmt.Errorf(
 					"auto-resolve unsupported: active passkey rule in slot %d consumes runtime aux (auth_data + cdj); pass rule_pdas + rule_aux_accounts manually", i)
 			}

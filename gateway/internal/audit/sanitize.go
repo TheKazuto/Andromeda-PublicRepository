@@ -47,11 +47,11 @@ var globalAllowlist = map[string]struct{}{
 // v2 (admin actions on the 7 policies + rules-policy recovery / OIDC
 // flows). The renderer guarantees these values are safe to persist:
 //
-//   * `human_message` is plain ASCII (≤768 bytes) rendered from typed
+//   - `human_message` is plain ASCII (≤768 bytes) rendered from typed
 //     params — never caller-supplied.
-//   * `fields_hash_base64` is sha256 of RFC 8785 JCS canonical JSON of a
+//   - `fields_hash_base64` is sha256 of RFC 8785 JCS canonical JSON of a
 //     curated `fields` map (hashes, addresses, decimal numbers only).
-//   * The other three are constants / opaque hashes / op tags.
+//   - The other three are constants / opaque hashes / op tags.
 var clearSigningKeys = map[string]struct{}{
 	"clear_signing_version": {},
 	"operation":             {},

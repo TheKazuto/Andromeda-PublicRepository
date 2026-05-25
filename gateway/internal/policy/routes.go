@@ -262,6 +262,12 @@ func (s *Service) MountRoutes(r chi.Router) {
 	r.Post("/v1/policy/rules/{ruleIndex}/items/add/challenge", s.itemsAddChallenge)
 	r.Post("/v1/policy/rules/{ruleIndex}/items/add/submit", s.itemsAddSubmit)
 
+	// B1 audit fix (2026-05-25): remove an active rule (disc 110). Frees the
+	// slot so the same kind can be recreated; rent → recipient (bound in the
+	// owner challenge).
+	r.Post("/v1/policy/rules/{ruleIndex}/remove/challenge", s.removeRuleChallenge)
+	r.Post("/v1/policy/rules/{ruleIndex}/remove/submit", s.removeRuleSubmit)
+
 	r.Post("/v1/policy/request-signature/challenge", s.requestSignatureChallenge)
 	r.Post("/v1/policy/request-signature/submit", s.requestSignatureSubmit)
 	// On-demand (client-pays): returns the request_signature instruction for
@@ -815,6 +821,11 @@ type requestSignatureChallengeRequest struct {
 	// KIND_SPENDING_USD allowlist. Default 0/0 when no spending rule applies.
 	Amount     uint64 `json:"amount,omitempty"`
 	AssetIndex uint8  `json:"asset_index,omitempty" validate:"max=15"`
+	// Fase 1 (A1, 2026-05-25): the dWallet owner credential. REQUIRED for the
+	// NORMAL path (path=1) so the response also returns the owner-authorization
+	// challenge the owner signs (the gateway can no longer sign on its own).
+	// Optional for session/recovery paths (they authorize via their own flows).
+	OwnerSlot *memberSlotJSON `json:"owner_slot,omitempty"`
 }
 
 // riskAdvisory represents optional advisory information about transaction risk.
@@ -828,6 +839,12 @@ type requestSignatureChallengeResponse struct {
 	EngineAddress  string `json:"engine_address"`
 	MetadataDigest string `json:"metadata_digest_hex"`
 	PreimageHex    string `json:"preimage_hex"`
+	// Fase 1 (A1): for the NORMAL path, the owner signs this challenge (the
+	// gateway relays it as a precompile in the submit). The human message is the
+	// exact clear-signing text bound into the challenge.
+	OwnerAuthChallengeHex string `json:"owner_auth_challenge_hex,omitempty"`
+	OwnerAuthHumanMessage string `json:"owner_auth_human_message,omitempty"`
+	OwnerAuthPreimageHex  string `json:"owner_auth_preimage_hex,omitempty"`
 }
 
 func (s *Service) requestSignatureChallenge(w http.ResponseWriter, r *http.Request) {
@@ -862,14 +879,44 @@ func (s *Service) requestSignatureChallenge(w http.ResponseWriter, r *http.Reque
 	pre := in.Preimage()
 	digest := in.Hash()
 
-	// Update 2 Part A: kick off the presign now (during the human review/sign
-	// window), keyed by the metadata digest the submit will replay. Non-fatal.
-	s.firePresignPrefetch(r, req.DwalletAddress, hex.EncodeToString(digest[:]))
-	httpx.WriteJSON(w, http.StatusOK, requestSignatureChallengeResponse{
+	resp := requestSignatureChallengeResponse{
 		EngineAddress:  engine.String(),
 		MetadataDigest: hex.EncodeToString(digest[:]),
 		PreimageHex:    hex.EncodeToString(pre),
-	})
+	}
+
+	// Fase 1 (A1): the NORMAL path is zero-trust — the owner must authorize each
+	// signature. Compute the owner-auth challenge bound to this metadata_digest
+	// so the client has the owner sign it; the submit replays it as a precompile.
+	if req.Path == AppliesNormal {
+		if req.OwnerSlot == nil {
+			httpx.WriteError(w, http.StatusBadRequest, "invalid_field",
+				"owner_slot is required for path=1 (normal signing is zero-trust)")
+			return
+		}
+		ownerSlot, err := req.OwnerSlot.decode()
+		if err != nil {
+			httpx.WriteError(w, http.StatusBadRequest, "invalid_field", "owner_slot: "+err.Error())
+			return
+		}
+		human := HumanMessageNormalSign(dwallet, dest, req.Amount, req.SignatureScheme)
+		nuc := &NormalUseChallengeInput{
+			HumanMessage:   human,
+			Engine:         engine,
+			DWallet:        dwallet,
+			MetadataDigest: digest,
+			OwnerSlot:      ownerSlot,
+		}
+		oc := nuc.Hash()
+		resp.OwnerAuthChallengeHex = hex.EncodeToString(oc[:])
+		resp.OwnerAuthHumanMessage = string(human)
+		resp.OwnerAuthPreimageHex = hex.EncodeToString(nuc.Preimage())
+	}
+
+	// Update 2 Part A: kick off the presign now (during the human review/sign
+	// window), keyed by the metadata digest the submit will replay. Non-fatal.
+	s.firePresignPrefetch(r, req.DwalletAddress, hex.EncodeToString(digest[:]))
+	httpx.WriteJSON(w, http.StatusOK, resp)
 }
 
 // ─── internal helpers (avoid stdlib import dance) ───────────────────────────

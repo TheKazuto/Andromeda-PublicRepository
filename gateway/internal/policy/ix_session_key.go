@@ -198,6 +198,18 @@ type RequestSignatureViaSessionParams struct {
 	CPIAuthorityBump       uint8
 	Destination            [32]byte
 	ExpectedSignatureNonce uint64
+	// Review fix (2026-05-25): per-tx transfer amount (base units). The on-chain
+	// disc 101 enforces `Amount <= session.max_amount_per_tx`. Authorized by the
+	// session signer's tx signature; pass 0 when no amount cap applies.
+	Amount uint64
+	// Fase 2: APPLIES_SESSION rules are enforced on the session path too. Pass
+	// one sub-PDA per ENABLED slot in ascending order (the SessionKey rule that
+	// backs this session is included and skipped on-chain), each optionally
+	// followed by its auxiliary read-only accounts — identical interleaving to
+	// the normal `RequestSignature` builder. Resolve with
+	// `resolveTrailingAccountsForPath(..., AppliesSession)`.
+	RulePDAs []solana.PublicKey
+	RuleAux  [][]solana.PublicKey
 }
 
 func RequestSignatureViaSession(p RequestSignatureViaSessionParams) (solana.Instruction, error) {
@@ -210,7 +222,7 @@ func RequestSignatureViaSession(p RequestSignatureViaSessionParams) (solana.Inst
 		return nil, err
 	}
 
-	data := make([]byte, 0, 1+32+4+32+32+32+2+1+1+32+8)
+	data := make([]byte, 0, 1+32+4+32+32+32+2+1+1+32+8+8)
 	data = append(data, DiscRequestSignatureViaSession)
 	data = append(data, p.InitAuthorityHash[:]...)
 	var b4 [4]byte
@@ -227,8 +239,11 @@ func RequestSignatureViaSession(p RequestSignatureViaSessionParams) (solana.Inst
 	var b8 [8]byte
 	binary.LittleEndian.PutUint64(b8[:], p.ExpectedSignatureNonce)
 	data = append(data, b8[:]...)
+	var bAmount [8]byte
+	binary.LittleEndian.PutUint64(bAmount[:], p.Amount)
+	data = append(data, bAmount[:]...)
 
-	return solana.NewInstruction(p.ProgramID, solana.AccountMetaSlice{
+	accounts := solana.AccountMetaSlice{
 		{PublicKey: p.DWallet, IsSigner: false, IsWritable: false},
 		{PublicKey: p.Engine, IsSigner: false, IsWritable: true},
 		{PublicKey: sessionPDA, IsSigner: false, IsWritable: true},
@@ -239,11 +254,26 @@ func RequestSignatureViaSession(p RequestSignatureViaSessionParams) (solana.Inst
 		{PublicKey: p.CPIAuthority, IsSigner: false, IsWritable: false},
 		{PublicKey: p.CallerProgram, IsSigner: false, IsWritable: false},
 		{PublicKey: p.DWalletProgram, IsSigner: false, IsWritable: false},
+		// Fase 2: sysvar slot for KIND_PASSKEY / KIND_FHE_GATED session rules.
+		{PublicKey: SysvarInstructions, IsSigner: false, IsWritable: false},
 		{PublicKey: SysvarClock, IsSigner: false, IsWritable: false},
 		{PublicKey: SystemProgramID, IsSigner: false, IsWritable: false},
 		{PublicKey: eventAuth, IsSigner: false, IsWritable: false},
 		{PublicKey: p.ProgramID, IsSigner: false, IsWritable: false},
-	}, data), nil
+	}
+	// Fase 2: trailing remaining_accounts — one writable sub-PDA per active slot
+	// (ascending order), each followed by its auxiliary read-only accounts. Same
+	// interleaving as the normal `RequestSignature` builder; mirrors the shared
+	// on-chain `dispatch_active_rules`.
+	for i, pda := range p.RulePDAs {
+		accounts = append(accounts, &solana.AccountMeta{PublicKey: pda, IsSigner: false, IsWritable: true})
+		if i < len(p.RuleAux) {
+			for _, aux := range p.RuleAux[i] {
+				accounts = append(accounts, &solana.AccountMeta{PublicKey: aux, IsSigner: false, IsWritable: false})
+			}
+		}
+	}
+	return solana.NewInstruction(p.ProgramID, accounts, data), nil
 }
 
 // ── F8c — session lifecycle (revoke / close / cleanup / dest updates) ──────

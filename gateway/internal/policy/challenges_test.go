@@ -380,6 +380,32 @@ func TestRequestMetadataDigest_MatchesFixture(t *testing.T) {
 	}
 }
 
+// Fase 1 (A1): cross-language drift gate for the NORMAL-path owner challenge.
+func TestNormalUseChallenge_MatchesFixture(t *testing.T) {
+	f := loadFixture(t, "challenges/runtime/normal_use_challenge.json")
+	in := f.Input
+	dwallet := mustPubkey(t, in["dwallet_b58"].(string))
+	dest := decodeHex32(t, in["destination_hex"].(string))
+	amount := u64(in["amount"])
+	scheme := uint16(u64(in["signature_scheme"]))
+	human := HumanMessageNormalSign(dwallet, dest, amount, scheme)
+	nuc := &NormalUseChallengeInput{
+		HumanMessage:   human,
+		Engine:         mustPubkey(t, in["engine_b58"].(string)),
+		DWallet:        dwallet,
+		MetadataDigest: decodeHex32(t, in["metadata_digest_hex"].(string)),
+		OwnerSlot:      decodeHex34(t, in["owner_slot_hex"].(string)),
+	}
+	pre := nuc.Preimage()
+	if hex.EncodeToString(pre) != f.Expected.PreimageHex {
+		t.Fatalf("preimage drift:\n  got:  %s\n  want: %s", hex.EncodeToString(pre), f.Expected.PreimageHex)
+	}
+	h := nuc.Hash()
+	if hex.EncodeToString(h[:]) != f.Expected.ChallengeHex {
+		t.Fatalf("challenge drift:\n  got:  %s\n  want: %s", hex.EncodeToString(h[:]), f.Expected.ChallengeHex)
+	}
+}
+
 func TestAdminChallenge_AddRuleSpendingUsd_MatchesFixture(t *testing.T) {
 	f := loadFixture(t, "challenges/admin/add-rule-spending-usd.json")
 	in := f.Input

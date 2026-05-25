@@ -36,6 +36,12 @@ var (
 	OpResume              = []byte("resume")
 	OpRevoke              = []byte("revoke")
 	OpPrimaryRecover      = []byte("primary-recover")
+	// B1 audit fix (2026-05-25): binds the disc 110 remove_rule admin challenge.
+	OpRemoveRule = []byte("remove-rule")
+	// Fase 1 (A1, 2026-05-25): binds the NORMAL signing-path owner authorization
+	// (disc 1). The owner_slot signs this so the gateway cannot relay a signature
+	// without the dWallet owner's consent.
+	OpNormalSign = []byte("normal-sign")
 	// C2 audit fix (2026-05-16): binds the disc 126 admin challenge.
 	OpUpdateFheAuth = []byte("update-rule-fhe-authorities")
 )
@@ -155,6 +161,55 @@ func (in *RequestMetadataDigestInput) Preimage() []byte {
 }
 
 func (in *RequestMetadataDigestInput) Hash() [32]byte {
+	return sha256.Sum256(in.Preimage())
+}
+
+// ─── Fase 1 (A1) — NORMAL signing-path owner authorization ──────────────────
+
+// HumanMessageNormalSign renders the clear-signing line the dWallet owner reads
+// before authorizing a normal-path signature. Byte-for-byte mirror of
+// `normal_sign_message` in contracts/auth/src/human_message.rs.
+func HumanMessageNormalSign(dwallet solana.PublicKey, destination [32]byte, amount uint64, signatureScheme uint16) []byte {
+	var buf bytes.Buffer
+	buf.WriteString("Sign for dWallet ")
+	buf.WriteString(dwallet.String())
+	buf.WriteString(" to ")
+	buf.WriteString(toHexLower(destination[:]))
+	buf.WriteString(" amount ")
+	buf.WriteString(strconv.FormatUint(amount, 10))
+	buf.WriteString(" scheme ")
+	buf.WriteString(strconv.FormatUint(uint64(signatureScheme), 10))
+	return buf.Bytes()
+}
+
+// NormalUseChallengeInput carries the inputs the on-chain `normal_use_challenge`
+// (disc 1) hashes. The owner signs the resulting 32-byte hash off-chain; the
+// gateway relays the precompile invocation. Mirror of `normal_use_challenge` in
+// contracts/policy-engine/src/lib.rs.
+type NormalUseChallengeInput struct {
+	HumanMessage   []byte
+	Engine         solana.PublicKey
+	DWallet        solana.PublicKey
+	MetadataDigest [32]byte
+	OwnerSlot      [MemberSlotLen]byte
+}
+
+func (in *NormalUseChallengeInput) Preimage() []byte {
+	var buf bytes.Buffer
+	buf.Write(DomainV3)
+	buf.Write(OpNormalSign)
+	var hl [2]byte
+	binary.LittleEndian.PutUint16(hl[:], uint16(len(in.HumanMessage)))
+	buf.Write(hl[:])
+	buf.Write(in.HumanMessage)
+	buf.Write(in.Engine.Bytes())
+	buf.Write(in.DWallet.Bytes())
+	buf.Write(in.MetadataDigest[:])
+	buf.Write(in.OwnerSlot[:])
+	return buf.Bytes()
+}
+
+func (in *NormalUseChallengeInput) Hash() [32]byte {
 	return sha256.Sum256(in.Preimage())
 }
 

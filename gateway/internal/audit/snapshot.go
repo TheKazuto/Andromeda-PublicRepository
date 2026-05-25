@@ -39,14 +39,14 @@ import (
 // gateway/internal/leader) — running this on every replica would waste
 // bandwidth and duplicate rows.
 type Snapshotter struct {
-	pool      *pgxpool.Pool
-	s3        *S3Client
-	prefix    string
-	logger    *slog.Logger
-	obs       SnapshotObserver
-	maxRows   int
-	maxBytes  int64
-	tick      time.Duration
+	pool     *pgxpool.Pool
+	s3       *S3Client
+	prefix   string
+	logger   *slog.Logger
+	obs      SnapshotObserver
+	maxRows  int
+	maxBytes int64
+	tick     time.Duration
 }
 
 // SnapshotObserver is the minimum metrics surface the snapshotter uses.
@@ -59,11 +59,11 @@ type SnapshotObserver interface {
 
 // SnapshotterOptions wires runtime knobs.
 type SnapshotterOptions struct {
-	Prefix    string // object key prefix, e.g. "audit/"
-	MaxRows   int
-	MaxBytes  int64
-	Tick      time.Duration
-	Observer  SnapshotObserver
+	Prefix   string // object key prefix, e.g. "audit/"
+	MaxRows  int
+	MaxBytes int64
+	Tick     time.Duration
+	Observer SnapshotObserver
 }
 
 // NewSnapshotter constructs a Snapshotter. The S3Client is required —

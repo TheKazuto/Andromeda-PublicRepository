@@ -231,11 +231,11 @@ func (w *Watcher) tickExternalWebhook(ctx context.Context) {
 // Return contract:
 //   - (shouldFire, ready=true, nil):  callback answered 2xx + JSON decoded.
 //   - (false, ready=false, nil):      callback answered 3xx (treated as a
-//                                     benign "not ready" — bounce to armed
-//                                     without burning failure_count).
+//     benign "not ready" — bounce to armed
+//     without burning failure_count).
 //   - (_, _, err):                    real failure — bad JSON, non-2xx
-//                                     (excluding 3xx), unreachable, missing
-//                                     URL. Counts toward the circuit breaker.
+//     (excluding 3xx), unreachable, missing
+//     URL. Counts toward the circuit breaker.
 //
 // SSRF defense lives in the watcher loop (ValidateDispatch) and at
 // registration time (ValidateRegister); this function additionally refuses to

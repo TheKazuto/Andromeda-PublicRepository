@@ -38,17 +38,17 @@ type SignerWorker struct {
 	logger *slog.Logger
 	obs    Observer
 
-	batch        int
-	tick         time.Duration
-	degradedAge  time.Duration
+	batch       int
+	tick        time.Duration
+	degradedAge time.Duration
 }
 
 // SignerWorkerOptions tunes the worker. Zero values fall back to defaults.
 type SignerWorkerOptions struct {
-	Batch        int           // rows per tick (default 100)
-	Tick         time.Duration // poll cadence (default 500ms)
-	DegradedAge  time.Duration // outbox older than this flips `degraded=1` (default 30s)
-	Observer     Observer
+	Batch       int           // rows per tick (default 100)
+	Tick        time.Duration // poll cadence (default 500ms)
+	DegradedAge time.Duration // outbox older than this flips `degraded=1` (default 30s)
+	Observer    Observer
 }
 
 // NewSignerWorker wires the worker. The Signer is shared with the
@@ -267,4 +267,3 @@ func envDur(key string, override time.Duration, fallback time.Duration) time.Dur
 	}
 	return 500 * time.Millisecond
 }
-

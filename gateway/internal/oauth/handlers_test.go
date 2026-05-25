@@ -40,11 +40,11 @@ func (f *fakeAudit) Append(_ context.Context, ev AuditEvent) error {
 }
 
 type fakeProvider struct {
-	name          ProviderName
-	lastCode      string
-	idToken       string
-	exchangeErr   error
-	authBuildSpy  func(state, nonce, redirectURI string)
+	name         ProviderName
+	lastCode     string
+	idToken      string
+	exchangeErr  error
+	authBuildSpy func(state, nonce, redirectURI string)
 }
 
 func (p *fakeProvider) Name() ProviderName { return p.name }

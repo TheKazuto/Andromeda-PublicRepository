@@ -220,6 +220,11 @@ var All = []Route{
 	{Method: "POST", Path: "/v1/policy/rules/add/submit", Upstream: UpstreamLocal, Local: true, Key: "policy.engine.rules.add.submit", Idempotent: true, RequiresIdempotencyKey: true, AdminScope: true, RateClass: RateClassTx},
 	{Method: "POST", Path: "/v1/policy/rules/{ruleIndex}/items/add/challenge", Upstream: UpstreamLocal, Local: true, Key: "policy.engine.rules.items.add.challenge", AdminScope: true, RateClass: RateClassRead},
 	{Method: "POST", Path: "/v1/policy/rules/{ruleIndex}/items/add/submit", Upstream: UpstreamLocal, Local: true, Key: "policy.engine.rules.items.add.submit", Idempotent: true, RequiresIdempotencyKey: true, AdminScope: true, RateClass: RateClassTx},
+	// B1 (2026-05-25): remove an active rule (closes the sub-PDA, frees the slot).
+	// Owner-signed on-chain; mirrors the add_rule admin pattern (AdminScope +
+	// idempotency-required submit). Handlers are local (gateway/internal/policy).
+	{Method: "POST", Path: "/v1/policy/rules/{ruleIndex}/remove/challenge", Upstream: UpstreamLocal, Local: true, Key: "policy.engine.rules.remove.challenge", AdminScope: true, RateClass: RateClassRead},
+	{Method: "POST", Path: "/v1/policy/rules/{ruleIndex}/remove/submit", Upstream: UpstreamLocal, Local: true, Key: "policy.engine.rules.remove.submit", Idempotent: true, RequiresIdempotencyKey: true, AdminScope: true, RateClass: RateClassTx},
 	{Method: "POST", Path: "/v1/policy/request-signature/challenge", Upstream: UpstreamLocal, Local: true, Key: "policy.engine.request-signature.challenge", RateClass: RateClassRead},
 	{Method: "POST", Path: "/v1/policy/request-signature/submit", Upstream: UpstreamLocal, Local: true, Key: "policy.engine.request-signature.submit", Idempotent: true, RequiresIdempotencyKey: true, RateClass: RateClassTx, TimeoutSeconds: 60},
 	// F11b-Phase1 — recover_as_primary. NOT AdminScope: the primary owner is

@@ -643,6 +643,17 @@ type requestSignatureSubmitRequest struct {
 	// WITHOUT a metadata seed). Non-zero for Zcash; the gateway then derives the
 	// MessageApproval PDA with the matching metadata seed and forwards it on-chain.
 	IkaMsgMetadataDigestHex string `json:"ika_msg_metadata_digest_hex,omitempty" validate:"omitempty,hex_len=32"`
+	// Fase 1 (A1, 2026-05-25): owner authorization for the zero-trust NORMAL
+	// path. The gas-sponsored /submit REQUIRES `owner_slot` + `signature_base64`
+	// (the owner signs the `owner_auth_challenge_hex` returned by /challenge); the
+	// gateway relays them as a precompile. Optional in the struct so the
+	// client-pays /build and the oracle-monitor auto-exec payload (which never
+	// carry an owner signature) keep deserializing — the /submit handler enforces
+	// their presence.
+	OwnerSlot              *memberSlotJSON `json:"owner_slot,omitempty"`
+	SignatureBase64        string          `json:"signature_base64,omitempty" validate:"omitempty,base64"`
+	WebauthnAuthDataBase64 string          `json:"webauthn_auth_data_base64,omitempty" validate:"omitempty,base64"`
+	WebauthnCDJBase64      string          `json:"webauthn_cdj_base64,omitempty" validate:"omitempty,base64"`
 }
 
 func (s *Service) requestSignatureSubmit(w http.ResponseWriter, r *http.Request) {
@@ -658,20 +669,29 @@ func (s *Service) requestSignatureSubmit(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Refresh-on-sign: prepend a refresh_feed for each sponsored FeedCache this
-	// tx reads, so the price is fresh at the signing moment. Best-effort and
-	// observed — on a refresher error we log and proceed; the on-chain freshness
-	// check (OracleStale) is the authoritative backstop, and the managed crank
-	// may have refreshed already.
-	ixs := []solana.Instruction{mainIx}
+	// Fase 1 (A1): the normal signing path is zero-trust — the dWallet owner must
+	// authorize this signature via a precompile alongside the main ix. The
+	// gateway can no longer sign on its own.
+	ownerPrecompile, ok := s.buildRequestSignatureOwnerAuth(w, &req, engine, dwallet)
+	if !ok {
+		return
+	}
+
+	// Order: [owner_auth_precompile, refresh_feed*, request_signature].
+	// Refresh-on-sign prepends a refresh_feed for each sponsored FeedCache this
+	// tx reads, so the price is fresh at signing. Best-effort and observed — on a
+	// refresher error we log and proceed; the on-chain freshness check
+	// (OracleStale) is the authoritative backstop.
+	ixs := []solana.Instruction{ownerPrecompile}
 	if s.oracleRefresher != nil && len(auxCaches) > 0 {
 		refreshIxs, rerr := s.oracleRefresher.RefreshIxs(r.Context(), auxCaches)
 		if rerr != nil {
 			slog.Warn("refresh-on-sign skipped", "engine", engine.String(), "err", rerr)
 		} else if len(refreshIxs) > 0 {
-			ixs = append(refreshIxs, mainIx)
+			ixs = append(ixs, refreshIxs...)
 		}
 	}
+	ixs = append(ixs, mainIx)
 
 	sigOut, err := s.GasSponsor.SignAndSend(r.Context(), ixs)
 	if err != nil {
@@ -812,7 +832,7 @@ func (s *Service) assembleRequestSignatureIx(
 			return nil, zero, zero, nil, &buildError{http.StatusServiceUnavailable, "no_rpc",
 				"auto_resolve_accounts requires SOLANA_RPC_URL"}
 		}
-		resolvedPDAs, resolvedAux, rerr := s.resolveTrailingAccounts(ctx, engine, req.AssetIndex)
+		resolvedPDAs, resolvedAux, rerr := s.resolveTrailingAccounts(ctx, engine, req.AssetIndex, AppliesNormal)
 		if rerr != nil {
 			return nil, zero, zero, nil, &buildError{http.StatusBadGateway, "resolve_failed", rerr.Error()}
 		}
@@ -879,38 +899,19 @@ func (s *Service) assembleRequestSignatureIx(
 // release a pre-committed message when the on-chain rule would already pass.
 //
 // Implements oraclemonitor.Firer. Returns the landed Solana tx signature.
-func (s *Service) FireRequestSignature(ctx context.Context, payload json.RawMessage) (string, error) {
-	if s.GasSponsor == nil {
-		return "", fmt.Errorf("gas sponsor not configured")
-	}
-	if s.RPCClient == nil {
-		return "", fmt.Errorf("rpc not configured")
-	}
-	req, err := decodeRequestSignaturePayload(payload)
-	if err != nil {
+func (s *Service) FireRequestSignature(_ context.Context, payload json.RawMessage) (string, error) {
+	// Fase 1 (A1, 2026-05-25): the normal signing path is now zero-trust — the
+	// dWallet owner must authorize each signature via an off-chain-signed
+	// precompile relayed by the gateway. Unattended oracle auto-exec without a
+	// pre-authorized owner signature can no longer land (the on-chain handler
+	// rejects it), so this fails CLOSED instead of submitting a tx the program
+	// would reject. The approved path is pre-authorized FutureSign (Fase 3).
+	// We still decode the payload so a malformed trigger surfaces a clear error.
+	if _, err := decodeRequestSignaturePayload(payload); err != nil {
 		return "", err
 	}
-
-	mainIx, _, _, auxCaches, berr := s.assembleRequestSignatureIx(ctx, &req, s.GasSponsor.PublicKey())
-	if berr != nil {
-		return "", fmt.Errorf("build request_signature: %s", berr.msg)
-	}
-
-	// Refresh-on-sign: prepend a refresh_feed per sponsored FeedCache the tx
-	// reads, so the price is fresh at the signing moment (best-effort; the
-	// on-chain OracleStale check is the authoritative backstop).
-	ixs := []solana.Instruction{mainIx}
-	if s.oracleRefresher != nil && len(auxCaches) > 0 {
-		if refreshIxs, rerr := s.oracleRefresher.RefreshIxs(ctx, auxCaches); rerr == nil && len(refreshIxs) > 0 {
-			ixs = append(refreshIxs, mainIx)
-		}
-	}
-
-	sigOut, err := s.GasSponsor.SignAndSend(ctx, ixs)
-	if err != nil {
-		return "", fmt.Errorf("send request_signature: %w", err)
-	}
-	return sigOut.String(), nil
+	return "", fmt.Errorf(
+		"oracle auto-exec is disabled under zero-trust signing (A1): a pre-authorized owner signature (FutureSign) is required — pending Fase 3")
 }
 
 // ValidateRequestSignaturePayload decodes + validates a stored request_signature
@@ -1014,6 +1015,61 @@ func serializeInstruction(ix solana.Instruction) (instructionJSON, error) {
 }
 
 // ─── precompile helper ──────────────────────────────────────────────────────
+
+// buildRequestSignatureOwnerAuth builds the Fase 1 (A1) owner-authorization
+// precompile for the zero-trust NORMAL signing path. The owner signs the
+// `normal_use_challenge` (bound to the metadata_digest) off-chain; the gateway
+// relays it as the first ix in the tx. Writes the HTTP error and returns
+// ok=false on any problem.
+func (s *Service) buildRequestSignatureOwnerAuth(
+	w http.ResponseWriter, req *requestSignatureSubmitRequest, engine, dwallet solana.PublicKey,
+) (solana.Instruction, bool) {
+	if req.OwnerSlot == nil || req.SignatureBase64 == "" {
+		httpx.WriteError(w, http.StatusBadRequest, "owner_auth_required",
+			"owner_slot + signature_base64 are required: the normal signing path is zero-trust (the owner authorizes each signature)")
+		return nil, false
+	}
+	ownerSlot, err := req.OwnerSlot.decode()
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, "invalid_field", "owner_slot: "+err.Error())
+		return nil, false
+	}
+	sig, err := base64.StdEncoding.DecodeString(req.SignatureBase64)
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, "invalid_field", "signature_base64: "+err.Error())
+		return nil, false
+	}
+	var authData, cdj []byte
+	if req.WebauthnAuthDataBase64 != "" {
+		if authData, err = base64.StdEncoding.DecodeString(req.WebauthnAuthDataBase64); err != nil {
+			httpx.WriteError(w, http.StatusBadRequest, "invalid_field", "webauthn_auth_data_base64: "+err.Error())
+			return nil, false
+		}
+	}
+	if req.WebauthnCDJBase64 != "" {
+		if cdj, err = base64.StdEncoding.DecodeString(req.WebauthnCDJBase64); err != nil {
+			httpx.WriteError(w, http.StatusBadRequest, "invalid_field", "webauthn_cdj_base64: "+err.Error())
+			return nil, false
+		}
+	}
+	metaDigest, _ := mustHex32(req.MetadataDigestHex)
+	dest, _ := mustHex32(req.DestinationHex)
+	human := HumanMessageNormalSign(dwallet, dest, req.Amount, req.SignatureScheme)
+	nuc := &NormalUseChallengeInput{
+		HumanMessage:   human,
+		Engine:         engine,
+		DWallet:        dwallet,
+		MetadataDigest: metaDigest,
+		OwnerSlot:      ownerSlot,
+	}
+	challenge := nuc.Hash()
+	precompile, err := buildCredentialPrecompile(ownerSlot, challenge, sig, authData, cdj)
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, "invalid_signature", err.Error())
+		return nil, false
+	}
+	return precompile, true
+}
 
 // buildCredentialPrecompile is a thin wrapper around
 // `auth.BuildCredentialPrecompile` that adapts the policy package's slot

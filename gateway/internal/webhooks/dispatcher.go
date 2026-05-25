@@ -27,22 +27,23 @@ import (
 // backlog and a dispatcher crash doesn't leave rows stuck in_flight.
 //
 // Override via env:
-//   WEBHOOK_DISPATCHER_BATCH      — max rows claimed per tick (default 100)
-//   WEBHOOK_DISPATCHER_TICK_MS    — claim cadence (default 1000)
-//   WEBHOOK_DISPATCHER_WORKERS    — concurrent deliveries in flight (default 20)
-//   WEBHOOK_DISPATCHER_LEASE_SEC  — lease duration (default 60)
-//   WEBHOOK_RECOVER_TICK_SEC      — stuck-claim sweep cadence (default 30)
+//
+//	WEBHOOK_DISPATCHER_BATCH      — max rows claimed per tick (default 100)
+//	WEBHOOK_DISPATCHER_TICK_MS    — claim cadence (default 1000)
+//	WEBHOOK_DISPATCHER_WORKERS    — concurrent deliveries in flight (default 20)
+//	WEBHOOK_DISPATCHER_LEASE_SEC  — lease duration (default 60)
+//	WEBHOOK_RECOVER_TICK_SEC      — stuck-claim sweep cadence (default 30)
 const (
 	defaultMaxAttempts = 8
 	defaultMaxBackoff  = 24 * time.Hour
 )
 
 var (
-	dispatcherBatch     = envInt("WEBHOOK_DISPATCHER_BATCH", 100)
-	dispatcherTick      = time.Duration(envInt("WEBHOOK_DISPATCHER_TICK_MS", 1000)) * time.Millisecond
-	dispatcherWorkers   = envInt("WEBHOOK_DISPATCHER_WORKERS", 20)
-	dispatcherLeaseSec  = envInt("WEBHOOK_DISPATCHER_LEASE_SEC", 60)
-	recoverTick         = time.Duration(envInt("WEBHOOK_RECOVER_TICK_SEC", 30)) * time.Second
+	dispatcherBatch    = envInt("WEBHOOK_DISPATCHER_BATCH", 100)
+	dispatcherTick     = time.Duration(envInt("WEBHOOK_DISPATCHER_TICK_MS", 1000)) * time.Millisecond
+	dispatcherWorkers  = envInt("WEBHOOK_DISPATCHER_WORKERS", 20)
+	dispatcherLeaseSec = envInt("WEBHOOK_DISPATCHER_LEASE_SEC", 60)
+	recoverTick        = time.Duration(envInt("WEBHOOK_RECOVER_TICK_SEC", 30)) * time.Second
 	// Per-destination rate limit. Defaults are conservative — many
 	// webhook receivers expect well below 50 req/s sustained. Operators
 	// with cooperative receivers can raise via env.
@@ -82,6 +83,7 @@ type DispatcherMetrics interface {
 //   - tick goroutine claims a batch and pushes each Delivery onto `jobs`.
 //   - N worker goroutines drain `jobs` in parallel.
 //   - sweeper goroutine reverts stuck in_flight rows whose lease expired.
+//
 // The pool size + tick + lease are env-tunable (see dispatcher.go top).
 //
 // Per-destination rate limit: each endpoint_id has its own token bucket

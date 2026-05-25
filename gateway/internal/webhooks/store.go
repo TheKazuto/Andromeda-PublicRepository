@@ -358,9 +358,9 @@ func (s *Store) CountDLQ(ctx context.Context) (int64, error) {
 // only `pending` (ready for next attempt) and `in_flight` (claimed by a
 // dispatcher) rows — DLQ has its own dedicated gauge.
 type BacklogSnapshot struct {
-	Pending             int64
-	InFlight            int64
-	OldestPendingAgeSec float64
+	Pending              int64
+	InFlight             int64
+	OldestPendingAgeSec  float64
 	OldestInFlightAgeSec float64
 }
 
