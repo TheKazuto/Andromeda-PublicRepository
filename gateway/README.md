@@ -31,6 +31,7 @@ client ──▶ gateway ──▶ ika-backend       (MPC engine, X-Api-Key)
 ```
 gateway/
 ├── cmd/server/             # main.go entrypoint
+├── cmd/openapi-gen/        # regenerates openapi.yaml from internal/openapi (go run ./cmd/openapi-gen)
 ├── internal/
 │   ├── api/                # HTTP handlers
 │   ├── auth/               # API key auth, scopes, IP + Origin allowlist, andromeda_auth Go mirror, clear-signing
@@ -55,12 +56,12 @@ gateway/
 │   ├── gasponsor/          # Solana fee payer keypair
 │   ├── observability/      # OpenTelemetry tracing
 │   ├── metrics/            # Prometheus collectors
-│   ├── openapi/            # Auto-generated OpenAPI 3.1
+│   ├── openapi/            # OpenAPI 3.1 generator (serves /openapi.json; openapi.yaml is its committed snapshot, guarded by a sync test)
 │   ├── store/              # Postgres + migrations
 │   ├── redisclient/        # Redis pool
 │   ├── httpx/              # JSON envelope + BindAndValidate (strict decode + go-playground/validator/v10 + custom tags: solana_pubkey, base64, base64_len, hex_len)
 │   └── config/             # Env loader
-├── openapi.yaml
+├── openapi.yaml           # generated snapshot of /openapi.json (run cmd/openapi-gen; TestSnapshotYAMLInSync guards it)
 ├── Dockerfile
 ├── railway.toml
 └── go.mod
@@ -101,9 +102,9 @@ production, `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, `Per
 | **dWallet — multi-chain (read-only)** | `GET dwallet/addresses/{dwalletAddress}` (every chain-native address for the dWallet's curve), `dwallet/prepare-message` (envelope + on-chain digest; Zcash takes structured tx fields → also returns `messageMetadataHex` + `ikaMsgMetadataDigestHex`) (→ MCP `dwallet_addresses` / `prepare_message`) | read | proxied to ika-backend |
 | **dWallet — low-level** | `dwallet/dkg/{prepare,submit}`, `dwallet/{sign,presign,future-sign,future-sign/complete,re-encrypt-share,make-share-public}/submit`, `GET dwallet/presigns/{userPubkey}` | write / read | proxied to ika-backend |
 | **PolicyEngine v3 — read** | `GET policy/{dwallet}` — engine state (header, every active rule slot, members, destinations, nonces) | read | local |
-| **PolicyEngine v3 — admin** | `policy/init/{challenge,submit}`, `policy/rules/add/{challenge,submit}`, `policy/rules/{ruleIndex}/items/add/{challenge,submit}` — challenge → owner-signs → submit. Admin scope, Idempotency-Key MANDATORY on every submit. | admin | local |
+| **PolicyEngine v3 — admin** | `policy/init/{challenge,submit}`, `policy/rules/add/{challenge,submit}`, `policy/rules/{ruleIndex}/items/add/{challenge,submit}`, `policy/rules/{ruleIndex}/remove/{challenge,submit}` (closes the rule sub-PDA, rent → `recipient` bound in the challenge) — challenge → owner-signs → submit. Admin scope, Idempotency-Key MANDATORY on every submit. | admin | local |
 | **PolicyEngine v3 — recovery** | `policy/recover-as-primary/{challenge,submit}` (single-tx primary) · `policy/quorum/session/{open,contribute}/{challenge,submit}` · `policy/quorum/session/{finalize,close}` · `policy/passkey/session/open/{challenge,submit}` · `policy/passkey/use/{challenge,submit}` · `policy/passkey/session/close` | write | local |
-| **PolicyEngine v3 — request signature** | `policy/request-signature/{challenge,submit}` — runtime metadata digest (V2: binds `amount` + `asset_index` for `KIND_SPENDING_USD`) + on-chain dispatch loop across every active rule slot + CPI Ika `approve_message`. `signature_scheme` accepts 0..6 (incl. EdDSA=5 for Solana/Sui). V3: optional `ika_msg_metadata_digest_hex` forwards the Ika signing metadata (Zcash BLAKE2b personal); default zero = unchanged for every other chain. | write | local |
+| **PolicyEngine v3 — request signature** | `policy/request-signature/{challenge,submit}` — runtime metadata digest (V2: binds `amount` + `asset_index` for `KIND_SPENDING_USD`) + on-chain dispatch loop across every active rule slot + CPI Ika `approve_message`. `signature_scheme` accepts 0..6 (incl. EdDSA=5 for Solana/Sui). V3: optional `ika_msg_metadata_digest_hex` forwards the Ika signing metadata (Zcash BLAKE2b personal); default zero = unchanged for every other chain. **Zero-trust normal path (`path=1`):** the challenge requires `owner_slot` and also returns `owner_auth_challenge_hex` + `owner_auth_human_message`; the submit requires `owner_slot` + `signature_base64` (the dWallet owner signs the `normal-sign` challenge, relayed on-chain as a credential precompile in the same tx), so a compromised gateway can no longer sign on its own. | write | local |
 | **Transaction risk (advisory)** | `policy/risk/evaluate` (opt-in advisory simulation + risk score; the dev passes their own `rpc_url`) · `GET/PUT/DELETE policy/risk/config/{dwalletAddress}` · `GET/PUT policy/risk/defaults` · `POST/DELETE policy/risk/{denylist,allowlist}` | read / write | local + ika-backend |
 | **Login Social — OIDC pre-flow** | `POST oidc/{nonce,validate}` — canonical OAuth `nonce` builder + provider JWKS pre-validation of `id_token`s. 8 KiB body cap on `/validate` (carries a JWT). | write / read | proxied to ika-backend |
 | **OAuth broker (Login Social)** | `GET oauth/{authorize,callback}`, `POST oauth/token-exchange` — gateway-hosted Andromeda OAuth client (Google + Apple, `scope=openid` only). Authorization Code + PKCE. Free (no token cost). | write | gateway |
@@ -128,7 +129,8 @@ Full machine-readable catalogue of the proxied routes in `internal/routes/routes
 
 ### Clear Signing v2
 
-Every PolicyEngine v3 challenge — `init`, `rules.add`, `rules.items.add`, `recover-as-primary`,
+Every PolicyEngine v3 challenge — `init`, `rules.add`, `rules.items.add`, `rules.remove`,
+`request-signature` (normal path, `path=1`), `recover-as-primary`,
 `quorum.session.{open,contribute}`, `passkey.session.{open}` and `passkey.use` — returns a
 deterministic human-readable text that the on-chain program recomputes from the same typed
 parameters and embeds (length-prefixed `u16 LE`) into the SHA-256 the credential signs. A
@@ -170,7 +172,7 @@ challenge = sha256(
 ```
 
 * `human_message` — the exact ASCII text the approver MUST see before signing. Plain text, no locale, no truncation.
-* `op_tag` — canonical operation tag, e.g. `init` / `init-with-recovery` / `add-allowlist` / `add-velocity` / `add-time-lock` / `add-oracle` / `add-passkey` / `add-fhe-gated` / `add-session-key` / `add-recovery` / `add-rule-spending-usd` / `allowlist-add-dest` / `oracle-add-feed` / `spending-usd-add-feed` / `primary-recover` / `quorum-session-open` / `quorum-contribute` / `passkey-session-open` / `passkey-primary-use`.
+* `op_tag` — canonical operation tag, e.g. `init` / `init-with-recovery` / `add-allowlist` / `add-velocity` / `add-time-lock` / `add-oracle` / `add-passkey` / `add-fhe-gated` / `add-session-key` / `add-recovery` / `add-rule-spending-usd` / `allowlist-add-dest` / `oracle-add-feed` / `spending-usd-add-feed` / `primary-recover` / `quorum-session-open` / `quorum-contribute` / `passkey-session-open` / `passkey-primary-use` / `normal-sign` / `remove-rule`.
 * `config_hash_hex` — sha256 of the canonical config payload for the rule (immutable identity of the rule at this generation).
 
 **`/submit` never trusts caller text.** The handler recomputes the challenge from the same typed
@@ -180,8 +182,8 @@ doesn't match what the precompile validated, the transaction fails.
 **Audit trail.** Every successful PolicyEngine v3 submit appends one entry to the per-tenant
 ed25519-signed audit chain (mapped from `policy.PolicyEngineAuditEvent` to the canonical
 `audit.Event` envelope by the `policyEngineAuditBridge`). Payload includes the action tag
-(`init` / `rule.add` / `rule.items.add` / `request-signature` / `recover-as-primary` / `quorum.*` /
-`passkey.*`), engine address, dWallet, tx signature, and a JSON `extra` block with route-specific
+(`init` / `rule.add` / `rule.items.add` / `rule.remove` / `request-signature` / `recover-as-primary` /
+`quorum.*` / `passkey.*`), engine address, dWallet, tx signature, and a JSON `extra` block with route-specific
 context (rule kind, rule index, member or destination added, etc.).
 
 **No SDK required.** Clients call the gateway directly over HTTP / MCP tool, render `human_message`
