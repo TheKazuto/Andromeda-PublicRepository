@@ -348,12 +348,12 @@ mod tests {
     #[test]
     fn write_decimal_u64_cases() {
         let cases: &[(u64, u8, &[u8])] = &[
-            (5_000_000_000, 8, b"50"),    // exact integer → no point
+            (5_000_000_000, 8, b"50"),       // exact integer → no point
             (300_050_000_000, 8, b"3000.5"), // trailing zeros trimmed
-            (1_000_000, 8, b"0.01"),      // pure fraction
-            (1, 8, b"0.00000001"),        // smallest unit
+            (1_000_000, 8, b"0.01"),         // pure fraction
+            (1, 8, b"0.00000001"),           // smallest unit
             (0, 8, b"0"),
-            (1234, 0, b"1234"),           // decimals=0 → raw
+            (1234, 0, b"1234"), // decimals=0 → raw
         ];
         for &(v, d, want) in cases {
             let mut buf = [0u8; MAX_HUMAN_MESSAGE_BYTES];
@@ -505,6 +505,31 @@ pub fn primary_recover_message(
     w.write_u16_dec(signature_scheme)?;
     w.write_str(" user ")?;
     w.write_hex_lower(user_pubkey)?;
+    Ok(w.len())
+}
+
+/// Fase 1 (A1, 2026-05-25): clear-signing message for the NORMAL signing path
+/// (`request_signature`, disc 1). The dWallet owner reads this before
+/// authorizing the gateway to relay the signature. It surfaces the destination
+/// and amount so the approver sees where/how much; the full request
+/// (message_digest, generation, asset_index, scheme) is additionally bound via
+/// `metadata_digest` inside the challenge, so the gateway cannot alter any field.
+pub fn normal_sign_message(
+    out: &mut [u8; MAX_HUMAN_MESSAGE_BYTES],
+    dwallet: &Address,
+    destination: &[u8; 32],
+    amount: u64,
+    signature_scheme: u16,
+) -> Result<usize, HumanMessageError> {
+    let mut w = MsgWriter::new(out);
+    w.write_str("Sign for dWallet ")?;
+    w.write_base58_32(dwallet.as_array())?;
+    w.write_str(" to ")?;
+    w.write_hex_lower(destination)?;
+    w.write_str(" amount ")?;
+    w.write_u64_dec(amount)?;
+    w.write_str(" scheme ")?;
+    w.write_u16_dec(signature_scheme)?;
     Ok(w.len())
 }
 
