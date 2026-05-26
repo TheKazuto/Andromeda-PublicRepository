@@ -11,6 +11,7 @@ Centralizes the logic that makes Andromeda's entire on-chain stack **wallet-agno
 | `challenge.rs` | Canonical `policy-engine` challenges (init, add-rule per kind, items/add, request-signature, recover-as-primary, quorum-session-{open,contribute}, passkey-session-{open}, passkey-primary-use) — domain-separated under `andromeda::policy-engine::v3` |
 | `hash.rs` | Minimal wrapper over the `sol_sha256` syscall (avoids pulling in `solana-sha256-hasher`, which drags `std`) |
 | `admin.rs` | `verify_owner_admin(expected_nonce, on_chain_nonce, owner_slot, challenge, sysvar_data) -> Result<u64>` — the gate shared by every owner-style admin path |
+| `human_message.rs` | Clear-signing renderers for the messages dWallet owners read before authorizing on-chain ops. Includes `normal_sign_message` (generic signing), `swap_sign_message` (Update 7 — semantic swap clear-signing with `from_token` / `to_token` / `min_amount_out` / `chain_tag`), and the 20+ admin-action renderers. Every byte rendered here is recomputed by the on-chain handler from the same typed inputs, so any drift between the Rust renderer and the Go / TS mirrors invalidates the owner's signature. |
 
 ## Why it exists
 
@@ -103,6 +104,14 @@ cargo build-sbf      # via any dependent crate; the auth crate is library-only
 ```
 
 > **Host build (`cargo build`) fails** because `solana-address` 2.6.0 host removed `from_str_const`. The crate is designed for the SBF target; verify the build through the dependent crates (`policy-engine`, `jwk-registry`, `oidc-verifier`). Host-side tests use the `host-test` feature to reuse `challenge.rs` and the human-message renderers.
+
+## Clear-signing notes
+
+`human_message.rs` renders **deterministic ASCII** bounded by `MAX_HUMAN_MESSAGE_BYTES = 768`. Every renderer copies bytes into a fixed stack buffer (no heap), and writes only `0x20..=0x7E` (rejects non-printable ASCII with `HumanMessageError::NonAscii`). Bound contracts the on-chain handler enforces, that callers (gateway / SDK) must respect:
+
+* **Token addresses go as raw 32-byte hex**, not symbols — the program cannot verify that `USDC` is USDC, but it can bind a specific mint/contract address. The wallet UI rotula nomes legíveis em cima dos endereços bound.
+* **`chain_tag`** (Update 7) is 8 bytes ASCII null-padded (e.g. `"solana\0\0"`, `"evm:1\0\0\0"`). Non-printable bytes before the first NUL are rejected; trailing NULs are allowed. The Go mirror (`gateway/internal/policy/ValidateChainTag`) validates this off-chain before broadcast so a malformed tag fails fast.
+* Mirror byte-for-byte in `gateway/internal/policy/challenges.go::HumanMessage*` — fixtures under `fixtures/policy_engine_v3/challenges/runtime/` lock the wire layout cross-language.
 
 ## Status
 

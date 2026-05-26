@@ -533,6 +533,63 @@ pub fn normal_sign_message(
     Ok(w.len())
 }
 
+/// Update 7 (2026-05-26): clear-signing message for the SWAP signing path
+/// (`request_signature` disc 1 with `signing_kind = SIGNING_KIND_SWAP`). The
+/// dWallet owner reads this before authorizing the gateway to relay the swap
+/// signature. Surfaces what's actually being traded — `from_token` / `to_token`
+/// are 32-byte address-padded (mint for Solana, EVM contract or zero-padded for
+/// native), `chain_tag` is ASCII null-padded (e.g. `"solana\0\0"`, `"evm:1\0\0\0"`).
+/// Symbols are NEVER bound on-chain (the program has no way to verify them); the
+/// UI layer renders human names on top of the bound addresses.
+///
+/// The full request (`message_digest`, generation, scheme, ika_metadata) is
+/// additionally bound via `metadata_digest` inside the challenge — a phished
+/// swap message can't be replayed as a different transaction.
+///
+/// `chain_tag` is rendered as ASCII trimmed of trailing NULs (`\0`).
+#[allow(clippy::too_many_arguments)]
+pub fn swap_sign_message(
+    out: &mut [u8; MAX_HUMAN_MESSAGE_BYTES],
+    dwallet: &Address,
+    from_token: &[u8; 32],
+    from_amount: u64,
+    to_token: &[u8; 32],
+    min_amount_out: u64,
+    chain_tag: &[u8; 8],
+    signature_scheme: u16,
+) -> Result<usize, HumanMessageError> {
+    let mut w = MsgWriter::new(out);
+    w.write_str("Swap ")?;
+    w.write_u64_dec(from_amount)?;
+    w.write_str(" of ")?;
+    w.write_hex_lower(from_token)?;
+    w.write_str(" for at least ")?;
+    w.write_u64_dec(min_amount_out)?;
+    w.write_str(" of ")?;
+    w.write_hex_lower(to_token)?;
+    w.write_str(" on ")?;
+    // chain_tag is ASCII null-padded — render up to the first NUL byte. Bytes
+    // outside printable ASCII would be rejected by `write_str`, so we copy into
+    // a stack buffer first.
+    let mut tag_len = 0usize;
+    while tag_len < chain_tag.len() && chain_tag[tag_len] != 0 {
+        let b = chain_tag[tag_len];
+        if !(0x20..=0x7E).contains(&b) {
+            return Err(HumanMessageError::NonAscii);
+        }
+        tag_len += 1;
+    }
+    // Safety: bytes are validated ASCII above.
+    let tag_str = core::str::from_utf8(&chain_tag[..tag_len])
+        .map_err(|_| HumanMessageError::NonAscii)?;
+    w.write_str(tag_str)?;
+    w.write_str(" for dWallet ")?;
+    w.write_base58_32(dwallet.as_array())?;
+    w.write_str(" scheme ")?;
+    w.write_u16_dec(signature_scheme)?;
+    Ok(w.len())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn quorum_session_open_message(
     out: &mut [u8; MAX_HUMAN_MESSAGE_BYTES],
