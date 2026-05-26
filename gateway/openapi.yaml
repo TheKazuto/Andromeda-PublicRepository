@@ -3324,6 +3324,74 @@ paths:
             x-andromeda-rate-class: read
             x-andromeda-required-scope: read
             x-andromeda-requires-idempotency-key: false
+    /v1/intents/swap/challenge:
+        post:
+            description: 'Handled locally by the gateway (PolicyEngine v3): builds Solana transactions in-process. Cost in tokens is set per route — see /v1/pricing.'
+            operationId: intentSwapChallenge
+            parameters: []
+            requestBody:
+                content:
+                    application/json:
+                        schema:
+                            $ref: '#/components/schemas/PassthroughObject'
+                required: false
+            responses:
+                "200":
+                    content:
+                        application/json:
+                            schema:
+                                additionalProperties: true
+                                type: object
+                    description: Success
+                "401":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Missing or invalid API key.
+                "402":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Token quota exceeded for the current period.
+                "403":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Scope missing, IP not allowed, or no active subscription.
+                "413":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Request body exceeds 25 MiB.
+                "429":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Rate limit exceeded for this bucket.
+                "502":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Upstream engine unavailable.
+                "503":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Service temporarily unavailable (e.g. circuit breaker open).
+            summary: POST /v1/intents/swap/challenge
+            tags:
+                - policy-engine
+            x-andromeda-idempotent: false
+            x-andromeda-rate-class: read
+            x-andromeda-required-scope: read
+            x-andromeda-requires-idempotency-key: false
     /v1/intents/swap/prepare:
         post:
             description: 'Handled locally by the gateway (PolicyEngine v3): builds Solana transactions in-process. Cost in tokens is set per route — see /v1/pricing.'
@@ -6609,6 +6677,942 @@ paths:
             x-andromeda-rate-class: tx
             x-andromeda-required-scope: admin
             x-andromeda-requires-idempotency-key: true
+    /v1/policy/session/close-expired:
+        post:
+            description: 'Handled locally by the gateway (PolicyEngine v3): builds Solana transactions in-process. Cost in tokens is set per route — see /v1/pricing.'
+            operationId: policyEngineSessionCloseexpired
+            parameters:
+                - description: 'Caller-provided key (8–200 chars). Two requests with the same body and key replay the cached response (`Idempotent-Replay: true`); the same key with a different body returns 422. The body is hashed with a 1 MiB cap — bodies larger than that cannot use this header (`400 body_too_large`).'
+                  in: header
+                  name: Idempotency-Key
+                  required: false
+                  schema:
+                    maxLength: 200
+                    minLength: 8
+                    type: string
+            requestBody:
+                content:
+                    application/json:
+                        schema:
+                            $ref: '#/components/schemas/PassthroughObject'
+                required: false
+            responses:
+                "200":
+                    content:
+                        application/json:
+                            schema:
+                                additionalProperties: true
+                                type: object
+                    description: Success
+                "401":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Missing or invalid API key.
+                "402":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Token quota exceeded for the current period.
+                "403":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Scope missing, IP not allowed, or no active subscription.
+                "413":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Request body exceeds 25 MiB.
+                "429":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Rate limit exceeded for this bucket.
+                "502":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Upstream engine unavailable.
+                "503":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Service temporarily unavailable (e.g. circuit breaker open).
+            summary: POST /v1/policy/session/close-expired
+            tags:
+                - policy-engine
+            x-andromeda-idempotent: true
+            x-andromeda-rate-class: tx
+            x-andromeda-required-scope: write
+            x-andromeda-requires-idempotency-key: true
+    /v1/policy/session/close/challenge:
+        post:
+            description: 'Handled locally by the gateway (PolicyEngine v3): builds Solana transactions in-process. Cost in tokens is set per route — see /v1/pricing.'
+            operationId: policyEngineSessionCloseChallenge
+            parameters: []
+            requestBody:
+                content:
+                    application/json:
+                        schema:
+                            $ref: '#/components/schemas/PassthroughObject'
+                required: false
+            responses:
+                "200":
+                    content:
+                        application/json:
+                            schema:
+                                additionalProperties: true
+                                type: object
+                    description: Success
+                "401":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Missing or invalid API key.
+                "402":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Token quota exceeded for the current period.
+                "403":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Scope missing, IP not allowed, or no active subscription.
+                "413":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Request body exceeds 25 MiB.
+                "429":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Rate limit exceeded for this bucket.
+                "502":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Upstream engine unavailable.
+                "503":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Service temporarily unavailable (e.g. circuit breaker open).
+            summary: POST /v1/policy/session/close/challenge
+            tags:
+                - policy-engine
+            x-andromeda-idempotent: false
+            x-andromeda-rate-class: read
+            x-andromeda-required-scope: read
+            x-andromeda-requires-idempotency-key: false
+    /v1/policy/session/close/submit:
+        post:
+            description: 'Handled locally by the gateway (PolicyEngine v3): builds Solana transactions in-process. Cost in tokens is set per route — see /v1/pricing.'
+            operationId: policyEngineSessionCloseSubmit
+            parameters:
+                - description: 'Caller-provided key (8–200 chars). Two requests with the same body and key replay the cached response (`Idempotent-Replay: true`); the same key with a different body returns 422. The body is hashed with a 1 MiB cap — bodies larger than that cannot use this header (`400 body_too_large`).'
+                  in: header
+                  name: Idempotency-Key
+                  required: false
+                  schema:
+                    maxLength: 200
+                    minLength: 8
+                    type: string
+            requestBody:
+                content:
+                    application/json:
+                        schema:
+                            $ref: '#/components/schemas/PassthroughObject'
+                required: false
+            responses:
+                "200":
+                    content:
+                        application/json:
+                            schema:
+                                additionalProperties: true
+                                type: object
+                    description: Success
+                "401":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Missing or invalid API key.
+                "402":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Token quota exceeded for the current period.
+                "403":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Scope missing, IP not allowed, or no active subscription.
+                "413":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Request body exceeds 25 MiB.
+                "429":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Rate limit exceeded for this bucket.
+                "502":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Upstream engine unavailable.
+                "503":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Service temporarily unavailable (e.g. circuit breaker open).
+            summary: POST /v1/policy/session/close/submit
+            tags:
+                - policy-engine
+            x-andromeda-idempotent: true
+            x-andromeda-rate-class: tx
+            x-andromeda-required-scope: write
+            x-andromeda-requires-idempotency-key: true
+    /v1/policy/session/destinations/add/challenge:
+        post:
+            description: 'Handled locally by the gateway (PolicyEngine v3): builds Solana transactions in-process. Cost in tokens is set per route — see /v1/pricing.'
+            operationId: policyEngineSessionDestinationsAddChallenge
+            parameters: []
+            requestBody:
+                content:
+                    application/json:
+                        schema:
+                            $ref: '#/components/schemas/PassthroughObject'
+                required: false
+            responses:
+                "200":
+                    content:
+                        application/json:
+                            schema:
+                                additionalProperties: true
+                                type: object
+                    description: Success
+                "401":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Missing or invalid API key.
+                "402":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Token quota exceeded for the current period.
+                "403":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Scope missing, IP not allowed, or no active subscription.
+                "413":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Request body exceeds 25 MiB.
+                "429":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Rate limit exceeded for this bucket.
+                "502":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Upstream engine unavailable.
+                "503":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Service temporarily unavailable (e.g. circuit breaker open).
+            summary: POST /v1/policy/session/destinations/add/challenge
+            tags:
+                - policy-engine
+            x-andromeda-idempotent: false
+            x-andromeda-rate-class: read
+            x-andromeda-required-scope: read
+            x-andromeda-requires-idempotency-key: false
+    /v1/policy/session/destinations/add/submit:
+        post:
+            description: 'Handled locally by the gateway (PolicyEngine v3): builds Solana transactions in-process. Cost in tokens is set per route — see /v1/pricing.'
+            operationId: policyEngineSessionDestinationsAddSubmit
+            parameters:
+                - description: 'Caller-provided key (8–200 chars). Two requests with the same body and key replay the cached response (`Idempotent-Replay: true`); the same key with a different body returns 422. The body is hashed with a 1 MiB cap — bodies larger than that cannot use this header (`400 body_too_large`).'
+                  in: header
+                  name: Idempotency-Key
+                  required: false
+                  schema:
+                    maxLength: 200
+                    minLength: 8
+                    type: string
+            requestBody:
+                content:
+                    application/json:
+                        schema:
+                            $ref: '#/components/schemas/PassthroughObject'
+                required: false
+            responses:
+                "200":
+                    content:
+                        application/json:
+                            schema:
+                                additionalProperties: true
+                                type: object
+                    description: Success
+                "401":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Missing or invalid API key.
+                "402":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Token quota exceeded for the current period.
+                "403":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Scope missing, IP not allowed, or no active subscription.
+                "413":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Request body exceeds 25 MiB.
+                "429":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Rate limit exceeded for this bucket.
+                "502":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Upstream engine unavailable.
+                "503":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Service temporarily unavailable (e.g. circuit breaker open).
+            summary: POST /v1/policy/session/destinations/add/submit
+            tags:
+                - policy-engine
+            x-andromeda-idempotent: true
+            x-andromeda-rate-class: tx
+            x-andromeda-required-scope: write
+            x-andromeda-requires-idempotency-key: true
+    /v1/policy/session/destinations/remove/challenge:
+        post:
+            description: 'Handled locally by the gateway (PolicyEngine v3): builds Solana transactions in-process. Cost in tokens is set per route — see /v1/pricing.'
+            operationId: policyEngineSessionDestinationsRemoveChallenge
+            parameters: []
+            requestBody:
+                content:
+                    application/json:
+                        schema:
+                            $ref: '#/components/schemas/PassthroughObject'
+                required: false
+            responses:
+                "200":
+                    content:
+                        application/json:
+                            schema:
+                                additionalProperties: true
+                                type: object
+                    description: Success
+                "401":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Missing or invalid API key.
+                "402":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Token quota exceeded for the current period.
+                "403":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Scope missing, IP not allowed, or no active subscription.
+                "413":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Request body exceeds 25 MiB.
+                "429":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Rate limit exceeded for this bucket.
+                "502":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Upstream engine unavailable.
+                "503":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Service temporarily unavailable (e.g. circuit breaker open).
+            summary: POST /v1/policy/session/destinations/remove/challenge
+            tags:
+                - policy-engine
+            x-andromeda-idempotent: false
+            x-andromeda-rate-class: read
+            x-andromeda-required-scope: read
+            x-andromeda-requires-idempotency-key: false
+    /v1/policy/session/destinations/remove/submit:
+        post:
+            description: 'Handled locally by the gateway (PolicyEngine v3): builds Solana transactions in-process. Cost in tokens is set per route — see /v1/pricing.'
+            operationId: policyEngineSessionDestinationsRemoveSubmit
+            parameters:
+                - description: 'Caller-provided key (8–200 chars). Two requests with the same body and key replay the cached response (`Idempotent-Replay: true`); the same key with a different body returns 422. The body is hashed with a 1 MiB cap — bodies larger than that cannot use this header (`400 body_too_large`).'
+                  in: header
+                  name: Idempotency-Key
+                  required: false
+                  schema:
+                    maxLength: 200
+                    minLength: 8
+                    type: string
+            requestBody:
+                content:
+                    application/json:
+                        schema:
+                            $ref: '#/components/schemas/PassthroughObject'
+                required: false
+            responses:
+                "200":
+                    content:
+                        application/json:
+                            schema:
+                                additionalProperties: true
+                                type: object
+                    description: Success
+                "401":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Missing or invalid API key.
+                "402":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Token quota exceeded for the current period.
+                "403":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Scope missing, IP not allowed, or no active subscription.
+                "413":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Request body exceeds 25 MiB.
+                "429":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Rate limit exceeded for this bucket.
+                "502":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Upstream engine unavailable.
+                "503":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Service temporarily unavailable (e.g. circuit breaker open).
+            summary: POST /v1/policy/session/destinations/remove/submit
+            tags:
+                - policy-engine
+            x-andromeda-idempotent: true
+            x-andromeda-rate-class: tx
+            x-andromeda-required-scope: write
+            x-andromeda-requires-idempotency-key: true
+    /v1/policy/session/open/challenge:
+        post:
+            description: 'Handled locally by the gateway (PolicyEngine v3): builds Solana transactions in-process. Cost in tokens is set per route — see /v1/pricing.'
+            operationId: policyEngineSessionOpenChallenge
+            parameters: []
+            requestBody:
+                content:
+                    application/json:
+                        schema:
+                            $ref: '#/components/schemas/PassthroughObject'
+                required: false
+            responses:
+                "200":
+                    content:
+                        application/json:
+                            schema:
+                                additionalProperties: true
+                                type: object
+                    description: Success
+                "401":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Missing or invalid API key.
+                "402":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Token quota exceeded for the current period.
+                "403":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Scope missing, IP not allowed, or no active subscription.
+                "413":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Request body exceeds 25 MiB.
+                "429":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Rate limit exceeded for this bucket.
+                "502":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Upstream engine unavailable.
+                "503":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Service temporarily unavailable (e.g. circuit breaker open).
+            summary: POST /v1/policy/session/open/challenge
+            tags:
+                - policy-engine
+            x-andromeda-idempotent: false
+            x-andromeda-rate-class: read
+            x-andromeda-required-scope: read
+            x-andromeda-requires-idempotency-key: false
+    /v1/policy/session/open/submit:
+        post:
+            description: 'Handled locally by the gateway (PolicyEngine v3): builds Solana transactions in-process. Cost in tokens is set per route — see /v1/pricing.'
+            operationId: policyEngineSessionOpenSubmit
+            parameters:
+                - description: 'Caller-provided key (8–200 chars). Two requests with the same body and key replay the cached response (`Idempotent-Replay: true`); the same key with a different body returns 422. The body is hashed with a 1 MiB cap — bodies larger than that cannot use this header (`400 body_too_large`).'
+                  in: header
+                  name: Idempotency-Key
+                  required: false
+                  schema:
+                    maxLength: 200
+                    minLength: 8
+                    type: string
+            requestBody:
+                content:
+                    application/json:
+                        schema:
+                            $ref: '#/components/schemas/PassthroughObject'
+                required: false
+            responses:
+                "200":
+                    content:
+                        application/json:
+                            schema:
+                                additionalProperties: true
+                                type: object
+                    description: Success
+                "401":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Missing or invalid API key.
+                "402":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Token quota exceeded for the current period.
+                "403":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Scope missing, IP not allowed, or no active subscription.
+                "413":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Request body exceeds 25 MiB.
+                "429":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Rate limit exceeded for this bucket.
+                "502":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Upstream engine unavailable.
+                "503":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Service temporarily unavailable (e.g. circuit breaker open).
+            summary: POST /v1/policy/session/open/submit
+            tags:
+                - policy-engine
+            x-andromeda-idempotent: true
+            x-andromeda-rate-class: tx
+            x-andromeda-required-scope: write
+            x-andromeda-requires-idempotency-key: true
+    /v1/policy/session/revoke/challenge:
+        post:
+            description: 'Handled locally by the gateway (PolicyEngine v3): builds Solana transactions in-process. Cost in tokens is set per route — see /v1/pricing.'
+            operationId: policyEngineSessionRevokeChallenge
+            parameters: []
+            requestBody:
+                content:
+                    application/json:
+                        schema:
+                            $ref: '#/components/schemas/PassthroughObject'
+                required: false
+            responses:
+                "200":
+                    content:
+                        application/json:
+                            schema:
+                                additionalProperties: true
+                                type: object
+                    description: Success
+                "401":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Missing or invalid API key.
+                "402":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Token quota exceeded for the current period.
+                "403":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Scope missing, IP not allowed, or no active subscription.
+                "413":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Request body exceeds 25 MiB.
+                "429":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Rate limit exceeded for this bucket.
+                "502":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Upstream engine unavailable.
+                "503":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Service temporarily unavailable (e.g. circuit breaker open).
+            summary: POST /v1/policy/session/revoke/challenge
+            tags:
+                - policy-engine
+            x-andromeda-idempotent: false
+            x-andromeda-rate-class: read
+            x-andromeda-required-scope: read
+            x-andromeda-requires-idempotency-key: false
+    /v1/policy/session/revoke/submit:
+        post:
+            description: 'Handled locally by the gateway (PolicyEngine v3): builds Solana transactions in-process. Cost in tokens is set per route — see /v1/pricing.'
+            operationId: policyEngineSessionRevokeSubmit
+            parameters:
+                - description: 'Caller-provided key (8–200 chars). Two requests with the same body and key replay the cached response (`Idempotent-Replay: true`); the same key with a different body returns 422. The body is hashed with a 1 MiB cap — bodies larger than that cannot use this header (`400 body_too_large`).'
+                  in: header
+                  name: Idempotency-Key
+                  required: false
+                  schema:
+                    maxLength: 200
+                    minLength: 8
+                    type: string
+            requestBody:
+                content:
+                    application/json:
+                        schema:
+                            $ref: '#/components/schemas/PassthroughObject'
+                required: false
+            responses:
+                "200":
+                    content:
+                        application/json:
+                            schema:
+                                additionalProperties: true
+                                type: object
+                    description: Success
+                "401":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Missing or invalid API key.
+                "402":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Token quota exceeded for the current period.
+                "403":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Scope missing, IP not allowed, or no active subscription.
+                "413":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Request body exceeds 25 MiB.
+                "429":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Rate limit exceeded for this bucket.
+                "502":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Upstream engine unavailable.
+                "503":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Service temporarily unavailable (e.g. circuit breaker open).
+            summary: POST /v1/policy/session/revoke/submit
+            tags:
+                - policy-engine
+            x-andromeda-idempotent: true
+            x-andromeda-rate-class: tx
+            x-andromeda-required-scope: write
+            x-andromeda-requires-idempotency-key: true
+    /v1/policy/session/state/{engine}/{sessionIndex}:
+        get:
+            description: 'Handled locally by the gateway (PolicyEngine v3): builds Solana transactions in-process. Cost in tokens is set per route — see /v1/pricing.'
+            operationId: policyEngineSessionRead
+            parameters:
+                - in: path
+                  name: engine
+                  required: true
+                  schema:
+                    type: string
+                - in: path
+                  name: sessionIndex
+                  required: true
+                  schema:
+                    type: string
+            responses:
+                "200":
+                    content:
+                        application/json:
+                            schema:
+                                additionalProperties: true
+                                type: object
+                    description: Success
+                "401":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Missing or invalid API key.
+                "402":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Token quota exceeded for the current period.
+                "403":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Scope missing, IP not allowed, or no active subscription.
+                "413":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Request body exceeds 25 MiB.
+                "429":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Rate limit exceeded for this bucket.
+                "502":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Upstream engine unavailable.
+                "503":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Service temporarily unavailable (e.g. circuit breaker open).
+            summary: GET /v1/policy/session/state/{engine}/{sessionIndex}
+            tags:
+                - policy-engine
+            x-andromeda-idempotent: false
+            x-andromeda-rate-class: read
+            x-andromeda-required-scope: read
+            x-andromeda-requires-idempotency-key: false
+    /v1/policy/session/use/build:
+        post:
+            description: 'Handled locally by the gateway (PolicyEngine v3): builds Solana transactions in-process. Cost in tokens is set per route — see /v1/pricing.'
+            operationId: policyEngineSessionUseBuild
+            parameters: []
+            requestBody:
+                content:
+                    application/json:
+                        schema:
+                            $ref: '#/components/schemas/PassthroughObject'
+                required: false
+            responses:
+                "200":
+                    content:
+                        application/json:
+                            schema:
+                                additionalProperties: true
+                                type: object
+                    description: Success
+                "401":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Missing or invalid API key.
+                "402":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Token quota exceeded for the current period.
+                "403":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Scope missing, IP not allowed, or no active subscription.
+                "413":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Request body exceeds 25 MiB.
+                "429":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Rate limit exceeded for this bucket.
+                "502":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Upstream engine unavailable.
+                "503":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Service temporarily unavailable (e.g. circuit breaker open).
+            summary: POST /v1/policy/session/use/build
+            tags:
+                - policy-engine
+            x-andromeda-idempotent: false
+            x-andromeda-rate-class: read
+            x-andromeda-required-scope: read
+            x-andromeda-requires-idempotency-key: false
     /v1/pricing:
         get:
             operationId: getPricingCatalog
