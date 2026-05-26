@@ -17,6 +17,11 @@ crate-type = ["cdylib", "lib"]
 # passkey recovery, sessions) works.
 default = ["oidc-rsa"]
 oidc-rsa = ["andromeda_oidc_verifier/oidc-rsa"]
+# Forwards `host-test` to `andromeda_auth` so the host-side unit tests can run
+# the real sha256 (the production SBF build uses `sol_sha256`). Enable via
+# `cargo test --features host-test`. NEVER enable in `cargo build-sbf` — that
+# would link sha2 into the program and bloat the binary.
+host-test = ["andromeda_auth/host-test"]
 
 [dependencies]
 quasar-lang = { git = "https://github.com/blueshift-gg/quasar", rev = "096c8f7c7c37e373758da8a65b7528cb2230e20e" }

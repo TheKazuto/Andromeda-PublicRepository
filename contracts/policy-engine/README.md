@@ -29,7 +29,7 @@ Hot path + admin:
 | Disc | Name | Notes |
 |---|---|---|
 | 0 | `init_engine` | Init authority signs the canonical init challenge over `sha256(init_authority_slot)` so the engine PDA cannot be front-run. |
-| 1 | `request_signature` | Walks every active rule's sub-PDA in order. Caller MUST attach exactly one remaining account per active slot. Header drift + discriminator + ownership checks before per-kind dispatch. **ABI V2:** carries `amount: u64` + `asset_index: u8` (bound into the metadata digest under `andromeda::policy-engine::request::v2`) so a `KIND_SPENDING_USD` rule can be enforced end-to-end; both are 0 when no spending rule is active. **ABI V3 (Update 6):** also carries `ika_msg_metadata_digest: [u8; 32]` — opaque, forwarded verbatim to Ika `approve_message`; `0` (the default for every chain except Zcash) reproduces the prior behaviour. Independent of the Andromeda metadata digest. |
+| 1 | `request_signature` | Walks every active rule's sub-PDA in order. Caller MUST attach exactly one remaining account per active slot. Header drift + discriminator + ownership checks before per-kind dispatch. **ABI V2:** carries `amount: u64` + `asset_index: u8` (bound into the metadata digest under `andromeda::policy-engine::request::v2`) so a `KIND_SPENDING_USD` rule can be enforced end-to-end; both are 0 when no spending rule is active. **ABI V3 (Update 6):** also carries `ika_msg_metadata_digest: [u8; 32]` — opaque, forwarded verbatim to Ika `approve_message`; `0` (the default for every chain except Zcash) reproduces the prior behaviour. Independent of the Andromeda metadata digest. **Update 7 (2026-05-26) — ABI BREAKING:** 10 extra typed params: `signing_kind` (0=NORMAL / 1=SWAP) + 4 swap fields (`swap_{from_token,to_token,min_amount_out,chain_tag}`) selecting the V3 `swap_metadata_digest` + `swap_sign_message` renderer when `signing_kind = 1`; plus 5 bundle fields (`bundle_total`, `bundle_this_index`, three `bundle_other_digest_*`) selecting the op-tag-agnostic `bundle_use_challenge` when `bundle_total >= 2` so ONE owner signature unlocks N (≤ 4) legs (e.g. EVM 2-step approve+swap). Legacy callers pass zeros for every new field to reproduce the prior behaviour. |
 | 60 / 61 | `pause` / `resume` | Engine-wide. While paused, ALL signing and session-open paths reject. |
 | 80 | `recover_as_primary` | Ed25519/Secp256k1/Secp256r1 primary signs the canonical primary-recover challenge off-chain; precompile verifies; CPIs Ika after destination + daily-limit + cooldown enforcement. |
 
@@ -93,6 +93,29 @@ Incremental updates (list-style configs):
 | 130 / 131 | `update_rule_recovery_add_member` / `..._remove_member` |
 | 132 / 133 | `update_rule_recovery_add_destination` / `..._remove_destination` |
 
+## Update 7 (2026-05-26) — SWAP clear-signing + BUNDLE challenge
+
+ABI BREAK on disc 1. Two follow-ups landed together in one handler extension:
+
+* **SWAP signing kind (`signing_kind = 1`).** The dWallet owner reads a semantic `swap_sign_message` (`"Swap X of <from_token> for at least Y of <to_token> on <chain> for dWallet ..."`) instead of the generic `normal_sign_message`. Token addresses go as raw 32-byte hex (the program cannot verify symbols); the wallet UI rotula names em cima dos endereços bound. `chain_tag` is 8 bytes ASCII null-padded (`"solana\0\0"`, `"evm:1\0\0\0"`). Domain bump to `andromeda::policy-engine::request::v3` makes the SWAP metadata digest disjoint from V2 — a swap signing cannot be replayed as a NORMAL signature.
+
+* **Bundle challenge (`bundle_total >= 2`).** ONE owner signature covers up to `MAX_BUNDLE_TOTAL = 4` distinct `request_signature` legs. The `bundle_use_challenge` is **op-tag-agnostic**: legs can mix `signing_kind`s (e.g. NORMAL approve + SWAP swap), each one's `metadata_digest` is reordered into its `this_index` of `bundle_total` slots, the concatenation is hashed, and every leg arrives at the SAME hash from its own viewpoint. The Andromeda gateway uses this for the EVM 2-step swap path (approve + swap in one signing prompt).
+
+Cross-language layout is locked by fixtures under [`fixtures/policy_engine_v3/challenges/runtime/`](../../fixtures/policy_engine_v3/challenges/runtime/): `swap_sign_message.json`, `swap_metadata_digest.json`, `swap_use_challenge.json`, `bundle_use_challenge_2.json`. Both the Rust unit tests in this crate (`#[cfg(test)] mod update7_tests`) and the Go mirror (`gateway/internal/policy/update7_fixtures_test.go`) re-compute against the fixtures.
+
+To regenerate fixtures after a wire-format change:
+
+```bash
+cd contracts/policy-engine
+cargo test --features host-test --lib gen_update7_fixtures -- --ignored
+```
+
+CI runs without `--ignored`, so committed fixtures stay frozen between deliberate regenerations.
+
+## Update 8 (2026-05-26) — sessions surfaced as REST (no on-chain change)
+
+The session-key lifecycle (disc 100..106) already existed on-chain and was validated in earlier audits. Update 8 exposed the primitives as REST in the gateway (`/v1/policy/session/*`) so dApps can build their own delegation layer (AI trading agents, DCA, multi-tenant) without Andromeda custodying the session keypair. The session-signer is generated client-side and signs `request_signature_via_session` (disc 101) natively as a Solana `Signer`. **No code in this crate changed for Update 8.**
+
 ## Build & deploy
 
 ```bash
@@ -143,3 +166,4 @@ src/lib.rs
 |---|---|---|
 | `oidc-rsa` | ON | Forwards to `andromeda_oidc_verifier/oidc-rsa`. With it OFF, `rsa2048_modexp` returns `BadSignature` explicitly, so every OIDC verify rejects — Login Social via OIDC is unavailable. Use `--no-default-features` for devnet pre-alpha until the cluster ships `sol_big_mod_exp`. |
 | `mainnet` | OFF | Compile-time enforces non-empty `ALLOWED_*` allowlists (issuers, audiences, oracle owners, FHE authorities). Required on mainnet builds. |
+| `host-test` | OFF | Forwards `host-test` to `andromeda_auth/host-test` so the host-side unit tests (Update 7 + fixture generator) can run a real `sha2`-backed `hashv`. **NEVER enable in `cargo build-sbf`** — would link `sha2` into the program. Use only with `cargo test --features host-test`. |

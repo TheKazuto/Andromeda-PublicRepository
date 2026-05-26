@@ -15,6 +15,9 @@ dependencies = [
 name = "andromeda_auth"
 version = "0.1.0"
 dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
  "solana-address",
 ]
 

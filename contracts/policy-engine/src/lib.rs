@@ -89,6 +89,21 @@ pub const APPLIES_RECOVERY: u8 = 2;
 pub const APPLIES_SESSION: u8 = 4;
 pub const APPLIES_ALL: u8 = APPLIES_NORMAL | APPLIES_RECOVERY | APPLIES_SESSION;
 
+// Update 7 (2026-05-26): signing-kind discriminator for disc 1 (`request_signature`).
+// Selects which `human_message` renderer + `*_metadata_digest` variant is used at
+// challenge time. The on-chain dispatch loop still runs against `PATH_NORMAL` —
+// active rules apply identically to NORMAL and SWAP signings; only the clear-
+// signing surface changes (so the dWallet owner reads a semantic message).
+pub const SIGNING_KIND_NORMAL: u8 = 0;
+pub const SIGNING_KIND_SWAP: u8 = 1;
+
+// Update 7 (2026-05-26): bundle challenge limits. A single owner signature can
+// cover up to MAX_BUNDLE_TOTAL distinct message_digests (e.g. EVM 2-step
+// approve+swap = 2; multi-pool rebalance = up to 4). Below MIN_BUNDLE_TOTAL the
+// challenge falls back to `normal_use_challenge` (single-digest path).
+pub const MIN_BUNDLE_TOTAL: u8 = 2;
+pub const MAX_BUNDLE_TOTAL: u8 = 4;
+
 // Signing paths.
 pub const PATH_NORMAL: u8 = APPLIES_NORMAL;
 pub const PATH_RECOVERY: u8 = APPLIES_RECOVERY;
@@ -128,6 +143,12 @@ pub const DOMAIN_REQUEST_V1: &[u8] = b"andromeda::policy-engine::request::v1";
 // Update 3: V2 binds `amount` + `asset_index` into the request metadata digest
 // so a USD spending limit (KIND_SPENDING_USD) can be enforced end-to-end.
 pub const DOMAIN_REQUEST_V2: &[u8] = b"andromeda::policy-engine::request::v2";
+// Update 7 (2026-05-26): V3 binds swap-specific fields (from_token, to_token,
+// min_amount_out, chain_tag) when the gateway is signing a swap, so the dWallet
+// owner clear-signs a semantic swap message and the on-chain handler enforces
+// the exact swap parameters. `signing_kind = SIGNING_KIND_SWAP` (1) selects
+// this digest; `signing_kind = SIGNING_KIND_NORMAL` (0) continues using V2.
+pub const DOMAIN_REQUEST_V3: &[u8] = b"andromeda::policy-engine::request::v3";
 pub const DOMAIN_RECOVERY_V3: &[u8] = b"andromeda::policy-engine::recovery::v3";
 
 // Op tags (mirror of ABI §6.3).
@@ -137,6 +158,17 @@ pub const OP_INIT_WITH_RECOVERY: &[u8] = b"init-with-recovery";
 // authorization (disc 1). The owner_slot signs this so the gateway cannot
 // relay a signature without the dWallet owner's consent.
 pub const OP_NORMAL_SIGN: &[u8] = b"normal-sign";
+// Update 7 (2026-05-26): clear-signing op tag for the SWAP-kind signing path
+// (disc 1 with `signing_kind = SIGNING_KIND_SWAP`). Replaces `normal-sign` in
+// the challenge preimage so a wallet showing "Sign for dWallet ..." vs
+// "Swap ... for ..." produces distinct hashes — a phished swap challenge
+// can't be replayed as a generic signature.
+pub const OP_SWAP_SIGN: &[u8] = b"swap-sign";
+// Update 7 (2026-05-26): bundle challenge op tag. When N >= 2 message_digests
+// share a single owner signature (e.g. EVM 2-step approve+swap), each disc 1
+// uses this op tag and includes its `bundle_this_index` + the other digests'
+// hashes so the on-chain handler recomputes the same `bundle_use_challenge` hash.
+pub const OP_BUNDLE_SIGN: &[u8] = b"bundle-sign";
 pub const OP_ADD_ALLOWLIST: &[u8] = b"add-rule-allowlist";
 pub const OP_ALLOWLIST_ADD_DEST: &[u8] = b"allowlist-add-destination";
 pub const OP_ALLOWLIST_REMOVE_DEST: &[u8] = b"allowlist-remove-destination";
@@ -297,6 +329,12 @@ pub enum PolicyEngineError {
     /// exceeded the session's `max_amount_per_tx` cap (set by the owner at
     /// `session_open`). Added at the enum tail to avoid shifting existing codes.
     SessionAmountExceeded,
+
+    /// Update 7 (2026-05-26): a SWAP-kind or BUNDLE field in `request_signature`
+    /// failed validation (unknown signing_kind, mismatched swap meta, malformed
+    /// bundle proof, or a leftover non-zero in an unused slot). Added at the
+    /// enum tail to avoid shifting existing codes.
+    InvalidField,
 }
 
 impl From<AuthError> for PolicyEngineError {
@@ -1369,6 +1407,151 @@ pub fn normal_use_challenge(
         engine.as_array().as_slice(),
         dwallet.as_array().as_slice(),
         metadata_digest,
+        owner_slot,
+    ])
+}
+
+/// Update 7 (2026-05-26): metadata digest for the SWAP signing path. Extends V2
+/// with the swap-specific fields (from_token, to_token, min_amount_out, chain_tag)
+/// the on-chain handler binds when `signing_kind = SIGNING_KIND_SWAP`. The
+/// NORMAL path keeps using `request_metadata_digest` (V2) unchanged.
+///
+/// `from_amount` reuses the existing `amount` field (already bound in V2). The
+/// extra fields are appended in canonical order; the domain tag is bumped to
+/// `DOMAIN_REQUEST_V3` so a V2 / V3 digest cannot collide.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub fn swap_metadata_digest(
+    engine: &Address,
+    dwallet: &Address,
+    message_digest: &[u8; 32],
+    destination: &[u8; 32],
+    user_pubkey: &[u8; 32],
+    signature_scheme: u16,
+    rules_generation: u32,
+    from_amount: u64,
+    asset_index: u8,
+    from_token: &[u8; 32],
+    to_token: &[u8; 32],
+    min_amount_out: u64,
+    chain_tag: &[u8; 8],
+) -> [u8; 32] {
+    let scheme_le = signature_scheme.to_le_bytes();
+    let path_b = [PATH_NORMAL]; // dispatch loop still runs as NORMAL.
+    let gen_le = rules_generation.to_le_bytes();
+    let amount_le = from_amount.to_le_bytes();
+    let asset_b = [asset_index];
+    let min_out_le = min_amount_out.to_le_bytes();
+    hashv(&[
+        DOMAIN_REQUEST_V3,
+        b"request-signature-swap",
+        engine.as_array().as_slice(),
+        dwallet.as_array().as_slice(),
+        message_digest,
+        destination,
+        user_pubkey,
+        &scheme_le,
+        &path_b,
+        &gen_le,
+        &amount_le,
+        &asset_b,
+        from_token,
+        to_token,
+        &min_out_le,
+        chain_tag,
+    ])
+}
+
+/// Update 7 (2026-05-26): owner-authorization challenge for the SWAP signing
+/// path (disc 1, `signing_kind = SIGNING_KIND_SWAP`). Same shape as
+/// `normal_use_challenge` but the op tag changes so a swap-clear-signed
+/// message can't be replayed as a generic signature — and vice versa.
+#[inline]
+pub fn swap_use_challenge(
+    human: &[u8],
+    engine: &Address,
+    dwallet: &Address,
+    metadata_digest: &[u8; 32],
+    owner_slot: &[u8; MEMBER_SLOT_LEN],
+) -> [u8; 32] {
+    let h_len = human_len_le(human);
+    hashv(&[
+        DOMAIN_V3,
+        OP_SWAP_SIGN,
+        &h_len,
+        human,
+        engine.as_array().as_slice(),
+        dwallet.as_array().as_slice(),
+        metadata_digest,
+        owner_slot,
+    ])
+}
+
+/// Update 7 (2026-05-26): bundle owner-authorization challenge. One owner
+/// signature covers `total` distinct `request_signature` transactions (e.g. EVM
+/// 2-step approve+swap, or up to MAX_BUNDLE_TOTAL legs). Each leg's `disc 1`
+/// recomputes the same hash by passing its own `this_index` + the other legs'
+/// metadata digests.
+///
+/// The canonical ordering reorders the digests so that this leg's digest sits
+/// at `this_index` and the supplied `other_digests` fill the remaining slots in
+/// the order they appear (`other_digests[0]` is the first slot that is NOT
+/// `this_index`, then second, then third). This deterministic ordering is what
+/// makes the hash recoverable from each leg's own viewpoint.
+///
+/// **Why no `op_tag` / `human` here:** for ONE owner signature to unlock every
+/// leg, the bundle hash MUST be identical across legs. Different legs can have
+/// different signing kinds (e.g. EVM 2-step is NORMAL approve + SWAP swap), so
+/// per-leg `op_tag` / `human` bytes would produce diverging hashes. The bundle
+/// hash therefore binds only the identity (engine, dwallet, owner_slot) + the
+/// ordered set of metadata digests. Each leg still validates its own
+/// `metadata_digest` against its canonical preimage (V2 for NORMAL, V3 for
+/// SWAP), so a gateway compromise cannot substitute either underlying tx — the
+/// digest would change and the bundle hash would no longer match.
+///
+/// The clear-signing UI of the bundle (e.g. "Authorize bundle: approve USDC +
+/// swap 100 USDC for SOL") is rendered off-chain by the wallet; it is NOT
+/// bound to the hash. The hash binds the underlying digests, which already
+/// bind the txs.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub fn bundle_use_challenge(
+    engine: &Address,
+    dwallet: &Address,
+    this_metadata_digest: &[u8; 32],
+    owner_slot: &[u8; MEMBER_SLOT_LEN],
+    total: u8,
+    this_index: u8,
+    other_digests: &[[u8; 32]],
+) -> [u8; 32] {
+    let total_b = [total];
+    // Reorder: build `total` slots, place `this_metadata_digest` at `this_index`,
+    // fill remaining slots with `other_digests` in supplied order.
+    let mut ordered: [[u8; 32]; MAX_BUNDLE_TOTAL as usize] =
+        [[0u8; 32]; MAX_BUNDLE_TOTAL as usize];
+    let mut other_iter = 0usize;
+    let total_usize = total as usize;
+    for (i, slot) in ordered.iter_mut().enumerate().take(total_usize) {
+        if i == this_index as usize {
+            *slot = *this_metadata_digest;
+        } else {
+            *slot = other_digests[other_iter];
+            other_iter += 1;
+        }
+    }
+    // Flatten ordered digests into one contiguous slice for hashing.
+    // We cannot pass &[[u8;32]] directly to hashv; build a stack buffer.
+    let mut flat = [0u8; (MAX_BUNDLE_TOTAL as usize) * 32];
+    for (i, d) in ordered.iter().enumerate().take(total_usize) {
+        flat[i * 32..(i + 1) * 32].copy_from_slice(d);
+    }
+    hashv(&[
+        DOMAIN_V3,
+        OP_BUNDLE_SIGN,
+        engine.as_array().as_slice(),
+        dwallet.as_array().as_slice(),
+        &total_b,
+        &flat[..total_usize * 32],
         owner_slot,
     ])
 }
@@ -2476,6 +2659,43 @@ mod policy_engine_program {
         // metadata) reproduces the prior behaviour. NOT bound to the Andromeda
         // `metadata_digest` above — they are independent bindings.
         ika_msg_metadata_digest: [u8; 32],
+        // Update 7 (2026-05-26) — SWAP clear-signing extension.
+        //
+        // `signing_kind` selects which clear-signing renderer + metadata digest
+        // variant is used at challenge time:
+        //   * SIGNING_KIND_NORMAL (0): legacy NORMAL path — `normal_sign_message`
+        //     + `request_metadata_digest` (V2). The swap_* fields below MUST be
+        //     zero. This is the only path used by non-swap signers.
+        //   * SIGNING_KIND_SWAP (1): semantic swap clear-signing — `swap_sign_message`
+        //     + `swap_metadata_digest` (V3). `swap_from_token` + `swap_to_token`
+        //     MUST be distinct (no trivial self-swap); `swap_chain_tag` is ASCII
+        //     null-padded (e.g. "solana\0\0").
+        //
+        // The dispatch loop runs against `PATH_NORMAL` regardless of `signing_kind`
+        // — rules apply identically; only the clear-signing surface changes.
+        signing_kind: u8,
+        swap_from_token: [u8; 32],
+        swap_to_token: [u8; 32],
+        swap_min_amount_out: u64,
+        swap_chain_tag: [u8; 8],
+        // Update 7 (2026-05-26) — BUNDLE challenge extension.
+        //
+        // When `bundle_total < MIN_BUNDLE_TOTAL` (2), the owner authorization
+        // uses the single-digest `normal_use_challenge` / `swap_use_challenge`.
+        //
+        // When `bundle_total ∈ [MIN_BUNDLE_TOTAL, MAX_BUNDLE_TOTAL]`, ONE owner
+        // signature covers `bundle_total` distinct `request_signature` legs (each
+        // its own Solana tx). This leg sits at `bundle_this_index`; the other
+        // legs' metadata digests are passed in `bundle_other_digest_1..3`
+        // (in supplied order; trailing slots zero-padded). The on-chain handler
+        // recomputes `bundle_use_challenge` and validates the precompile against
+        // it — every leg shares the same challenge hash, so the same signature
+        // unlocks each one. Anti-replay remains the per-leg MessageApproval PDA.
+        bundle_total: u8,
+        bundle_this_index: u8,
+        bundle_other_digest_1: [u8; 32],
+        bundle_other_digest_2: [u8; 32],
+        bundle_other_digest_3: [u8; 32],
     ) -> Result<(), ProgramError> {
         let current_ts: i64 = ctx.accounts.clock.unix_timestamp.into();
         let engine_addr = *ctx.accounts.engine.address();
@@ -2503,19 +2723,65 @@ mod policy_engine_program {
             PolicyEngineError::InvalidRuleHeader
         );
 
-        // Validate metadata_digest against canonical computation.
-        let expected_md = request_metadata_digest(
-            &engine_addr,
-            &dwallet_addr,
-            &message_digest,
-            &destination,
-            &user_pubkey,
-            signature_scheme,
-            PATH_NORMAL,
-            on_chain_gen,
-            amount,
-            asset_index,
+        // Update 7 (2026-05-26): validate the SWAP-extension fields up front so
+        // a malformed payload fails before any hashing. NORMAL signing MUST send
+        // zero values for the swap_* fields — keeps the digest unambiguous.
+        require!(
+            signing_kind == SIGNING_KIND_NORMAL || signing_kind == SIGNING_KIND_SWAP,
+            PolicyEngineError::InvalidField
         );
+        if signing_kind == SIGNING_KIND_NORMAL {
+            require!(
+                swap_from_token == [0u8; 32]
+                    && swap_to_token == [0u8; 32]
+                    && swap_min_amount_out == 0
+                    && swap_chain_tag == [0u8; 8],
+                PolicyEngineError::InvalidField
+            );
+        } else {
+            // SWAP: at least one token address must be non-zero (otherwise the
+            // human message would render two identical addresses), and the two
+            // tokens MUST differ (no trivial self-swap), and a chain tag is
+            // required so the wallet UI knows the network.
+            require!(
+                swap_from_token != [0u8; 32] || swap_to_token != [0u8; 32],
+                PolicyEngineError::InvalidField
+            );
+            require!(swap_from_token != swap_to_token, PolicyEngineError::InvalidField);
+            require!(swap_chain_tag != [0u8; 8], PolicyEngineError::InvalidField);
+        }
+
+        // Validate metadata_digest against canonical computation.
+        let expected_md = if signing_kind == SIGNING_KIND_SWAP {
+            swap_metadata_digest(
+                &engine_addr,
+                &dwallet_addr,
+                &message_digest,
+                &destination,
+                &user_pubkey,
+                signature_scheme,
+                on_chain_gen,
+                amount,
+                asset_index,
+                &swap_from_token,
+                &swap_to_token,
+                swap_min_amount_out,
+                &swap_chain_tag,
+            )
+        } else {
+            request_metadata_digest(
+                &engine_addr,
+                &dwallet_addr,
+                &message_digest,
+                &destination,
+                &user_pubkey,
+                signature_scheme,
+                PATH_NORMAL,
+                on_chain_gen,
+                amount,
+                asset_index,
+            )
+        };
         require!(
             metadata_digest == expected_md,
             PolicyEngineError::AuthFailed
@@ -2537,21 +2803,92 @@ mod policy_engine_program {
             PolicyEngineError::UnsupportedScheme
         );
         let mut human_buf = [0u8; MAX_HUMAN_MESSAGE_BYTES];
-        let human_len = human_message::normal_sign_message(
-            &mut human_buf,
-            &dwallet_addr,
-            &destination,
-            amount,
-            signature_scheme,
-        )
-        .map_err(PolicyEngineError::from)?;
-        let auth_challenge = normal_use_challenge(
-            &human_buf[..human_len],
-            &engine_addr,
-            &dwallet_addr,
-            &metadata_digest,
-            &owner_slot,
-        );
+        let human_len = if signing_kind == SIGNING_KIND_SWAP {
+            human_message::swap_sign_message(
+                &mut human_buf,
+                &dwallet_addr,
+                &swap_from_token,
+                amount,
+                &swap_to_token,
+                swap_min_amount_out,
+                &swap_chain_tag,
+                signature_scheme,
+            )
+            .map_err(PolicyEngineError::from)?
+        } else {
+            human_message::normal_sign_message(
+                &mut human_buf,
+                &dwallet_addr,
+                &destination,
+                amount,
+                signature_scheme,
+            )
+            .map_err(PolicyEngineError::from)?
+        };
+
+        // Update 7 (2026-05-26): bundle vs single challenge. When `bundle_total`
+        // is below MIN_BUNDLE_TOTAL, treat it as no-bundle (single-digest path).
+        // Otherwise validate the bundle proof and recompute `bundle_use_challenge`.
+        let auth_challenge = if bundle_total >= MIN_BUNDLE_TOTAL {
+            require!(
+                bundle_total <= MAX_BUNDLE_TOTAL && bundle_this_index < bundle_total,
+                PolicyEngineError::InvalidField
+            );
+            // Pack only the `bundle_total - 1` other digests that are actually
+            // used; the remaining ones MUST be zero (defence in depth: a stray
+            // non-zero in an unused slot is a malformed payload).
+            let used_others = (bundle_total - 1) as usize;
+            let others_full = [
+                bundle_other_digest_1,
+                bundle_other_digest_2,
+                bundle_other_digest_3,
+            ];
+            for (i, d) in others_full.iter().enumerate() {
+                if i >= used_others {
+                    require!(*d == [0u8; 32], PolicyEngineError::InvalidField);
+                }
+            }
+            // Bundle hash is op_tag-agnostic on purpose — see bundle_use_challenge
+            // doc. Per-leg op tag still selects the metadata digest variant
+            // recomputed above (NORMAL/V2 vs SWAP/V3), which is what actually
+            // gets bound into the bundle hash via `metadata_digest`.
+            bundle_use_challenge(
+                &engine_addr,
+                &dwallet_addr,
+                &metadata_digest,
+                &owner_slot,
+                bundle_total,
+                bundle_this_index,
+                &others_full[..used_others],
+            )
+        } else {
+            // Reject any non-zero "other digest" payload when no bundle is in
+            // effect — keeps the payload canonical and prevents accidental drift.
+            require!(
+                bundle_this_index == 0
+                    && bundle_other_digest_1 == [0u8; 32]
+                    && bundle_other_digest_2 == [0u8; 32]
+                    && bundle_other_digest_3 == [0u8; 32],
+                PolicyEngineError::InvalidField
+            );
+            if signing_kind == SIGNING_KIND_SWAP {
+                swap_use_challenge(
+                    &human_buf[..human_len],
+                    &engine_addr,
+                    &dwallet_addr,
+                    &metadata_digest,
+                    &owner_slot,
+                )
+            } else {
+                normal_use_challenge(
+                    &human_buf[..human_len],
+                    &engine_addr,
+                    &dwallet_addr,
+                    &metadata_digest,
+                    &owner_slot,
+                )
+            }
+        };
         check_sysvar_addr(ctx.accounts.instructions_sysvar.address())?;
         let sysvar_view = ctx.accounts.instructions_sysvar.to_account_view();
         let sysvar_data_ref = sysvar_view
@@ -9063,4 +9400,499 @@ pub struct OidcSessionCloseAccts {
     pub clock: Sysvar<Clock>,
     pub event_authority: EventAuthority,
     pub program: Program<PolicyEngineProgram>,
+}
+
+// ─── Update 7 (2026-05-26) — host-side unit tests ───────────────────────────
+//
+// Runs on the host via `cargo test --lib`. The handler-side validation
+// (signing_kind / bundle bounds / owner precompile) is covered by the on-chain
+// smoke tests that ship with the gateway redeploy. These tests guard the pure
+// hashing / rendering helpers + the cross-language byte-for-byte contract with
+// the Go mirrors in `gateway/internal/policy/update7_test.go`.
+#[cfg(test)]
+mod update7_tests {
+    use super::*;
+    use andromeda_auth::human_message::{
+        swap_sign_message, HumanMessageError, MAX_HUMAN_MESSAGE_BYTES,
+    };
+
+    fn addr_with(b: u8) -> Address {
+        let mut bytes = [0u8; 32];
+        bytes[0] = b;
+        Address::from(bytes)
+    }
+    fn digest_with(b: u8) -> [u8; 32] {
+        let mut d = [0u8; 32];
+        d[0] = b;
+        d
+    }
+    fn solana_tag() -> [u8; 8] {
+        let mut t = [0u8; 8];
+        t[..6].copy_from_slice(b"solana");
+        t
+    }
+
+    #[test]
+    fn swap_sign_message_is_deterministic_and_semantic() {
+        let dwallet = addr_with(1);
+        let mut from_token = [0u8; 32];
+        from_token[31] = 0xAA;
+        let mut to_token = [0u8; 32];
+        to_token[31] = 0xBB;
+        let mut buf_a = [0u8; MAX_HUMAN_MESSAGE_BYTES];
+        let mut buf_b = [0u8; MAX_HUMAN_MESSAGE_BYTES];
+        let la = swap_sign_message(&mut buf_a, &dwallet, &from_token, 100, &to_token, 50, &solana_tag(), 0).unwrap();
+        let lb = swap_sign_message(&mut buf_b, &dwallet, &from_token, 100, &to_token, 50, &solana_tag(), 0).unwrap();
+        assert_eq!(la, lb);
+        assert_eq!(&buf_a[..la], &buf_b[..lb]);
+        let s = core::str::from_utf8(&buf_a[..la]).expect("ascii");
+        assert!(s.starts_with("Swap 100 of "));
+        assert!(s.contains(" for at least 50 of "));
+        assert!(s.contains(" on solana for dWallet "));
+        assert!(s.ends_with(" scheme 0"));
+    }
+
+    #[test]
+    fn swap_sign_message_rejects_non_ascii_chain_tag() {
+        let dwallet = addr_with(1);
+        let from = digest_with(1);
+        let to = digest_with(2);
+        let mut bad_tag = [0u8; 8];
+        bad_tag[..2].copy_from_slice(b"ev");
+        bad_tag[2] = 0xFF;
+        let mut buf = [0u8; MAX_HUMAN_MESSAGE_BYTES];
+        let res = swap_sign_message(&mut buf, &dwallet, &from, 100, &to, 50, &bad_tag, 0);
+        assert!(matches!(res, Err(HumanMessageError::NonAscii)));
+    }
+
+    #[test]
+    fn swap_sign_message_stops_at_first_nul_in_chain_tag() {
+        let dwallet = addr_with(1);
+        let from = digest_with(1);
+        let to = digest_with(2);
+        let mut tag = [0u8; 8];
+        tag[..3].copy_from_slice(b"evm");
+        let mut buf = [0u8; MAX_HUMAN_MESSAGE_BYTES];
+        let len = swap_sign_message(&mut buf, &dwallet, &from, 100, &to, 50, &tag, 0).unwrap();
+        let s = core::str::from_utf8(&buf[..len]).unwrap();
+        assert!(s.contains(" on evm for dWallet "));
+    }
+
+    #[test]
+    fn swap_metadata_digest_differs_from_v2_with_same_common_inputs() {
+        let engine = addr_with(1);
+        let dwallet = addr_with(2);
+        let msg = digest_with(0xAA);
+        let dest = digest_with(0xBB);
+        let user = digest_with(0xCC);
+        let from = digest_with(0xDD);
+        let to = digest_with(0xEE);
+        let v2 = request_metadata_digest(&engine, &dwallet, &msg, &dest, &user, 0, PATH_NORMAL, 0, 100, 0);
+        let v3 = swap_metadata_digest(&engine, &dwallet, &msg, &dest, &user, 0, 0, 100, 0, &from, &to, 50, &solana_tag());
+        assert_ne!(v2, v3);
+    }
+
+    #[test]
+    fn swap_metadata_digest_binds_every_swap_field() {
+        let engine = addr_with(1);
+        let dwallet = addr_with(2);
+        let msg = digest_with(0xAA);
+        let dest = digest_with(0xBB);
+        let user = digest_with(0xCC);
+        let from = digest_with(0xDD);
+        let to = digest_with(0xEE);
+        let tag = solana_tag();
+        let base = swap_metadata_digest(&engine, &dwallet, &msg, &dest, &user, 0, 0, 100, 0, &from, &to, 50, &tag);
+        assert_ne!(base, swap_metadata_digest(&engine, &dwallet, &msg, &dest, &user, 0, 0, 101, 0, &from, &to, 50, &tag));
+        assert_ne!(base, swap_metadata_digest(&engine, &dwallet, &msg, &dest, &user, 0, 0, 100, 1, &from, &to, 50, &tag));
+        let from2 = digest_with(0xD0);
+        assert_ne!(base, swap_metadata_digest(&engine, &dwallet, &msg, &dest, &user, 0, 0, 100, 0, &from2, &to, 50, &tag));
+        let to2 = digest_with(0xE0);
+        assert_ne!(base, swap_metadata_digest(&engine, &dwallet, &msg, &dest, &user, 0, 0, 100, 0, &from, &to2, 50, &tag));
+        assert_ne!(base, swap_metadata_digest(&engine, &dwallet, &msg, &dest, &user, 0, 0, 100, 0, &from, &to, 51, &tag));
+        let mut tag2 = [0u8; 8];
+        tag2[..3].copy_from_slice(b"evm");
+        assert_ne!(base, swap_metadata_digest(&engine, &dwallet, &msg, &dest, &user, 0, 0, 100, 0, &from, &to, 50, &tag2));
+    }
+
+    #[test]
+    fn swap_use_challenge_differs_from_normal_use_challenge_with_same_inputs() {
+        let engine = addr_with(1);
+        let dwallet = addr_with(2);
+        let metadata = digest_with(0xAA);
+        let owner_slot = [0u8; MEMBER_SLOT_LEN];
+        let human = b"Sign for dWallet ... amount 100 scheme 0";
+        let normal = normal_use_challenge(human, &engine, &dwallet, &metadata, &owner_slot);
+        let swap = swap_use_challenge(human, &engine, &dwallet, &metadata, &owner_slot);
+        assert_ne!(normal, swap);
+    }
+
+    #[test]
+    fn bundle_use_challenge_identical_across_legs() {
+        let engine = addr_with(1);
+        let dwallet = addr_with(2);
+        let owner_slot = [0u8; MEMBER_SLOT_LEN];
+        let approve_md = digest_with(0xAA);
+        let swap_md = digest_with(0xBB);
+        let leg0 = bundle_use_challenge(&engine, &dwallet, &approve_md, &owner_slot, 2, 0, &[swap_md]);
+        let leg1 = bundle_use_challenge(&engine, &dwallet, &swap_md, &owner_slot, 2, 1, &[approve_md]);
+        assert_eq!(leg0, leg1, "bundle invariant broken");
+    }
+
+    #[test]
+    fn bundle_use_challenge_ordering_matters() {
+        let engine = addr_with(1);
+        let dwallet = addr_with(2);
+        let owner_slot = [0u8; MEMBER_SLOT_LEN];
+        let a = digest_with(0xAA);
+        let b = digest_with(0xBB);
+        let canonical = bundle_use_challenge(&engine, &dwallet, &a, &owner_slot, 2, 0, &[b]);
+        let reordered = bundle_use_challenge(&engine, &dwallet, &b, &owner_slot, 2, 0, &[a]);
+        assert_ne!(canonical, reordered);
+    }
+
+    #[test]
+    fn bundle_use_challenge_binds_owner_slot() {
+        let engine = addr_with(1);
+        let dwallet = addr_with(2);
+        let mut slot_a = [0u8; MEMBER_SLOT_LEN];
+        let mut slot_b = [0u8; MEMBER_SLOT_LEN];
+        slot_a[0] = 0;
+        slot_b[0] = 1;
+        let a = digest_with(0xAA);
+        let b = digest_with(0xBB);
+        let ha = bundle_use_challenge(&engine, &dwallet, &a, &slot_a, 2, 0, &[b]);
+        let hb = bundle_use_challenge(&engine, &dwallet, &a, &slot_b, 2, 0, &[b]);
+        assert_ne!(ha, hb);
+    }
+
+    #[test]
+    fn signing_kind_constants_are_in_expected_range() {
+        assert_eq!(SIGNING_KIND_NORMAL, 0);
+        assert_eq!(SIGNING_KIND_SWAP, 1);
+    }
+
+    #[test]
+    fn bundle_total_bounds_are_2_to_4() {
+        assert_eq!(MIN_BUNDLE_TOTAL, 2);
+        assert_eq!(MAX_BUNDLE_TOTAL, 4);
+    }
+}
+
+// ─── Update 7 fixture generator (host-only, opt-in) ─────────────────────────
+//
+// Writes canonical cross-language fixtures under
+// `fixtures/policy_engine_v3/challenges/runtime/`. The Go gateway sibling
+// `gateway/internal/policy/update7_fixtures_test.go` re-computes the same
+// hashes from the same inputs and asserts they match — any byte-level drift
+// between Rust and Go fails the Go test (or fails this Rust regenerate run
+// if the algorithm was edited but the fixture wasn't).
+//
+// Marked `#[ignore]` so a plain `cargo test --features host-test` does NOT
+// rewrite the fixtures (CI runs without --ignored). Regenerate after a
+// canonical wire-format change with:
+//
+// ```bash
+// cd contracts/policy-engine
+// cargo test --features host-test --lib gen_update7_fixtures -- --ignored --nocapture
+// ```
+#[cfg(test)]
+mod update7_fixtures {
+    // The crate is `#![no_std]` for the SBF target; pull `std` in explicitly
+    // for this host-only fixture generator so we can use `fs::write` +
+    // `format!` + `Vec`.
+    extern crate std;
+    use super::*;
+    use andromeda_auth::human_message::{swap_sign_message, MAX_HUMAN_MESSAGE_BYTES};
+    use std::fs;
+    use std::format;
+    use std::path::PathBuf;
+    use std::string::String;
+    use std::vec::Vec;
+
+    fn fixtures_dir() -> PathBuf {
+        let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        crate_root.join("../../fixtures/policy_engine_v3/challenges/runtime")
+    }
+
+    fn hex_lower(b: &[u8]) -> String {
+        let mut out = String::with_capacity(b.len() * 2);
+        for x in b {
+            out.push_str(&format!("{:02x}", x));
+        }
+        out
+    }
+
+    // Minimal JSON-string encoder. The fixture human messages are ASCII by
+    // construction (validated by the renderer); we still escape control
+    // bytes defensively.
+    fn json_string(s: &str) -> String {
+        let mut out = String::with_capacity(s.len() + 2);
+        out.push('"');
+        for c in s.chars() {
+            match c {
+                '"' => out.push_str("\\\""),
+                '\\' => out.push_str("\\\\"),
+                c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+                c => out.push(c),
+            }
+        }
+        out.push('"');
+        out
+    }
+
+    // Deterministic inputs — every byte derived from a small constant so
+    // regenerating the fixture is byte-identical across machines.
+    fn engine() -> Address {
+        let mut b = [0u8; 32];
+        for i in 0..32 {
+            b[i] = (0x10u8).wrapping_add(i as u8);
+        }
+        Address::from(b)
+    }
+    fn dwallet() -> Address {
+        let mut b = [0u8; 32];
+        for i in 0..32 {
+            b[i] = (0x20u8).wrapping_add(i as u8);
+        }
+        Address::from(b)
+    }
+    fn message_digest_v() -> [u8; 32] {
+        let mut b = [0u8; 32];
+        for i in 0..32 {
+            b[i] = (0x30u8).wrapping_add(i as u8);
+        }
+        b
+    }
+    fn destination_v() -> [u8; 32] {
+        let mut b = [0u8; 32];
+        for i in 0..32 {
+            b[i] = (0x40u8).wrapping_add(i as u8);
+        }
+        b
+    }
+    fn user_pubkey_v() -> [u8; 32] {
+        let mut b = [0u8; 32];
+        for i in 0..32 {
+            b[i] = (0x50u8).wrapping_add(i as u8);
+        }
+        b
+    }
+    fn from_token_v() -> [u8; 32] {
+        let mut b = [0u8; 32];
+        b[31] = 0xAA;
+        b
+    }
+    fn to_token_v() -> [u8; 32] {
+        let mut b = [0u8; 32];
+        b[31] = 0xBB;
+        b
+    }
+    fn solana_tag_v() -> [u8; 8] {
+        let mut t = [0u8; 8];
+        t[..6].copy_from_slice(b"solana");
+        t
+    }
+    fn evm_tag_v() -> [u8; 8] {
+        let mut t = [0u8; 8];
+        t[..5].copy_from_slice(b"evm:1");
+        t
+    }
+    fn owner_slot_v() -> [u8; MEMBER_SLOT_LEN] {
+        let mut s = [0u8; MEMBER_SLOT_LEN];
+        s[0] = 0;
+        for i in 0..32 {
+            s[1 + i] = (0x60u8).wrapping_add(i as u8);
+        }
+        s
+    }
+    const FROM_AMOUNT_V: u64 = 1_500_000;
+    const MIN_AMOUNT_OUT_V: u64 = 12_000_000;
+
+    fn swap_metadata_preimage_v(min_out: u64, tag: &[u8; 8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(b"andromeda::policy-engine::request::v3");
+        out.extend_from_slice(b"request-signature-swap");
+        out.extend_from_slice(engine().as_array());
+        out.extend_from_slice(dwallet().as_array());
+        out.extend_from_slice(&message_digest_v());
+        out.extend_from_slice(&destination_v());
+        out.extend_from_slice(&user_pubkey_v());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.push(1u8); // PATH_NORMAL
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(&FROM_AMOUNT_V.to_le_bytes());
+        out.push(0u8);
+        out.extend_from_slice(&from_token_v());
+        out.extend_from_slice(&to_token_v());
+        out.extend_from_slice(&min_out.to_le_bytes());
+        out.extend_from_slice(tag);
+        out
+    }
+
+    fn swap_use_preimage_v(human: &[u8], metadata: &[u8; 32]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(b"andromeda::policy-engine::v3");
+        out.extend_from_slice(b"swap-sign");
+        out.extend_from_slice(&(human.len() as u16).to_le_bytes());
+        out.extend_from_slice(human);
+        out.extend_from_slice(engine().as_array());
+        out.extend_from_slice(dwallet().as_array());
+        out.extend_from_slice(metadata);
+        out.extend_from_slice(&owner_slot_v());
+        out
+    }
+
+    fn bundle_use_preimage_v(total: u8, ordered: &[[u8; 32]]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(b"andromeda::policy-engine::v3");
+        out.extend_from_slice(b"bundle-sign");
+        out.extend_from_slice(engine().as_array());
+        out.extend_from_slice(dwallet().as_array());
+        out.push(total);
+        for d in ordered {
+            out.extend_from_slice(d);
+        }
+        out.extend_from_slice(&owner_slot_v());
+        out
+    }
+
+    #[test]
+    #[ignore]
+    fn gen_update7_fixtures() {
+        let dir = fixtures_dir();
+        fs::create_dir_all(&dir).expect("mkdir fixtures dir");
+
+        // ── swap_sign_message ────────────────────────────────────────────
+        let mut buf = [0u8; MAX_HUMAN_MESSAGE_BYTES];
+        let human_len = swap_sign_message(
+            &mut buf,
+            &dwallet(),
+            &from_token_v(),
+            FROM_AMOUNT_V,
+            &to_token_v(),
+            MIN_AMOUNT_OUT_V,
+            &solana_tag_v(),
+            0,
+        )
+        .unwrap();
+        let human = &buf[..human_len];
+        let human_str = core::str::from_utf8(human).unwrap();
+        let body = format!(
+            "{{\n  \"spec_ref\": \"docs/POLICY_ENGINE_ABI_V3.md#update7\",\n  \"version\": \"policy-engine-v3\",\n  \"status\": \"frozen\",\n  \"note\": \"Update 7 (2026-05-26): SWAP clear-signing renderer. Byte-for-byte mirror of contracts/auth/src/human_message.rs::swap_sign_message and gateway HumanMessageSwap (Go).\",\n  \"input\": {{\n    \"dwallet_hex\": \"{dwallet}\",\n    \"from_token_hex\": \"{from_token}\",\n    \"from_amount\": {from_amount},\n    \"to_token_hex\": \"{to_token}\",\n    \"min_amount_out\": {min_out},\n    \"chain_tag_hex\": \"{tag}\",\n    \"signature_scheme\": 0\n  }},\n  \"expected\": {{\n    \"human_message\": {human_json},\n    \"human_hex\": \"{human_hex}\",\n    \"human_bytes\": {human_bytes}\n  }}\n}}\n",
+            dwallet = hex_lower(dwallet().as_array()),
+            from_token = hex_lower(&from_token_v()),
+            from_amount = FROM_AMOUNT_V,
+            to_token = hex_lower(&to_token_v()),
+            min_out = MIN_AMOUNT_OUT_V,
+            tag = hex_lower(&solana_tag_v()),
+            human_json = json_string(human_str),
+            human_hex = hex_lower(human),
+            human_bytes = human.len(),
+        );
+        fs::write(dir.join("swap_sign_message.json"), body).unwrap();
+
+        // ── swap_metadata_digest ─────────────────────────────────────────
+        let pre = swap_metadata_preimage_v(MIN_AMOUNT_OUT_V, &solana_tag_v());
+        let md_hash = swap_metadata_digest(
+            &engine(),
+            &dwallet(),
+            &message_digest_v(),
+            &destination_v(),
+            &user_pubkey_v(),
+            0,
+            0,
+            FROM_AMOUNT_V,
+            0,
+            &from_token_v(),
+            &to_token_v(),
+            MIN_AMOUNT_OUT_V,
+            &solana_tag_v(),
+        );
+        let body = format!(
+            "{{\n  \"spec_ref\": \"docs/POLICY_ENGINE_ABI_V3.md#update7\",\n  \"version\": \"policy-engine-v3\",\n  \"status\": \"frozen\",\n  \"note\": \"Update 7 (2026-05-26): V3 swap_metadata_digest. Mirror of swap_metadata_digest (Rust) and SwapMetadataDigestInput (Go). Distinct from V2 by the DOMAIN_REQUEST_V3 prefix + swap field suffix.\",\n  \"input\": {{\n    \"engine_hex\": \"{engine}\",\n    \"dwallet_hex\": \"{dwallet}\",\n    \"message_digest_hex\": \"{msg}\",\n    \"destination_hex\": \"{dest}\",\n    \"user_pubkey_hex\": \"{user}\",\n    \"signature_scheme\": 0,\n    \"rules_generation\": 0,\n    \"from_amount\": {from_amount},\n    \"asset_index\": 0,\n    \"from_token_hex\": \"{from_token}\",\n    \"to_token_hex\": \"{to_token}\",\n    \"min_amount_out\": {min_out},\n    \"chain_tag_hex\": \"{tag}\"\n  }},\n  \"expected\": {{\n    \"preimage_hex\": \"{pre}\",\n    \"preimage_bytes\": {pre_bytes},\n    \"challenge_hex\": \"{hash}\"\n  }}\n}}\n",
+            engine = hex_lower(engine().as_array()),
+            dwallet = hex_lower(dwallet().as_array()),
+            msg = hex_lower(&message_digest_v()),
+            dest = hex_lower(&destination_v()),
+            user = hex_lower(&user_pubkey_v()),
+            from_amount = FROM_AMOUNT_V,
+            from_token = hex_lower(&from_token_v()),
+            to_token = hex_lower(&to_token_v()),
+            min_out = MIN_AMOUNT_OUT_V,
+            tag = hex_lower(&solana_tag_v()),
+            pre = hex_lower(&pre),
+            pre_bytes = pre.len(),
+            hash = hex_lower(&md_hash),
+        );
+        fs::write(dir.join("swap_metadata_digest.json"), body).unwrap();
+
+        // ── swap_use_challenge ───────────────────────────────────────────
+        let suc_pre = swap_use_preimage_v(human, &md_hash);
+        let suc_hash = swap_use_challenge(human, &engine(), &dwallet(), &md_hash, &owner_slot_v());
+        let body = format!(
+            "{{\n  \"spec_ref\": \"docs/POLICY_ENGINE_ABI_V3.md#update7\",\n  \"version\": \"policy-engine-v3\",\n  \"status\": \"frozen\",\n  \"note\": \"Update 7 (2026-05-26): owner-authorization challenge for the SWAP signing path (no bundle). Op tag is OP_SWAP_SIGN. Chained off swap_metadata_digest.json.\",\n  \"input\": {{\n    \"engine_hex\": \"{engine}\",\n    \"dwallet_hex\": \"{dwallet}\",\n    \"metadata_digest_hex\": \"{meta}\",\n    \"owner_slot_hex\": \"{owner}\",\n    \"human_message\": {human_json},\n    \"human_hex\": \"{human_hex}\"\n  }},\n  \"expected\": {{\n    \"preimage_hex\": \"{pre}\",\n    \"preimage_bytes\": {pre_bytes},\n    \"challenge_hex\": \"{hash}\"\n  }}\n}}\n",
+            engine = hex_lower(engine().as_array()),
+            dwallet = hex_lower(dwallet().as_array()),
+            meta = hex_lower(&md_hash),
+            owner = hex_lower(&owner_slot_v()),
+            human_json = json_string(human_str),
+            human_hex = hex_lower(human),
+            pre = hex_lower(&suc_pre),
+            pre_bytes = suc_pre.len(),
+            hash = hex_lower(&suc_hash),
+        );
+        fs::write(dir.join("swap_use_challenge.json"), body).unwrap();
+
+        // ── bundle_use_challenge_2 ───────────────────────────────────────
+        let approve_md = message_digest_v(); // V2 approve metadata placeholder
+        let swap_md = swap_metadata_digest(
+            &engine(),
+            &dwallet(),
+            &message_digest_v(),
+            &destination_v(),
+            &user_pubkey_v(),
+            0,
+            0,
+            FROM_AMOUNT_V,
+            0,
+            &from_token_v(),
+            &to_token_v(),
+            MIN_AMOUNT_OUT_V,
+            &evm_tag_v(),
+        );
+        let leg0 = bundle_use_challenge(
+            &engine(),
+            &dwallet(),
+            &approve_md,
+            &owner_slot_v(),
+            2,
+            0,
+            &[swap_md],
+        );
+        let leg1 = bundle_use_challenge(
+            &engine(),
+            &dwallet(),
+            &swap_md,
+            &owner_slot_v(),
+            2,
+            1,
+            &[approve_md],
+        );
+        assert_eq!(leg0, leg1, "bundle invariant must hold in the generator");
+        let bun_pre = bundle_use_preimage_v(2, &[approve_md, swap_md]);
+        let body = format!(
+            "{{\n  \"spec_ref\": \"docs/POLICY_ENGINE_ABI_V3.md#update7\",\n  \"version\": \"policy-engine-v3\",\n  \"status\": \"frozen\",\n  \"note\": \"Update 7 (2026-05-26): bundle_use_challenge for a 2-leg EVM 2-step swap. ONE owner signature on challenge_hex unlocks BOTH legs on-chain. MAX_BUNDLE_TOTAL = {max}.\",\n  \"input\": {{\n    \"engine_hex\": \"{engine}\",\n    \"dwallet_hex\": \"{dwallet}\",\n    \"owner_slot_hex\": \"{owner}\",\n    \"total\": 2,\n    \"ordered_metadata_digests_hex\": [\n      \"{approve_md}\",\n      \"{swap_md}\"\n    ],\n    \"leg0_view\": {{\n      \"this_index\": 0,\n      \"this_metadata_digest_hex\": \"{approve_md}\",\n      \"other_digests_hex\": [\"{swap_md}\"]\n    }},\n    \"leg1_view\": {{\n      \"this_index\": 1,\n      \"this_metadata_digest_hex\": \"{swap_md}\",\n      \"other_digests_hex\": [\"{approve_md}\"]\n    }}\n  }},\n  \"expected\": {{\n    \"preimage_hex\": \"{pre}\",\n    \"preimage_bytes\": {pre_bytes},\n    \"challenge_hex\": \"{hash}\"\n  }}\n}}\n",
+            max = MAX_BUNDLE_TOTAL,
+            engine = hex_lower(engine().as_array()),
+            dwallet = hex_lower(dwallet().as_array()),
+            owner = hex_lower(&owner_slot_v()),
+            approve_md = hex_lower(&approve_md),
+            swap_md = hex_lower(&swap_md),
+            pre = hex_lower(&bun_pre),
+            pre_bytes = bun_pre.len(),
+            hash = hex_lower(&leg0),
+        );
+        fs::write(dir.join("bundle_use_challenge_2.json"), body).unwrap();
+    }
 }
