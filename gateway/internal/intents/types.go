@@ -53,10 +53,53 @@ type prepareRequest struct {
 	SlippageBps int    `json:"slippageBps" validate:"omitempty,min=0,max=5000"`
 }
 
-// submitRequest is the public body of POST /v1/intents/swap/submit.
+// ownerSignature carries one owner-authorized precompile input for a swap leg.
+// `Kind` is "swap" for a same-chain or cross-chain swap; "approve" for the
+// ERC20 approve leg that runs first on EVM two-step swaps. Each kind binds a
+// distinct message_digest, so it needs its own challenge + signature (the
+// gateway can't bundle them on-chain without a new opcode).
+type ownerSignature struct {
+	Kind                          string `json:"kind" validate:"required,oneof=swap approve"`
+	SignatureBase64               string `json:"signatureBase64" validate:"required,base64"`
+	WebAuthnAuthenticatorDataB64  string `json:"webauthnAuthenticatorDataB64,omitempty" validate:"omitempty,base64"`
+	WebAuthnClientDataJSONB64     string `json:"webauthnClientDataJsonB64,omitempty" validate:"omitempty,base64"`
+}
+
+// challengeRequest is the public body of POST /v1/intents/swap/challenge. The
+// gateway needs the owner_slot (scheme + identifier) so the returned challenge
+// matches the precompile the on-chain handler will recompute at submit time.
+type challengeRequest struct {
+	IntentID     string `json:"intentId" validate:"required,uuid"`
+	OwnerSlotHex string `json:"ownerSlotHex" validate:"required,len=68"` // (1 + 33) × 2 hex chars = 68
+}
+
+// challengeLeg is a single owner-auth challenge — one per request_signature
+// transaction the swap will land (1 for Solana, 2 for EVM two-step approve+swap).
+type challengeLeg struct {
+	Kind                  string `json:"kind"` // "swap" | "approve"
+	MessageDigestHex      string `json:"messageDigestHex"`
+	OwnerAuthChallengeHex string `json:"ownerAuthChallengeHex"`
+	OwnerAuthPreimageHex  string `json:"ownerAuthPreimageHex"`
+	HumanMessage          string `json:"humanMessage"`
+}
+
+// challengeResponse is what POST /v1/intents/swap/challenge returns.
+type challengeResponse struct {
+	IntentID   string         `json:"intentId"`
+	Challenges []challengeLeg `json:"challenges"`
+	Notice     string         `json:"notice"`
+}
+
+// submitRequest is the public body of POST /v1/intents/swap/submit. Owner
+// signatures are MANDATORY (zero-trust): the client must first call
+// /v1/intents/swap/challenge, collect the dWallet owner's off-chain signature
+// for each leg, then submit. EVM two-step swaps need two signatures (kind
+// "approve" + "swap"); same-chain non-EVM swaps need one (kind "swap").
 type submitRequest struct {
-	IntentID   string `json:"intentId" validate:"required,uuid"`
-	Passphrase string `json:"passphrase" validate:"required,min=12"`
+	IntentID         string           `json:"intentId" validate:"required,uuid"`
+	Passphrase       string           `json:"passphrase" validate:"required,min=12"`
+	OwnerSlotHex     string           `json:"ownerSlotHex" validate:"required,len=68"`
+	OwnerSignatures  []ownerSignature `json:"ownerSignatures" validate:"required,min=1,max=2,dive"`
 }
 
 // prepareResponse is what the gateway returns from prepare.

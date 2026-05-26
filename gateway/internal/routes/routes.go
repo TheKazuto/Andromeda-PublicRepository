@@ -245,6 +245,30 @@ var All = []Route{
 	{Method: "POST", Path: "/v1/policy/passkey/use/submit", Upstream: UpstreamLocal, Local: true, Key: "policy.engine.passkey.use.submit", Idempotent: true, RequiresIdempotencyKey: true, RateClass: RateClassTx, TimeoutSeconds: 60},
 	{Method: "POST", Path: "/v1/policy/passkey/session/close", Upstream: UpstreamLocal, Local: true, Key: "policy.engine.passkey.close", Idempotent: true, RequiresIdempotencyKey: true, RateClass: RateClassTx},
 
+	// --- Session-key lifecycle (Update 8, 2026-05-26) -------------------------
+	// Andromeda exposes the on-chain session primitives (discs 100-106) as REST
+	// so the dev can build their own delegation layer. NO orchestration here —
+	// challenge / submit (owner-authorized) + build (for disc 101 use) + a
+	// read endpoint for the on-chain state. The session-signer keypair lives
+	// entirely on the dev side; Andromeda never custodies it. Auto-MCP picks
+	// these up like the rest of the policy surface.
+	{Method: "POST", Path: "/v1/policy/session/open/challenge", Upstream: UpstreamLocal, Local: true, Key: "policy.engine.session.open.challenge", RateClass: RateClassRead, MaxBodyBytes: 4 << 10},
+	{Method: "POST", Path: "/v1/policy/session/open/submit", Upstream: UpstreamLocal, Local: true, Key: "policy.engine.session.open.submit", Idempotent: true, RequiresIdempotencyKey: true, RateClass: RateClassTx, TimeoutSeconds: 60, MaxBodyBytes: 8 << 10},
+	{Method: "POST", Path: "/v1/policy/session/revoke/challenge", Upstream: UpstreamLocal, Local: true, Key: "policy.engine.session.revoke.challenge", RateClass: RateClassRead},
+	{Method: "POST", Path: "/v1/policy/session/revoke/submit", Upstream: UpstreamLocal, Local: true, Key: "policy.engine.session.revoke.submit", Idempotent: true, RequiresIdempotencyKey: true, RateClass: RateClassTx, TimeoutSeconds: 60},
+	{Method: "POST", Path: "/v1/policy/session/close/challenge", Upstream: UpstreamLocal, Local: true, Key: "policy.engine.session.close.challenge", RateClass: RateClassRead},
+	{Method: "POST", Path: "/v1/policy/session/close/submit", Upstream: UpstreamLocal, Local: true, Key: "policy.engine.session.close.submit", Idempotent: true, RequiresIdempotencyKey: true, RateClass: RateClassTx, TimeoutSeconds: 60},
+	{Method: "POST", Path: "/v1/policy/session/close-expired", Upstream: UpstreamLocal, Local: true, Key: "policy.engine.session.close-expired", Idempotent: true, RequiresIdempotencyKey: true, RateClass: RateClassTx, TimeoutSeconds: 30},
+	{Method: "POST", Path: "/v1/policy/session/destinations/add/challenge", Upstream: UpstreamLocal, Local: true, Key: "policy.engine.session.destinations.add.challenge", RateClass: RateClassRead},
+	{Method: "POST", Path: "/v1/policy/session/destinations/add/submit", Upstream: UpstreamLocal, Local: true, Key: "policy.engine.session.destinations.add.submit", Idempotent: true, RequiresIdempotencyKey: true, RateClass: RateClassTx},
+	{Method: "POST", Path: "/v1/policy/session/destinations/remove/challenge", Upstream: UpstreamLocal, Local: true, Key: "policy.engine.session.destinations.remove.challenge", RateClass: RateClassRead},
+	{Method: "POST", Path: "/v1/policy/session/destinations/remove/submit", Upstream: UpstreamLocal, Local: true, Key: "policy.engine.session.destinations.remove.submit", Idempotent: true, RequiresIdempotencyKey: true, RateClass: RateClassTx},
+	// session/use/build returns the disc 101 instruction (client assembles tx +
+	// signs with session-signer + payer + broadcasts). No send by the gateway —
+	// hence read-class (cheap, fast, no gas).
+	{Method: "POST", Path: "/v1/policy/session/use/build", Upstream: UpstreamLocal, Local: true, Key: "policy.engine.session.use.build", RateClass: RateClassRead, MaxBodyBytes: 8 << 10},
+	{Method: "GET", Path: "/v1/policy/session/state/{engine}/{sessionIndex}", Upstream: UpstreamLocal, Local: true, Key: "policy.engine.session.read", RateClass: RateClassRead},
+
 	// --- Oracle price triggers (local; F7.5 managed Pyth keeper) --------------
 	// `Local: true`, so registerProxyRoute() skips them; the oraclemonitor
 	// service mounts the handlers under the same paths (internal/oraclemonitor
@@ -276,7 +300,12 @@ var All = []Route{
 	{Method: "GET", Path: "/v1/intents/tokens", UpstreamPath: "/tokens", Upstream: UpstreamIntents, Key: "intent.tokens", RateClass: RateClassRead},
 	{Method: "POST", Path: "/v1/intents/simulate", Upstream: UpstreamLocal, Local: true, Key: "intent.simulate", RateClass: RateClassRead, MaxBodyBytes: 32 << 10},
 	{Method: "POST", Path: "/v1/intents/swap/prepare", Upstream: UpstreamLocal, Local: true, Key: "intent.swap.prepare", Idempotent: true, RequiresIdempotencyKey: true, RateClass: RateClassTx, TimeoutSeconds: 30, MaxBodyBytes: 32 << 10},
-	{Method: "POST", Path: "/v1/intents/swap/submit", Upstream: UpstreamLocal, Local: true, Key: "intent.swap.submit", Idempotent: true, RequiresIdempotencyKey: true, RateClass: RateClassTx, TimeoutSeconds: 120, MaxBodyBytes: 8 << 10},
+	// Zero-trust owner-auth challenge (Fase 1, A1): derives the `normal_use_challenge`
+	// the dWallet owner must sign off-chain before submit can relay the precompile.
+	// Pure read — no state mutation, no signing, no gas. Treated as a write-class
+	// route only for billing/scope parity with the swap pair (the next call mutates).
+	{Method: "POST", Path: "/v1/intents/swap/challenge", Upstream: UpstreamLocal, Local: true, Key: "intent.swap.challenge", RateClass: RateClassRead, MaxBodyBytes: 4 << 10},
+	{Method: "POST", Path: "/v1/intents/swap/submit", Upstream: UpstreamLocal, Local: true, Key: "intent.swap.submit", Idempotent: true, RequiresIdempotencyKey: true, RateClass: RateClassTx, TimeoutSeconds: 120, MaxBodyBytes: 16 << 10},
 	{Method: "GET", Path: "/v1/intents/status/{intentId}", Upstream: UpstreamLocal, Local: true, Key: "intent.status", RateClass: RateClassRead},
 }
 

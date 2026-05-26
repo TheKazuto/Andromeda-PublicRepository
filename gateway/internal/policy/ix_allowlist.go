@@ -174,6 +174,27 @@ type RequestSignatureParams struct {
 	// (keccak256 of the BCS Blake2bMessageMetadata); the MessageApproval PDA
 	// MUST then be derived with the matching metadata seed (see MessageApprovalPDA).
 	IkaMsgMetadataDigest [32]byte
+	// Update 7 (2026-05-26): SWAP clear-signing extension. SigningKind selects
+	// which clear-signing renderer + metadata digest variant is used at challenge
+	// time. SigningKindNormal (0) keeps the legacy NORMAL path and forces every
+	// swap_* field to zero. SigningKindSwap (1) requires the two token addresses
+	// to differ and the chain tag to be non-zero.
+	SigningKind       uint8
+	SwapFromToken     [32]byte
+	SwapToToken       [32]byte
+	SwapMinAmountOut  uint64
+	SwapChainTag      [8]byte // ASCII null-padded ("solana\x00\x00", "evm:1\x00\x00\x00")
+	// Update 7 (2026-05-26): BUNDLE challenge extension. When BundleTotal>=2,
+	// a single owner signature covers `BundleTotal` distinct request_signature
+	// legs (e.g. EVM 2-step approve+swap). This leg sits at `BundleThisIndex`;
+	// the other legs' metadata digests are in BundleOtherDigest1..3 in supplied
+	// order (trailing slots MUST be zero). BundleTotal=0 keeps the legacy
+	// single-digest behaviour.
+	BundleTotal         uint8
+	BundleThisIndex     uint8
+	BundleOtherDigest1  [32]byte
+	BundleOtherDigest2  [32]byte
+	BundleOtherDigest3  [32]byte
 }
 
 func RequestSignature(p RequestSignatureParams) (solana.Instruction, error) {
@@ -182,7 +203,13 @@ func RequestSignature(p RequestSignatureParams) (solana.Instruction, error) {
 		return nil, fmt.Errorf("derive event authority: %w", err)
 	}
 
-	data := make([]byte, 0, 1+32+32+32+32+2+1+1+32+4+8+1+32)
+	// Capacity covers: disc(1) + init_authority(32) + message_digest(32) +
+	// metadata_digest(32) + user_pubkey(32) + scheme(2) + bumps(2) +
+	// destination(32) + rules_gen(4) + amount(8) + asset_index(1) +
+	// ika_metadata(32) + Update 7 extras: signing_kind(1) + swap_from(32) +
+	// swap_to(32) + swap_min_out(8) + chain_tag(8) + bundle_total(1) +
+	// bundle_this_index(1) + 3*bundle_other_digest(96) = 389 bytes.
+	data := make([]byte, 0, 389)
 	data = append(data, DiscRequestSignature)
 	data = append(data, p.InitAuthorityHash[:]...)
 	data = append(data, p.MessageDigest[:]...)
@@ -203,6 +230,23 @@ func RequestSignature(p RequestSignatureParams) (solana.Instruction, error) {
 	data = append(data, p.AssetIndex)
 	// ABI V3 (Update 6): the Ika message_metadata_digest (32 bytes; zero = none).
 	data = append(data, p.IkaMsgMetadataDigest[:]...)
+	// Update 7 (2026-05-26): SWAP clear-signing + BUNDLE challenge extension.
+	// Order MUST match the on-chain handler's parameter order
+	// (contracts/policy-engine/src/lib.rs::request_signature): signing_kind,
+	// swap_from_token, swap_to_token, swap_min_amount_out, swap_chain_tag,
+	// bundle_total, bundle_this_index, bundle_other_digest_{1,2,3}.
+	data = append(data, p.SigningKind)
+	data = append(data, p.SwapFromToken[:]...)
+	data = append(data, p.SwapToToken[:]...)
+	var minOut [8]byte
+	binary.LittleEndian.PutUint64(minOut[:], p.SwapMinAmountOut)
+	data = append(data, minOut[:]...)
+	data = append(data, p.SwapChainTag[:]...)
+	data = append(data, p.BundleTotal)
+	data = append(data, p.BundleThisIndex)
+	data = append(data, p.BundleOtherDigest1[:]...)
+	data = append(data, p.BundleOtherDigest2[:]...)
+	data = append(data, p.BundleOtherDigest3[:]...)
 
 	accounts := solana.AccountMetaSlice{
 		{PublicKey: p.DWallet, IsSigner: false, IsWritable: false},

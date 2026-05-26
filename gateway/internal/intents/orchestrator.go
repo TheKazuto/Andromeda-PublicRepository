@@ -31,15 +31,20 @@ type Publisher interface {
 // submit.
 const defaultIntentTTL = 90 * time.Second
 
-// Authorizer is the seam onto policy.Service: on-chain authorization (no owner
-// signature), the presign prefetch (single-use, gas-aware), and the advisory
-// risk + simulation. All satisfied by *policy.Service; defined here so the
-// orchestrator stays testable with a fake.
+// Authorizer is the seam onto policy.Service: on-chain authorization (with the
+// dWallet owner's precompile signature — zero-trust), the presign prefetch
+// (single-use, gas-aware), the advisory risk + simulation, and the off-chain
+// challenge derivation the `/v1/intents/swap/challenge` route exposes. All
+// satisfied by *policy.Service; defined here so the orchestrator stays
+// testable with a fake.
 type Authorizer interface {
 	AuthorizeSwap(ctx context.Context, in policy.SwapAuthorizeInput) (policy.AuthorizeResult, error)
 	// SwapChallengeDigest returns the request-signature challenge digest — the
 	// presign cache key + the persisted policy_metadata_digest.
 	SwapChallengeDigest(in policy.SwapAuthorizeInput) (string, error)
+	// SwapOwnerAuthChallenge derives the `normal_use_challenge` the dWallet
+	// owner must sign off-chain before submit. Pure computation.
+	SwapOwnerAuthChallenge(in policy.SwapAuthorizeInput) (policy.OwnerAuthChallenge, error)
 	// FirePresignPrefetchDirect starts a single-use presign at prepare time
 	// (no-op unless IKA_PRESIGN_PREFETCH_ENABLED).
 	FirePresignPrefetchDirect(tenant, dwalletAddress, challengeHex string)
@@ -333,7 +338,21 @@ func (o *Orchestrator) Prepare(ctx context.Context, userID, apiKeyID string, req
 	// a single-use presign in the background (no-op unless enabled), and persist
 	// the digest as the harvest key for submit. Best-effort — submit's /sign
 	// allocates inline if the prefetch missed.
+	//
+	// IMPORTANT: this digest MUST match the one `authorizeAndSignSwap` computes
+	// at submit time. When the swap is single-leg (Solana same-chain / EVM
+	// without approve), submit binds the SWAP V3 metadata digest (Swap=set,
+	// Bundle=nil). When the swap is EVM 2-step (bundle), submit binds the V2
+	// approve digest on the approve leg and the V3 swap digest on the swap leg
+	// — neither matches a "no-swap" prefetch.
+	//
+	// To keep the presign cache hot for the most common path (single-leg swap),
+	// populate `Swap` here so the prefetch keys by the V3 digest the submit
+	// will use. EVM 2-step still misses (the bundle path harvests by approve's
+	// V2 digest first), but that's fine — the approve allocates inline, and
+	// the swap leg re-harvests with the V3 key.
 	authInput := o.swapAuthInput(it)
+	authInput.Swap = o.swapMetaFromIntent(it)
 	if digest, derr := o.authorizer.SwapChallengeDigest(authInput); derr == nil {
 		it.PolicyMetadataDigestHex = digest
 		o.authorizer.FirePresignPrefetchDirect(userID, req.DwalletAddress, digest)
@@ -357,6 +376,253 @@ func (o *Orchestrator) Prepare(ctx context.Context, userID, apiKeyID string, req
 		Route:  pr.RouteSnapshot,
 		Notice: "pre-alpha on Solana devnet — not for real value; the dWallet pays the swap gas",
 	}, nil
+}
+
+// ---- Challenge -----------------------------------------------------------
+
+// Challenge derives the off-chain owner-authorization challenge(s) the dWallet
+// owner must sign before submit. Returns:
+//   - Solana same-chain swap: one leg of kind "swap" (single-digest challenge,
+//     SWAP signing kind so the wallet shows the semantic swap message).
+//   - EVM 2-step swap (ERC20 approve + swap): one leg of kind "bundle" with
+//     the bundle hash that covers BOTH the approve_digest and the swap_digest.
+//     One owner signature unlocks both legs on-chain.
+//
+// Pure read — no state mutation, no signing, no gas; safe to call repeatedly.
+func (o *Orchestrator) Challenge(ctx context.Context, userID string, req challengeRequest) (*challengeResponse, error) {
+	it, err := o.store.GetForUser(ctx, req.IntentID, userID)
+	if err == ErrNotFound {
+		return nil, &userError{http.StatusNotFound, "not_found", "intent not found"}
+	}
+	if err != nil {
+		return nil, &userError{http.StatusInternalServerError, "load_failed", "could not load intent"}
+	}
+	if time.Now().After(it.ExpiresAt) {
+		return nil, &userError{http.StatusConflict, "expired", "intent expired; request a fresh quote"}
+	}
+	legs := make([]challengeLeg, 0, 1)
+	swapMeta := o.swapMetaFromIntent(it)
+	if it.ApproveMessageDigestHex != "" {
+		// EVM 2-step: ONE bundle leg covering both approve and swap.
+		// The bundle hash is op_tag-agnostic, so the same signature unlocks
+		// both legs on-chain (the per-leg metadata_digest still binds each
+		// underlying tx separately).
+		approveDigest, derr := hex.DecodeString(it.ApproveMessageDigestHex)
+		swapDigest, serr := hex.DecodeString(it.MessageDigestHex)
+		if derr != nil || serr != nil || len(approveDigest) != 32 || len(swapDigest) != 32 {
+			return nil, &userError{http.StatusInternalServerError, "digest_decode", "invalid persisted digest"}
+		}
+		// Compute each leg's V2 / V3 metadata digest. The bundle hash is over
+		// metadata_digests (not message_digests) so we must recompute them.
+		approveMeta, merr := o.computeLegMetadataDigest(it, approveDigest, nil)
+		if merr != nil {
+			return nil, merr
+		}
+		swapMetaDigest, merr := o.computeLegMetadataDigest(it, swapDigest, swapMeta)
+		if merr != nil {
+			return nil, merr
+		}
+		leg, uerr := o.buildBundleChallengeLeg(it, req.OwnerSlotHex, swapMeta,
+			approveMeta, swapMetaDigest)
+		if uerr != nil {
+			return nil, uerr
+		}
+		legs = append(legs, leg)
+	} else {
+		// Single-leg swap (Solana or EVM non-ERC20). SWAP signing kind so the
+		// wallet renders the semantic clear-signing message.
+		leg, uerr := o.buildSingleChallengeLeg(it, "swap", it.MessageDigestHex, req.OwnerSlotHex, swapMeta)
+		if uerr != nil {
+			return nil, uerr
+		}
+		legs = append(legs, leg)
+	}
+	notice := "sign the challenge off-chain with the dWallet owner key matching ownerSlotHex; submit the signature via /v1/intents/swap/submit. Zero-trust: the gateway cannot relay without it."
+	if len(legs) == 1 && legs[0].Kind == "bundle" {
+		notice = "EVM two-step swap: one owner signature on the bundle challenge unlocks BOTH the ERC20 approve leg and the swap leg. Submit the same signatureBase64 via /v1/intents/swap/submit (kind \"bundle\"). Zero-trust: the gateway cannot relay without it."
+	}
+	return &challengeResponse{
+		IntentID:   it.ID,
+		Challenges: legs,
+		Notice:     notice,
+	}, nil
+}
+
+// buildSingleChallengeLeg builds a single-digest challenge leg (no bundle).
+func (o *Orchestrator) buildSingleChallengeLeg(it *Intent, kind, msgDigest, ownerSlotHex string, swap *policy.SwapMeta) (challengeLeg, *userError) {
+	in := o.swapAuthInput(it)
+	in.MessageDigestHex = msgDigest
+	in.OwnerSlotHex = ownerSlotHex
+	in.Swap = swap
+	ch, err := o.authorizer.SwapOwnerAuthChallenge(in)
+	if err != nil {
+		o.logger.Warn("intent challenge build failed", "intent", it.ID, "kind", kind, "err", err)
+		return challengeLeg{}, &userError{http.StatusBadRequest, "challenge_failed", err.Error()}
+	}
+	return challengeLeg{
+		Kind:                  kind,
+		MessageDigestHex:      msgDigest,
+		OwnerAuthChallengeHex: ch.OwnerAuthChallengeHex,
+		OwnerAuthPreimageHex:  ch.OwnerAuthPreimageHex,
+		HumanMessage:          ch.HumanMessage,
+	}, nil
+}
+
+// buildBundleChallengeLeg builds the single bundle leg (covers BOTH approve
+// and swap in EVM 2-step). ThisIndex=0 (approve) is chosen so the leg's human
+// is the NORMAL "Sign for dWallet..." message; this is informational only —
+// the bundle hash itself is op_tag-agnostic.
+func (o *Orchestrator) buildBundleChallengeLeg(it *Intent, ownerSlotHex string, _ *policy.SwapMeta, approveMeta, swapMeta [32]byte) (challengeLeg, *userError) {
+	in := o.swapAuthInput(it)
+	in.MessageDigestHex = it.ApproveMessageDigestHex
+	in.OwnerSlotHex = ownerSlotHex
+	in.Bundle = &policy.BundleProof{
+		Total:        2,
+		ThisIndex:    0,
+		OtherDigests: [][32]byte{swapMeta},
+	}
+	// Approve leg: NORMAL signing kind (Swap=nil) — the human shown to the
+	// owner is the canonical "Sign for dWallet ..." line that mentions the
+	// ERC20 approve destination + amount. Per-leg human is UI-only; the bundle
+	// hash binds the metadata digests, so a UI showing "Authorize bundle" on
+	// top of this line is safe.
+	ch, err := o.authorizer.SwapOwnerAuthChallenge(in)
+	if err != nil {
+		o.logger.Warn("intent bundle challenge build failed", "intent", it.ID, "err", err)
+		return challengeLeg{}, &userError{http.StatusBadRequest, "challenge_failed", err.Error()}
+	}
+	_ = approveMeta // approveMeta is bound into the bundle hash via the leg's own metadata_digest derivation upstream.
+	return challengeLeg{
+		Kind:                  "bundle",
+		MessageDigestHex:      it.MessageDigestHex, // exposes the swap leg's digest (the one the user cares about)
+		OwnerAuthChallengeHex: ch.OwnerAuthChallengeHex,
+		OwnerAuthPreimageHex:  ch.OwnerAuthPreimageHex,
+		HumanMessage:          ch.HumanMessage,
+	}, nil
+}
+
+// computeLegMetadataDigest recomputes the metadata_digest a single bundle leg
+// would bind on-chain: V2 for NORMAL (approve leg, swap=nil), V3 for SWAP
+// (swap leg, swap set). Used by Challenge to assemble the bundle ordering.
+func (o *Orchestrator) computeLegMetadataDigest(it *Intent, msgDigest []byte, swap *policy.SwapMeta) ([32]byte, *userError) {
+	in := o.swapAuthInput(it)
+	in.MessageDigestHex = hex.EncodeToString(msgDigest)
+	in.Swap = swap
+	dig, err := o.authorizer.SwapChallengeDigest(in)
+	if err != nil {
+		return [32]byte{}, &userError{http.StatusInternalServerError, "metadata_digest_failed", err.Error()}
+	}
+	b, err := hex.DecodeString(dig)
+	if err != nil || len(b) != 32 {
+		return [32]byte{}, &userError{http.StatusInternalServerError, "metadata_digest_failed", "non-32-byte metadata digest"}
+	}
+	var out [32]byte
+	copy(out[:], b)
+	return out, nil
+}
+
+// swapMetaFromIntent derives the SwapMeta the SWAP signing kind needs from the
+// persisted Intent. Returns nil when the intent doesn't carry enough info —
+// the caller then falls back to NORMAL signing so the flow degrades gracefully.
+//
+// Token address canonicalization (32-byte slot):
+//   - Solana: base58 → 32-byte public key (mints + SOL "native" both fit).
+//     A non-base58 token string falls back to NORMAL.
+//   - EVM: 0x-prefixed hex address (20 bytes) is zero-extended to the last
+//     20 bytes of the 32-byte slot (left-padded with 12 zero bytes), matching
+//     the canonical Ethereum address-in-bytes32 layout. "native" / "ETH" tokens
+//     (no 0x prefix) fall back to NORMAL.
+//
+// Chain tag: ASCII null-padded `chainKind` ("solana\x00\x00", "evm\x00\x00\x00\x00\x00").
+// The exact destination chain (numeric chainID) is already bound in the
+// message_digest (= keccak of the tx), so the chain tag is informational
+// (renderer reads "on solana" vs "on evm") and short enough to fit 8 bytes.
+func (o *Orchestrator) swapMetaFromIntent(it *Intent) *policy.SwapMeta {
+	tag, tagErr := encodeChainTag(it.ChainKind)
+	if tagErr != nil {
+		return nil
+	}
+	from, ferr := parseTokenAddress32(it.FromToken, it.ChainKind)
+	to, terr := parseTokenAddress32(it.ToToken, it.ChainKind)
+	if ferr != nil || terr != nil {
+		return nil
+	}
+	if from == to {
+		// On-chain handler rejects identical token addresses; degrade to NORMAL.
+		return nil
+	}
+	return &policy.SwapMeta{
+		FromToken:    from,
+		ToToken:      to,
+		MinAmountOut: parseUintOrZero(it.QuotedAmountOutMin),
+		ChainTag:     tag,
+	}
+}
+
+// encodeChainTag converts a chainKind ("solana", "evm") into the 8-byte ASCII
+// null-padded slot the on-chain swap_sign_message reads. Returns error when the
+// kind exceeds 8 ASCII bytes or contains non-printable bytes.
+func encodeChainTag(chainKind string) ([8]byte, error) {
+	var out [8]byte
+	if len(chainKind) == 0 || len(chainKind) > 8 {
+		return out, fmt.Errorf("chain tag length %d outside (0,8]", len(chainKind))
+	}
+	for i := 0; i < len(chainKind); i++ {
+		b := chainKind[i]
+		if b < 0x20 || b > 0x7E {
+			return out, fmt.Errorf("chain tag has non-printable byte at %d", i)
+		}
+		out[i] = b
+	}
+	return out, nil
+}
+
+// parseTokenAddress32 canonicalizes a token address into the 32-byte slot the
+// on-chain swap_metadata_digest binds. Solana: base58 pubkey. EVM: 0x-prefixed
+// 20-byte hex, left-padded to 32 bytes. Returns an error for unrecognised
+// formats (caller falls back to NORMAL signing).
+func parseTokenAddress32(token, chainKind string) ([32]byte, error) {
+	var out [32]byte
+	switch chainKind {
+	case "solana":
+		pk, err := solana.PublicKeyFromBase58(token)
+		if err != nil {
+			return out, fmt.Errorf("solana token %q: %w", token, err)
+		}
+		copy(out[:], pk.Bytes())
+		return out, nil
+	case "evm":
+		s := token
+		if len(s) >= 2 && (s[:2] == "0x" || s[:2] == "0X") {
+			s = s[2:]
+		}
+		if len(s) != 40 {
+			return out, fmt.Errorf("evm token %q: expected 20-byte hex", token)
+		}
+		b, err := hex.DecodeString(s)
+		if err != nil {
+			return out, fmt.Errorf("evm token %q: %w", token, err)
+		}
+		copy(out[12:], b) // left-pad 12 zero bytes, then 20-byte address
+		return out, nil
+	default:
+		return out, fmt.Errorf("unsupported chainKind %q", chainKind)
+	}
+}
+
+// parseUintOrZero parses a decimal string into uint64; 0 on error or overflow.
+// Used for `QuotedAmountOutMin` → SwapMeta.MinAmountOut (the on-chain handler
+// renders the value as decimal, so an overflow here just shows 0 in the human
+// message — never a security issue since the message_digest binds the actual tx).
+func parseUintOrZero(s string) uint64 {
+	if s == "" {
+		return 0
+	}
+	v, err := strconv.ParseUint(s, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return v
 }
 
 // ---- Submit --------------------------------------------------------------
@@ -389,6 +655,23 @@ func (o *Orchestrator) Submit(ctx context.Context, userID string, req submitRequ
 	}
 	chainKind = it.ChainKind
 
+	// Validate owner_signatures shape up-front: zero-trust requires a signature
+	// for every request_signature the swap will land on-chain. EVM two-step
+	// needs both ("approve" + "swap"); everything else needs only "swap". A
+	// missing/extra entry is a 4xx (never a silent retry). For an idempotent
+	// re-submit on a terminal state the body is still required (we don't know
+	// the persisted state until after we load the intent, and the client
+	// always has the sigs available — symmetric with prepare/submit).
+	needApprove := it.ApproveMessageDigestHex != ""
+	if uerr := validateOwnerSignatures(req.OwnerSignatures, needApprove); uerr != nil {
+		return nil, uerr
+	}
+	auth := submitAuth{
+		Passphrase:   req.Passphrase,
+		OwnerSlotHex: req.OwnerSlotHex,
+		Sigs:         req.OwnerSignatures,
+	}
+
 	switch it.Status {
 	case StatusPrepared:
 		if time.Now().After(it.ExpiresAt) {
@@ -415,18 +698,65 @@ func (o *Orchestrator) Submit(ctx context.Context, userID string, req submitRequ
 		o.metrics.recordRisk(it.ChainKind, riskLevel(riskSnap))
 		// ERC20 two-step: approve first, then (once confirmed) the swap.
 		if it.ApproveMessageDigestHex != "" {
-			return o.runApprove(ctx, userID, it, req.Passphrase)
+			return o.runApprove(ctx, userID, it, auth)
 		}
-		return o.runSwap(ctx, userID, it, StatusAuthorizing, req.Passphrase)
+		return o.runSwap(ctx, userID, it, StatusAuthorizing, auth)
 
 	case StatusApproving:
-		return o.resumeApprove(ctx, userID, it, req.Passphrase)
+		return o.resumeApprove(ctx, userID, it, auth)
 
 	default:
 		// In-progress (AUTHORIZING/SIGNING/BROADCASTING) or terminal → return
 		// current state (the reconciler resolves anything stuck).
 		return &submitResponse{IntentID: it.ID, Status: it.Status, TxHash: it.SwapTxHash}, nil
 	}
+}
+
+// submitAuth carries the per-submit dWallet auth material (passphrase for the
+// ika signer + the dWallet owner's off-chain signatures). Internal — never
+// logged.
+type submitAuth struct {
+	Passphrase   string
+	OwnerSlotHex string
+	Sigs         []ownerSignature
+}
+
+func (a submitAuth) find(kind string) (ownerSignature, bool) {
+	for _, s := range a.Sigs {
+		if s.Kind == kind {
+			return s, true
+		}
+	}
+	return ownerSignature{}, false
+}
+
+// validateOwnerSignatures enforces the right shape for the zero-trust submit:
+//   - EVM 2-step swap (needApprove == true): exactly one signature of kind
+//     "bundle" — the bundle hash covers both the approve and the swap legs,
+//     so one owner signature unlocks both on-chain. (Update 7 changed this
+//     from two separate sigs to one bundle sig.)
+//   - Other swaps (needApprove == false): exactly one signature of kind "swap".
+//
+// No duplicates, no unexpected kinds, no missing kind.
+func validateOwnerSignatures(sigs []ownerSignature, needApprove bool) *userError {
+	if len(sigs) == 0 {
+		return &userError{http.StatusBadRequest, "owner_auth_required",
+			"ownerSignatures is required: call POST /v1/intents/swap/challenge first, then submit the dWallet owner's signature"}
+	}
+	if needApprove {
+		// One bundle sig only.
+		if len(sigs) != 1 || sigs[0].Kind != "bundle" {
+			return &userError{http.StatusBadRequest, "owner_auth_bundle_required",
+				"EVM two-step swaps require exactly one ownerSignatures entry of kind \"bundle\" (Update 7)"}
+		}
+		return nil
+	}
+	// Single-leg swap.
+	if len(sigs) != 1 || sigs[0].Kind != "swap" {
+		return &userError{http.StatusBadRequest, "owner_auth_swap_required",
+			"single-leg swaps require exactly one ownerSignatures entry of kind \"swap\""}
+	}
+	return nil
 }
 
 func (o *Orchestrator) currentState(ctx context.Context, userID string, it *Intent) (*submitResponse, error) {
@@ -437,15 +767,43 @@ func (o *Orchestrator) currentState(ctx context.Context, userID string, it *Inte
 }
 
 // runApprove authorizes, signs and broadcasts the ERC20 approve, then waits
-// (bounded) for it to confirm before proceeding to the swap.
-func (o *Orchestrator) runApprove(ctx context.Context, userID string, it *Intent, passphrase string) (*submitResponse, error) {
+// (bounded) for it to confirm before proceeding to the swap. EVM 2-step uses
+// a SINGLE owner signature (kind "bundle") covering both this approve leg and
+// the swap leg — `BundleProof{Total:2, ThisIndex:0}` selects this leg's slot
+// on-chain.
+func (o *Orchestrator) runApprove(ctx context.Context, userID string, it *Intent, auth submitAuth) (*submitResponse, error) {
 	// §11 re-validation of the approve payload before signing it.
 	if uerr := o.revalidate(ctx, userID, "evm", it.ApproveUnsignedTxB64, it.ApproveMessageHex, it.ApproveMessageDigestHex, ""); uerr != nil {
 		_ = o.store.SetError(ctx, it.ID, StatusFailed, "approve payload re-validation failed")
 		o.metrics.recordTransition(StatusAuthorizing, StatusFailed)
 		return nil, uerr
 	}
-	sig, err := o.authorizeAndSign(ctx, userID, it, it.ApproveMessageHex, it.ApproveMessageDigestHex, "", passphrase)
+	bundleSig, ok := auth.find("bundle")
+	if !ok {
+		_ = o.store.SetError(ctx, it.ID, StatusFailed, "bundle owner signature missing")
+		o.metrics.recordTransition(StatusAuthorizing, StatusFailed)
+		return nil, &userError{http.StatusBadRequest, "owner_auth_missing_bundle", "ownerSignatures must include kind \"bundle\" for EVM two-step swaps"}
+	}
+	// Approve leg is the NORMAL signing kind (kind="approve" on the human message
+	// = "Sign for dWallet ..."); its bundle slot is ThisIndex=0. The other
+	// digest is the SWAP leg's V3 metadata digest (computed against swap meta).
+	swapMeta := o.swapMetaFromIntent(it)
+	swapDigest, derr := hex.DecodeString(it.MessageDigestHex)
+	if derr != nil || len(swapDigest) != 32 {
+		_ = o.store.SetError(ctx, it.ID, StatusFailed, "swap digest decode")
+		return nil, &userError{http.StatusInternalServerError, "digest_decode", "invalid persisted swap digest"}
+	}
+	swapMetaDigest, uerr := o.computeLegMetadataDigest(it, swapDigest, swapMeta)
+	if uerr != nil {
+		_ = o.store.SetError(ctx, it.ID, StatusFailed, "swap metadata digest")
+		return nil, uerr
+	}
+	bundle := &policy.BundleProof{
+		Total:        2,
+		ThisIndex:    0,
+		OtherDigests: [][32]byte{swapMetaDigest},
+	}
+	sig, err := o.authorizeAndSignWithBundle(ctx, userID, it, it.ApproveMessageHex, it.ApproveMessageDigestHex, "", auth.OwnerSlotHex, bundleSig, auth.Passphrase, nil, bundle)
 	if err != nil {
 		o.logger.Error("intent approve authorize/sign failed", "intent", it.ID, "err", err)
 		_ = o.store.SetError(ctx, it.ID, StatusFailed, "approval authorization/signing failed")
@@ -456,16 +814,16 @@ func (o *Orchestrator) runApprove(ctx context.Context, userID string, it *Intent
 	_ = o.store.SaveERC20Approve(ctx, it.ID, txHash) // status APPROVING
 	o.metrics.recordTransition(StatusAuthorizing, StatusApproving)
 	o.appendAudit(ctx, it, "intent.swap.approve", txHash)
-	return o.continueAfterApprove(ctx, userID, it, txHash, passphrase, approveReceiptInlineWait)
+	return o.continueAfterApprove(ctx, userID, it, txHash, auth, approveReceiptInlineWait)
 }
 
 // resumeApprove is the APPROVING re-entry: check the approve receipt and, once
 // confirmed, run the swap. A quick check only — the client drives the retries.
-func (o *Orchestrator) resumeApprove(ctx context.Context, userID string, it *Intent, passphrase string) (*submitResponse, error) {
-	return o.continueAfterApprove(ctx, userID, it, it.ApproveTxHash, passphrase, 3*time.Second)
+func (o *Orchestrator) resumeApprove(ctx context.Context, userID string, it *Intent, auth submitAuth) (*submitResponse, error) {
+	return o.continueAfterApprove(ctx, userID, it, it.ApproveTxHash, auth, 3*time.Second)
 }
 
-func (o *Orchestrator) continueAfterApprove(ctx context.Context, userID string, it *Intent, approveTxHash, passphrase string, maxWait time.Duration) (*submitResponse, error) {
+func (o *Orchestrator) continueAfterApprove(ctx context.Context, userID string, it *Intent, approveTxHash string, auth submitAuth, maxWait time.Duration) (*submitResponse, error) {
 	if approveTxHash == "" {
 		return &submitResponse{IntentID: it.ID, Status: StatusApproving}, nil
 	}
@@ -483,13 +841,13 @@ func (o *Orchestrator) continueAfterApprove(ctx context.Context, userID string, 
 		return o.currentState(ctx, userID, it)
 	}
 	o.metrics.recordTransition(StatusApproving, StatusSigning)
-	return o.runSwap(ctx, userID, it, StatusSigning, passphrase)
+	return o.runSwap(ctx, userID, it, StatusSigning, auth)
 }
 
 // runSwap authorizes, signs and broadcasts the swap tx. `from` is the status the
 // intent is transitioning out of (AUTHORIZING for a direct swap, SIGNING after
 // an ERC20 approve) — used for the state-transition metric.
-func (o *Orchestrator) runSwap(ctx context.Context, userID string, it *Intent, from, passphrase string) (*submitResponse, error) {
+func (o *Orchestrator) runSwap(ctx context.Context, userID string, it *Intent, from string, auth submitAuth) (*submitResponse, error) {
 	// §11 re-validation: recompute the signing material from the persisted
 	// unsignedTx and confirm it matches the snapshot before signing.
 	if uerr := o.revalidate(ctx, userID, it.ChainKind, it.UnsignedTxB64, it.SignMessageHex, it.MessageDigestHex, it.UnsignedTxHash); uerr != nil {
@@ -497,7 +855,46 @@ func (o *Orchestrator) runSwap(ctx context.Context, userID string, it *Intent, f
 		o.metrics.recordTransition(from, StatusFailed)
 		return nil, uerr
 	}
-	sig, err := o.authorizeAndSignSwap(ctx, userID, it, passphrase)
+	// Single-leg swap (Solana same-chain or EVM without approve) uses kind "swap".
+	// EVM 2-step swap (after a confirmed approve) reuses the kind "bundle"
+	// signature: the bundle hash covers both legs, so the same sig that authorized
+	// the approve also authorizes this swap. ThisIndex=1 = swap slot.
+	var sigEntry ownerSignature
+	var bundle *policy.BundleProof
+	if it.ApproveMessageDigestHex != "" {
+		b, ok := auth.find("bundle")
+		if !ok {
+			_ = o.store.SetError(ctx, it.ID, StatusFailed, "bundle owner signature missing")
+			o.metrics.recordTransition(from, StatusFailed)
+			return nil, &userError{http.StatusBadRequest, "owner_auth_missing_bundle", "ownerSignatures must include kind \"bundle\" for EVM two-step swaps"}
+		}
+		sigEntry = b
+		approveDigest, derr := hex.DecodeString(it.ApproveMessageDigestHex)
+		if derr != nil || len(approveDigest) != 32 {
+			_ = o.store.SetError(ctx, it.ID, StatusFailed, "approve digest decode")
+			return nil, &userError{http.StatusInternalServerError, "digest_decode", "invalid persisted approve digest"}
+		}
+		approveMetaDigest, uerr := o.computeLegMetadataDigest(it, approveDigest, nil)
+		if uerr != nil {
+			_ = o.store.SetError(ctx, it.ID, StatusFailed, "approve metadata digest")
+			return nil, uerr
+		}
+		bundle = &policy.BundleProof{
+			Total:        2,
+			ThisIndex:    1,
+			OtherDigests: [][32]byte{approveMetaDigest},
+		}
+	} else {
+		s, ok := auth.find("swap")
+		if !ok {
+			_ = o.store.SetError(ctx, it.ID, StatusFailed, "swap owner signature missing")
+			o.metrics.recordTransition(from, StatusFailed)
+			return nil, &userError{http.StatusBadRequest, "owner_auth_missing_swap", "ownerSignatures must include kind \"swap\""}
+		}
+		sigEntry = s
+	}
+	swapMeta := o.swapMetaFromIntent(it)
+	sig, err := o.authorizeAndSignSwap(ctx, userID, it, auth.OwnerSlotHex, sigEntry, auth.Passphrase, swapMeta, bundle)
 	if err != nil {
 		o.logger.Error("intent swap authorize/sign failed", "intent", it.ID, "err", err)
 		_ = o.store.SetError(ctx, it.ID, StatusFailed, "authorization/signing failed")
@@ -520,9 +917,17 @@ func (o *Orchestrator) runSwap(ctx context.Context, userID string, it *Intent, f
 }
 
 // authorizeAndSignSwap runs the swap-specific authorize (with presign harvest +
-// approval persistence) then signs.
-func (o *Orchestrator) authorizeAndSignSwap(ctx context.Context, userID string, it *Intent, passphrase string) (string, error) {
-	auth, err := o.authorizer.AuthorizeSwap(ctx, o.swapAuthInput(it))
+// approval persistence) then signs. Supports both single-leg SWAP signings and
+// bundle-leg swaps (ThisIndex=1 of a 2-leg EVM bundle).
+func (o *Orchestrator) authorizeAndSignSwap(ctx context.Context, userID string, it *Intent, ownerSlotHex string, sig ownerSignature, passphrase string, swap *policy.SwapMeta, bundle *policy.BundleProof) (string, error) {
+	in := o.swapAuthInput(it)
+	in.OwnerSlotHex = ownerSlotHex
+	in.OwnerSignatureBase64 = sig.SignatureBase64
+	in.OwnerWebAuthnAuthDataB64 = sig.WebAuthnAuthenticatorDataB64
+	in.OwnerWebAuthnCDJB64 = sig.WebAuthnClientDataJSONB64
+	in.Swap = swap
+	in.Bundle = bundle
+	auth, err := o.authorizer.AuthorizeSwap(ctx, in)
 	if err != nil {
 		return "", err
 	}
@@ -531,10 +936,19 @@ func (o *Orchestrator) authorizeAndSignSwap(ctx context.Context, userID string, 
 	return o.signWithApproval(ctx, userID, it, it.SignMessageHex, it.MessageMetadataHex, auth, presign, passphrase)
 }
 
-// authorizeAndSign is the generic authorize (for an arbitrary message digest,
-// e.g. the ERC20 approve) + sign. No swap-specific persistence.
-func (o *Orchestrator) authorizeAndSign(ctx context.Context, userID string, it *Intent, msgHex, msgDigest, metadataHex, passphrase string) (string, error) {
-	auth, err := o.authorizer.AuthorizeSwap(ctx, o.authInputWithDigest(it, msgDigest))
+// authorizeAndSignWithBundle is the generic authorize-then-sign for a specific
+// digest (e.g. the ERC20 approve leg) with optional swap meta and bundle proof.
+// No swap-specific approval persistence (that's reserved for the swap leg's
+// `authorizeAndSignSwap`).
+func (o *Orchestrator) authorizeAndSignWithBundle(ctx context.Context, userID string, it *Intent, msgHex, msgDigest, metadataHex, ownerSlotHex string, sig ownerSignature, passphrase string, swap *policy.SwapMeta, bundle *policy.BundleProof) (string, error) {
+	in := o.authInputWithDigest(it, msgDigest)
+	in.OwnerSlotHex = ownerSlotHex
+	in.OwnerSignatureBase64 = sig.SignatureBase64
+	in.OwnerWebAuthnAuthDataB64 = sig.WebAuthnAuthenticatorDataB64
+	in.OwnerWebAuthnCDJB64 = sig.WebAuthnClientDataJSONB64
+	in.Swap = swap
+	in.Bundle = bundle
+	auth, err := o.authorizer.AuthorizeSwap(ctx, in)
 	if err != nil {
 		return "", err
 	}
@@ -650,7 +1064,18 @@ func (o *Orchestrator) Status(ctx context.Context, userID, id string) (*statusRe
 // ---- helpers -------------------------------------------------------------
 
 // swapAuthInput builds the PolicyEngine authorize input from a persisted intent.
-// Shared by prepare (challenge digest / presign) and submit (authorize).
+// Shared by prepare (challenge digest / presign) and submit (authorize). The
+// `Amount` field is populated from the intent's input amount (FromAmount,
+// expressed in base units) so:
+//   - the metadata_digest the on-chain handler recomputes binds the real value,
+//   - the clear-signing human message shown to the owner surfaces the actual
+//     swap input amount instead of a literal zero,
+//   - the presign cache key matches between prepare (prefetch) and submit
+//     (harvest).
+//
+// Invalid / unparseable FromAmount degrades gracefully to 0 (the on-chain
+// handler still validates the digest end-to-end; a zero just degrades the UX,
+// it does not break the flow).
 func (o *Orchestrator) swapAuthInput(it *Intent) policy.SwapAuthorizeInput {
 	return policy.SwapAuthorizeInput{
 		DwalletAddress:          it.IkaDwalletAddress,
@@ -661,6 +1086,7 @@ func (o *Orchestrator) swapAuthInput(it *Intent) policy.SwapAuthorizeInput {
 		IkaCurve:                it.IkaCurve,
 		IkaDWalletPubkeyHex:     it.DwalletPublicKeyHex,
 		IkaMsgMetadataDigestHex: nonZeroDigest(it.IkaMsgMetadataDigestHex),
+		Amount:                  parseUintOrZero(it.FromAmount),
 	}
 }
 

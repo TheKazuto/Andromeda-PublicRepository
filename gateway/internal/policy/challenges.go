@@ -18,6 +18,8 @@ var (
 	DomainV3         = []byte("andromeda::policy-engine::v3")
 	DomainRequestV1  = []byte("andromeda::policy-engine::request::v1")
 	DomainRequestV2  = []byte("andromeda::policy-engine::request::v2")
+	// Update 7 (2026-05-26): V3 binds swap-specific fields when signing_kind=SWAP.
+	DomainRequestV3  = []byte("andromeda::policy-engine::request::v3")
 	DomainRecoveryV3 = []byte("andromeda::policy-engine::recovery::v3")
 )
 
@@ -42,8 +44,32 @@ var (
 	// (disc 1). The owner_slot signs this so the gateway cannot relay a signature
 	// without the dWallet owner's consent.
 	OpNormalSign = []byte("normal-sign")
+	// Update 7 (2026-05-26): swap clear-signing op tag for disc 1 with
+	// signing_kind=SIGNING_KIND_SWAP. A wallet showing "Swap X for Y..." produces
+	// a distinct challenge hash from a wallet showing "Sign for dWallet..." —
+	// the two op tags partition the precompile-verified message space.
+	OpSwapSign = []byte("swap-sign")
+	// Update 7 (2026-05-26): bundle challenge op tag. When N>=2 message_digests
+	// share a single owner signature (EVM approve+swap), each disc 1 uses this
+	// op tag and includes its bundle_this_index + other digests so the on-chain
+	// handler recomputes the same hash.
+	OpBundleSign = []byte("bundle-sign")
 	// C2 audit fix (2026-05-16): binds the disc 126 admin challenge.
 	OpUpdateFheAuth = []byte("update-rule-fhe-authorities")
+)
+
+// Update 7 (2026-05-26) — signing-kind discriminator for disc 1
+// (request_signature). Mirror of contracts/policy-engine/src/lib.rs.
+const (
+	SigningKindNormal uint8 = 0
+	SigningKindSwap   uint8 = 1
+)
+
+// Update 7 (2026-05-26) — bundle challenge bounds. Mirror of
+// contracts/policy-engine/src/lib.rs.
+const (
+	MinBundleTotal uint8 = 2
+	MaxBundleTotal uint8 = 4
 )
 
 // AdminChallengeInput carries every byte the on-chain handler hashes for a
@@ -211,6 +237,191 @@ func (in *NormalUseChallengeInput) Preimage() []byte {
 
 func (in *NormalUseChallengeInput) Hash() [32]byte {
 	return sha256.Sum256(in.Preimage())
+}
+
+// ─── Update 7 (2026-05-26) — SWAP signing-kind ─────────────────────────────
+
+// HumanMessageSwap renders the clear-signing line the dWallet owner reads
+// before authorizing a swap signature (disc 1 with signing_kind=SIGNING_KIND_SWAP).
+// Byte-for-byte mirror of `swap_sign_message` in contracts/auth/src/human_message.rs.
+//
+// Tokens are 32-byte address-padded (mint for Solana, EVM contract zero-padded);
+// `chainTag` is ASCII null-padded (e.g. "solana\x00\x00", "evm:1\x00\x00\x00").
+func HumanMessageSwap(dwallet solana.PublicKey, fromToken [32]byte, fromAmount uint64, toToken [32]byte, minAmountOut uint64, chainTag [8]byte, signatureScheme uint16) []byte {
+	var buf bytes.Buffer
+	buf.WriteString("Swap ")
+	buf.WriteString(strconv.FormatUint(fromAmount, 10))
+	buf.WriteString(" of ")
+	buf.WriteString(toHexLower(fromToken[:]))
+	buf.WriteString(" for at least ")
+	buf.WriteString(strconv.FormatUint(minAmountOut, 10))
+	buf.WriteString(" of ")
+	buf.WriteString(toHexLower(toToken[:]))
+	buf.WriteString(" on ")
+	// chain_tag is ASCII null-padded — strip trailing NULs to match the Rust
+	// renderer, which stops at the first 0x00 byte.
+	tagLen := 0
+	for tagLen < len(chainTag) && chainTag[tagLen] != 0 {
+		tagLen++
+	}
+	buf.Write(chainTag[:tagLen])
+	buf.WriteString(" for dWallet ")
+	buf.WriteString(dwallet.String())
+	buf.WriteString(" scheme ")
+	buf.WriteString(strconv.FormatUint(uint64(signatureScheme), 10))
+	return buf.Bytes()
+}
+
+// SwapMetadataDigestInput is the V3 metadata digest binding for the SWAP
+// signing path. Extends V2 with the swap-specific fields the on-chain handler
+// recomputes when `signing_kind = SIGNING_KIND_SWAP`. Mirror of
+// `swap_metadata_digest` in contracts/policy-engine/src/lib.rs.
+type SwapMetadataDigestInput struct {
+	Engine          solana.PublicKey
+	DWallet         solana.PublicKey
+	MessageDigest   [32]byte
+	Destination     [32]byte
+	UserPubkey      [32]byte
+	SignatureScheme uint16
+	RulesGeneration uint32
+	FromAmount      uint64
+	AssetIndex      uint8
+	FromToken       [32]byte
+	ToToken         [32]byte
+	MinAmountOut    uint64
+	ChainTag        [8]byte
+}
+
+func (in *SwapMetadataDigestInput) Preimage() []byte {
+	var buf bytes.Buffer
+	buf.Write(DomainRequestV3)
+	buf.WriteString("request-signature-swap")
+	buf.Write(in.Engine.Bytes())
+	buf.Write(in.DWallet.Bytes())
+	buf.Write(in.MessageDigest[:])
+	buf.Write(in.Destination[:])
+	buf.Write(in.UserPubkey[:])
+	var scheme [2]byte
+	binary.LittleEndian.PutUint16(scheme[:], in.SignatureScheme)
+	buf.Write(scheme[:])
+	// path = PATH_NORMAL (1) — dispatch loop still runs as NORMAL even on the swap path.
+	buf.WriteByte(1)
+	var gen [4]byte
+	binary.LittleEndian.PutUint32(gen[:], in.RulesGeneration)
+	buf.Write(gen[:])
+	var amt [8]byte
+	binary.LittleEndian.PutUint64(amt[:], in.FromAmount)
+	buf.Write(amt[:])
+	buf.WriteByte(in.AssetIndex)
+	buf.Write(in.FromToken[:])
+	buf.Write(in.ToToken[:])
+	var minOut [8]byte
+	binary.LittleEndian.PutUint64(minOut[:], in.MinAmountOut)
+	buf.Write(minOut[:])
+	buf.Write(in.ChainTag[:])
+	return buf.Bytes()
+}
+
+func (in *SwapMetadataDigestInput) Hash() [32]byte {
+	return sha256.Sum256(in.Preimage())
+}
+
+// SwapUseChallengeInput carries the inputs the on-chain `swap_use_challenge`
+// (disc 1 with signing_kind=SWAP, no bundle) hashes. Same shape as
+// NormalUseChallengeInput but the op tag changes so a swap-clear-signed
+// message can't be replayed as a generic signature. Mirror of
+// `swap_use_challenge` in contracts/policy-engine/src/lib.rs.
+type SwapUseChallengeInput struct {
+	HumanMessage   []byte
+	Engine         solana.PublicKey
+	DWallet        solana.PublicKey
+	MetadataDigest [32]byte
+	OwnerSlot      [MemberSlotLen]byte
+}
+
+func (in *SwapUseChallengeInput) Preimage() []byte {
+	var buf bytes.Buffer
+	buf.Write(DomainV3)
+	buf.Write(OpSwapSign)
+	var hl [2]byte
+	binary.LittleEndian.PutUint16(hl[:], uint16(len(in.HumanMessage)))
+	buf.Write(hl[:])
+	buf.Write(in.HumanMessage)
+	buf.Write(in.Engine.Bytes())
+	buf.Write(in.DWallet.Bytes())
+	buf.Write(in.MetadataDigest[:])
+	buf.Write(in.OwnerSlot[:])
+	return buf.Bytes()
+}
+
+func (in *SwapUseChallengeInput) Hash() [32]byte {
+	return sha256.Sum256(in.Preimage())
+}
+
+// ─── Update 7 (2026-05-26) — BUNDLE challenge ──────────────────────────────
+
+// BundleUseChallengeInput is the bundle owner-authorization challenge: one
+// owner signature covers `Total` distinct request_signature legs. Each leg's
+// disc 1 recomputes the same hash by passing its own `ThisIndex` + the other
+// legs' metadata digests in supplied order. Mirror of `bundle_use_challenge`
+// in contracts/policy-engine/src/lib.rs.
+//
+// The bundle hash is op_tag- and human-agnostic on purpose: legs can mix
+// signing kinds (e.g. EVM 2-step = NORMAL approve + SWAP swap) and still share
+// the same owner signature. Each leg's metadata digest already binds its own
+// preimage variant (V2 for NORMAL, V3 for SWAP), so a tampered tx changes the
+// digest, which changes the bundle hash.
+type BundleUseChallengeInput struct {
+	Engine             solana.PublicKey
+	DWallet            solana.PublicKey
+	ThisMetadataDigest [32]byte
+	OwnerSlot          [MemberSlotLen]byte
+	Total              uint8 // 2..=MaxBundleTotal
+	ThisIndex          uint8 // 0..=Total-1
+	OtherDigests       [][32]byte
+}
+
+func (in *BundleUseChallengeInput) Preimage() ([]byte, error) {
+	if in.Total < MinBundleTotal || in.Total > MaxBundleTotal {
+		return nil, fmt.Errorf("policy: bundle total %d outside [%d,%d]", in.Total, MinBundleTotal, MaxBundleTotal)
+	}
+	if in.ThisIndex >= in.Total {
+		return nil, fmt.Errorf("policy: bundle this_index %d >= total %d", in.ThisIndex, in.Total)
+	}
+	if uint8(len(in.OtherDigests)) != in.Total-1 {
+		return nil, fmt.Errorf("policy: bundle expected %d other digests, got %d", in.Total-1, len(in.OtherDigests))
+	}
+	// Reorder: place `ThisMetadataDigest` at `ThisIndex`, fill remaining slots
+	// with `OtherDigests` in supplied order. Mirror of the on-chain reordering.
+	ordered := make([][32]byte, in.Total)
+	otherIter := 0
+	for i := uint8(0); i < in.Total; i++ {
+		if i == in.ThisIndex {
+			ordered[i] = in.ThisMetadataDigest
+		} else {
+			ordered[i] = in.OtherDigests[otherIter]
+			otherIter++
+		}
+	}
+	var buf bytes.Buffer
+	buf.Write(DomainV3)
+	buf.Write(OpBundleSign)
+	buf.Write(in.Engine.Bytes())
+	buf.Write(in.DWallet.Bytes())
+	buf.WriteByte(in.Total)
+	for _, d := range ordered {
+		buf.Write(d[:])
+	}
+	buf.Write(in.OwnerSlot[:])
+	return buf.Bytes(), nil
+}
+
+func (in *BundleUseChallengeInput) Hash() ([32]byte, error) {
+	pre, err := in.Preimage()
+	if err != nil {
+		return [32]byte{}, err
+	}
+	return sha256.Sum256(pre), nil
 }
 
 // AllowlistConfigHash computes sha256("allowlist-config-v1" || applies_to ||

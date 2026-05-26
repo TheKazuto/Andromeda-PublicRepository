@@ -654,6 +654,16 @@ type requestSignatureSubmitRequest struct {
 	SignatureBase64        string          `json:"signature_base64,omitempty" validate:"omitempty,base64"`
 	WebauthnAuthDataBase64 string          `json:"webauthn_auth_data_base64,omitempty" validate:"omitempty,base64"`
 	WebauthnCDJBase64      string          `json:"webauthn_cdj_base64,omitempty" validate:"omitempty,base64"`
+	// Update 7 (2026-05-26): when non-nil, the SWAP signing kind is used (the
+	// dWallet owner reads a semantic swap clear-signing message and the
+	// metadata_digest binds V3 swap fields). Only set via AuthorizeSwap; the
+	// HTTP /submit handler today receives NORMAL signings only.
+	Swap *SwapMeta `json:"-"`
+	// Update 7 (2026-05-26): when non-nil, this leg participates in a multi-
+	// digest bundle. One owner signature covers Bundle.Total legs. Only set
+	// via AuthorizeSwap; the HTTP /submit handler today receives single-leg
+	// signings only.
+	Bundle *BundleProof `json:"-"`
 }
 
 func (s *Service) requestSignatureSubmit(w http.ResponseWriter, r *http.Request) {
@@ -850,6 +860,51 @@ func (s *Service) assembleRequestSignatureIx(
 	}
 	callerProgram := solana.PublicKeyFromBytes(callerProgramBytes[:])
 
+	// Update 7 (2026-05-26): unpack the optional SWAP + BUNDLE extensions onto
+	// the typed builder. Defaults (kind=0, all-zero swap fields, total=0) keep
+	// the legacy NORMAL single-digest path.
+	var (
+		signingKind        uint8
+		swapFromToken      [32]byte
+		swapToToken        [32]byte
+		swapMinAmountOut   uint64
+		swapChainTag       [8]byte
+		bundleTotal        uint8
+		bundleThisIndex    uint8
+		bundleOtherDigest1 [32]byte
+		bundleOtherDigest2 [32]byte
+		bundleOtherDigest3 [32]byte
+	)
+	if req.Swap != nil {
+		signingKind = SigningKindSwap
+		swapFromToken = req.Swap.FromToken
+		swapToToken = req.Swap.ToToken
+		swapMinAmountOut = req.Swap.MinAmountOut
+		swapChainTag = req.Swap.ChainTag
+	}
+	if req.Bundle != nil {
+		if req.Bundle.Total < MinBundleTotal || req.Bundle.Total > MaxBundleTotal {
+			return nil, zero, zero, nil, &buildError{http.StatusBadRequest, "invalid_field",
+				fmt.Sprintf("bundle total %d outside [%d,%d]", req.Bundle.Total, MinBundleTotal, MaxBundleTotal)}
+		}
+		if req.Bundle.ThisIndex >= req.Bundle.Total {
+			return nil, zero, zero, nil, &buildError{http.StatusBadRequest, "invalid_field",
+				fmt.Sprintf("bundle this_index %d >= total %d", req.Bundle.ThisIndex, req.Bundle.Total)}
+		}
+		want := int(req.Bundle.Total) - 1
+		if len(req.Bundle.OtherDigests) != want {
+			return nil, zero, zero, nil, &buildError{http.StatusBadRequest, "invalid_field",
+				fmt.Sprintf("bundle expected %d other digests, got %d", want, len(req.Bundle.OtherDigests))}
+		}
+		bundleTotal = req.Bundle.Total
+		bundleThisIndex = req.Bundle.ThisIndex
+		// Pack supplied others into the three fixed slots (trailing zero).
+		slots := [3]*[32]byte{&bundleOtherDigest1, &bundleOtherDigest2, &bundleOtherDigest3}
+		for i, d := range req.Bundle.OtherDigests {
+			*slots[i] = d
+		}
+	}
+
 	mainIx, err := RequestSignature(RequestSignatureParams{
 		ProgramID:            s.ProgramID,
 		Engine:               engine,
@@ -874,6 +929,16 @@ func (s *Service) assembleRequestSignatureIx(
 		Amount:               req.Amount,
 		AssetIndex:           req.AssetIndex,
 		IkaMsgMetadataDigest: ikaMetaDigest,
+		SigningKind:          signingKind,
+		SwapFromToken:        swapFromToken,
+		SwapToToken:          swapToToken,
+		SwapMinAmountOut:     swapMinAmountOut,
+		SwapChainTag:         swapChainTag,
+		BundleTotal:          bundleTotal,
+		BundleThisIndex:      bundleThisIndex,
+		BundleOtherDigest1:   bundleOtherDigest1,
+		BundleOtherDigest2:   bundleOtherDigest2,
+		BundleOtherDigest3:   bundleOtherDigest3,
 	})
 	if err != nil {
 		return nil, zero, zero, nil, &buildError{http.StatusInternalServerError, "build_failed", err.Error()}
@@ -1017,10 +1082,8 @@ func serializeInstruction(ix solana.Instruction) (instructionJSON, error) {
 // ─── precompile helper ──────────────────────────────────────────────────────
 
 // buildRequestSignatureOwnerAuth builds the Fase 1 (A1) owner-authorization
-// precompile for the zero-trust NORMAL signing path. The owner signs the
-// `normal_use_challenge` (bound to the metadata_digest) off-chain; the gateway
-// relays it as the first ix in the tx. Writes the HTTP error and returns
-// ok=false on any problem.
+// precompile for the zero-trust NORMAL signing path. Thin HTTP wrapper over
+// BuildOwnerAuthPrecompile (the pure function shared with AuthorizeSwap).
 func (s *Service) buildRequestSignatureOwnerAuth(
 	w http.ResponseWriter, req *requestSignatureSubmitRequest, engine, dwallet solana.PublicKey,
 ) (solana.Instruction, bool) {
@@ -1034,41 +1097,27 @@ func (s *Service) buildRequestSignatureOwnerAuth(
 		httpx.WriteError(w, http.StatusBadRequest, "invalid_field", "owner_slot: "+err.Error())
 		return nil, false
 	}
-	sig, err := base64.StdEncoding.DecodeString(req.SignatureBase64)
-	if err != nil {
-		httpx.WriteError(w, http.StatusBadRequest, "invalid_field", "signature_base64: "+err.Error())
-		return nil, false
-	}
-	var authData, cdj []byte
-	if req.WebauthnAuthDataBase64 != "" {
-		if authData, err = base64.StdEncoding.DecodeString(req.WebauthnAuthDataBase64); err != nil {
-			httpx.WriteError(w, http.StatusBadRequest, "invalid_field", "webauthn_auth_data_base64: "+err.Error())
-			return nil, false
-		}
-	}
-	if req.WebauthnCDJBase64 != "" {
-		if cdj, err = base64.StdEncoding.DecodeString(req.WebauthnCDJBase64); err != nil {
-			httpx.WriteError(w, http.StatusBadRequest, "invalid_field", "webauthn_cdj_base64: "+err.Error())
-			return nil, false
-		}
-	}
 	metaDigest, _ := mustHex32(req.MetadataDigestHex)
 	dest, _ := mustHex32(req.DestinationHex)
-	human := HumanMessageNormalSign(dwallet, dest, req.Amount, req.SignatureScheme)
-	nuc := &NormalUseChallengeInput{
-		HumanMessage:   human,
-		Engine:         engine,
-		DWallet:        dwallet,
-		MetadataDigest: metaDigest,
-		OwnerSlot:      ownerSlot,
-	}
-	challenge := nuc.Hash()
-	precompile, err := buildCredentialPrecompile(ownerSlot, challenge, sig, authData, cdj)
+	ix, err := BuildOwnerAuthPrecompile(OwnerAuthInput{
+		OwnerSlot:              ownerSlot,
+		SignatureBase64:        req.SignatureBase64,
+		WebauthnAuthDataBase64: req.WebauthnAuthDataBase64,
+		WebauthnCDJBase64:      req.WebauthnCDJBase64,
+		Engine:                 engine,
+		DWallet:                dwallet,
+		MetadataDigest:         metaDigest,
+		Destination:            dest,
+		Amount:                 req.Amount,
+		SignatureScheme:        req.SignatureScheme,
+		Swap:                   req.Swap,
+		Bundle:                 req.Bundle,
+	})
 	if err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, "invalid_signature", err.Error())
 		return nil, false
 	}
-	return precompile, true
+	return ix, true
 }
 
 // buildCredentialPrecompile is a thin wrapper around

@@ -43,6 +43,7 @@ func MountReadRoutes(r chi.Router, opts RouteOptions) {
 	charge := chargeOrNoop(opts.Charge)
 	refund := refundOrNoop(opts.RefundOnError)
 	r.With(charge("intent.simulate"), refund).Post("/v1/intents/simulate", h.simulate)
+	r.With(charge("intent.swap.challenge"), refund).Post("/v1/intents/swap/challenge", h.challenge)
 	r.With(charge("intent.status"), refund).Get("/v1/intents/status/{intentId}", h.status)
 }
 
@@ -93,6 +94,24 @@ func (h *handlers) simulate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp, err := h.opts.Orchestrator.Simulate(r.Context(), userID, req)
+	if err != nil {
+		writeUserError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (h *handlers) challenge(w http.ResponseWriter, r *http.Request) {
+	userID := h.opts.ResolveUserID(r)
+	if userID == "" {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "missing tenant identity")
+		return
+	}
+	var req challengeRequest
+	if !bind(w, r, &req) {
+		return
+	}
+	resp, err := h.opts.Orchestrator.Challenge(r.Context(), userID, req)
 	if err != nil {
 		writeUserError(w, err)
 		return

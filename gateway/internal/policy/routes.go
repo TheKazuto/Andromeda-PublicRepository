@@ -297,6 +297,32 @@ func (s *Service) MountRoutes(r chi.Router) {
 	r.Post("/v1/policy/passkey/use/submit", s.passkeyUseSubmit)
 	r.Post("/v1/policy/passkey/session/close", s.passkeyClose)
 
+	// Update 8 (2026-05-26) — session-key lifecycle (discs 100-106). Andromeda
+	// exposes the on-chain primitives so the dev can build their own delegation
+	// layer (e.g. AI agents, DCA bots, limit orders) on top. NO orchestration
+	// here — challenge / submit / build pattern only, no per-session state in
+	// the gateway. The session-signer keypair lives ENTIRELY on the dev's side.
+	r.Post("/v1/policy/session/open/challenge", s.sessionOpenChallenge)
+	r.Post("/v1/policy/session/open/submit", s.sessionOpenSubmit)
+	r.Post("/v1/policy/session/revoke/challenge", s.sessionRevokeChallenge)
+	r.Post("/v1/policy/session/revoke/submit", s.sessionRevokeSubmit)
+	r.Post("/v1/policy/session/close/challenge", s.sessionCloseChallenge)
+	r.Post("/v1/policy/session/close/submit", s.sessionCloseSubmit)
+	r.Post("/v1/policy/session/close-expired", s.sessionCloseExpiredSubmit)
+	r.Post("/v1/policy/session/destinations/add/challenge", s.sessionDestAddChallenge)
+	r.Post("/v1/policy/session/destinations/add/submit", s.sessionDestAddSubmit)
+	r.Post("/v1/policy/session/destinations/remove/challenge", s.sessionDestRemoveChallenge)
+	r.Post("/v1/policy/session/destinations/remove/submit", s.sessionDestRemoveSubmit)
+	r.Post("/v1/policy/session/use/build", s.sessionUseBuild)
+	// Path is `/state/` (not `/{engine}/{idx}` directly under /session/) to avoid
+	// chi pattern collisions with the literal POST routes above
+	// (open/revoke/close/destinations/use). Placeholder routes under the same
+	// prefix as literal routes can produce ambiguous matches; the extra `/state/`
+	// segment keeps the patterns disjoint.
+	r.Get("/v1/policy/session/state/{engine}/{sessionIndex}", func(w http.ResponseWriter, r *http.Request) {
+		s.sessionReadHandler(w, r, chi.URLParam(r, "engine"), chi.URLParam(r, "sessionIndex"))
+	})
+
 	// RT2: Risk configuration management (CRUD operations).
 	// Mounted only if riskConfigService is wired.
 	if s.riskConfigService != nil {
