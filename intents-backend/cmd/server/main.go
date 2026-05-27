@@ -46,12 +46,15 @@ func main() {
 
 	solanaBroadcaster := chains.NewSolanaBroadcaster(m, logger)
 	evmBroadcaster := chains.NewEVMBroadcaster(m, logger)
+	suiBroadcaster := chains.NewSuiBroadcaster(m, logger)
 	swapSvc := swap.NewService(swap.Options{
 		Lifi:              lifiClient,
 		Solana:            solanaBroadcaster,
 		EVM:               evmBroadcaster,
+		Sui:               suiBroadcaster,
 		SolanaRPCOverride: cfg.SolanaRPCURL,
 		EVMOverrides:      cfg.EVMRPCOverrides(),
+		SuiRPCOverride:    cfg.SuiRPCURL,
 		Metrics:           m,
 		Logger:            logger,
 	})
