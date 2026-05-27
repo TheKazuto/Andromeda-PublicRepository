@@ -42,6 +42,7 @@ type Config struct {
 	// a dedicated provider (Helius/Alchemy) without a code change.
 	SolanaRPCURL   string
 	EVMRPCURLsJSON string
+	SuiRPCURL      string
 
 	// QuoteCacheTTL is the lifetime of a cached quote PREVIEW (display-only;
 	// the transactionRequest is never cached). Short by design so prices stay
@@ -71,6 +72,7 @@ func Load() *Config {
 		LifiTimeout:         time.Duration(getenvInt("LIFI_TIMEOUT_SECONDS", 20)) * time.Second,
 		SolanaRPCURL:        strings.TrimRight(getenv("SOLANA_RPC_URL", ""), "/"),
 		EVMRPCURLsJSON:      getenv("EVM_RPC_URLS_JSON", "{}"),
+		SuiRPCURL:           strings.TrimRight(getenv("SUI_RPC_URL", ""), "/"),
 		QuoteCacheTTL:       time.Duration(getenvInt("QUOTE_CACHE_TTL_SECONDS", 5)) * time.Second,
 	}
 

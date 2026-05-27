@@ -87,6 +87,10 @@ func (h *Handlers) prepareSwap(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusBadRequest, "validation_failed", "invalid prepare parameters")
 		return
 	}
+	if !h.swap.IsKindRegistered(req.ChainKind) {
+		httpx.WriteError(w, http.StatusBadRequest, "unsupported_chain_kind", "chainKind is not supported")
+		return
+	}
 
 	out, err := h.swap.Prepare(r.Context(), swap.PrepareInput{
 		Params:    toQuoteParams(req.quoteRequest),
@@ -111,6 +115,10 @@ func (h *Handlers) finalizeSwap(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := validate.Struct(&req); err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, "validation_failed", "invalid finalize parameters")
+		return
+	}
+	if !h.swap.IsKindRegistered(req.ChainKind) {
+		httpx.WriteError(w, http.StatusBadRequest, "unsupported_chain_kind", "chainKind is not supported")
 		return
 	}
 
@@ -171,6 +179,10 @@ func (h *Handlers) deriveMessage(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusBadRequest, "validation_failed", "invalid derive parameters")
 		return
 	}
+	if !h.swap.IsKindRegistered(req.ChainKind) {
+		httpx.WriteError(w, http.StatusBadRequest, "unsupported_chain_kind", "chainKind is not supported")
+		return
+	}
 	out, err := h.swap.DeriveMessage(req.ChainKind, req.UnsignedTxB64)
 	if err != nil {
 		h.writeSwapError(w, "derive", req.ChainKind, err)
@@ -187,6 +199,10 @@ func (h *Handlers) nativeBalance(w http.ResponseWriter, r *http.Request) {
 	address := r.URL.Query().Get("address")
 	if chainKind == "" || chainID == 0 || address == "" {
 		httpx.WriteError(w, http.StatusBadRequest, "invalid_params", "chainKind, chainId and address are required")
+		return
+	}
+	if !h.swap.IsKindRegistered(chainKind) {
+		httpx.WriteError(w, http.StatusBadRequest, "unsupported_chain_kind", "chainKind is not supported")
 		return
 	}
 	bal, err := h.swap.NativeBalance(r.Context(), chainKind, chainID, address)

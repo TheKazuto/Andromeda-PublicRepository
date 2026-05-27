@@ -24,22 +24,24 @@ type quoteRequest struct {
 // adds the dWallet identity via FromAddress and supplies chainKind hints.
 type prepareRequest struct {
 	quoteRequest
-	// ChainKind is "solana" (MVP). Validated against the resolved route so a
-	// mismatch fails loudly.
-	ChainKind string `json:"chainKind" validate:"required,oneof=solana evm"`
+	// ChainKind is any registered ChainAdapter key ("solana", "evm", and any
+	// family added in later phases). The handler cross-checks it against
+	// swap.Service.IsKindRegistered so the public surface always matches the
+	// actual code — no enum drift between DTO and registry.
+	ChainKind string `json:"chainKind" validate:"required"`
 }
 
 // deriveRequest re-derives the signing material from a persisted unsignedTx, so
 // the gateway can re-validate the snapshot before signing.
 type deriveRequest struct {
-	ChainKind     string `json:"chainKind" validate:"required,oneof=solana evm"`
+	ChainKind     string `json:"chainKind" validate:"required"`
 	UnsignedTxB64 string `json:"unsignedTxB64" validate:"required"`
 }
 
 // finalizeRequest inserts the dWallet signature into the prepared tx and
 // broadcasts it.
 type finalizeRequest struct {
-	ChainKind string `json:"chainKind" validate:"required,oneof=solana evm"`
+	ChainKind string `json:"chainKind" validate:"required"`
 	// UnsignedTxB64 is the exact snapshot the gateway persisted at prepare time.
 	UnsignedTxB64 string `json:"unsignedTxB64" validate:"required"`
 	// SignatureB64 is the raw signature produced by ika-backend /v1/dwallet/sign.

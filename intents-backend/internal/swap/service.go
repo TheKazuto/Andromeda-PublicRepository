@@ -1,8 +1,12 @@
 // Package swap turns a LI.FI route into an unsigned chain transaction and,
 // after the gateway returns the dWallet signature, inserts it and broadcasts.
 // It never touches keys, policy or the gateway's billing — it is the pure
-// "build tx / insert sig / send" layer. Covers Solana + EVM, same-chain and
-// cross-chain (bridge).
+// "build tx / insert sig / send" layer.
+//
+// Family support is plugged in via ChainAdapter (see adapter.go). The Service
+// keeps a per-instance registry of adapters and delegates Prepare/Derive/
+// Finalize/NativeBalance to the adapter for the requested chainKind. Adding a
+// new family is one file (adapter_<family>.go) registered in NewService.
 package swap
 
 import (
@@ -10,51 +14,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"strconv"
 
 	"github.com/shinkalabs/andromeda-intents/internal/chains"
 	"github.com/shinkalabs/andromeda-intents/internal/lifi"
 	"github.com/shinkalabs/andromeda-intents/internal/metrics"
 )
-
-// NativeBalance returns the dWallet's native-token balance on a chain, in base
-// units (lamports / wei) as a decimal string. Used by the gateway to pre-check
-// that the dWallet can pay the swap gas before broadcasting.
-func (s *Service) NativeBalance(ctx context.Context, chainKind string, chainID int, address string) (string, error) {
-	switch chainKind {
-	case "solana":
-		urls := s.resolveSolanaRPCs(chainID)
-		if len(urls) == 0 {
-			return "", fmt.Errorf("no Solana RPC available for chain %d", chainID)
-		}
-		lamports, err := s.solana.Balance(ctx, urls, address)
-		if err != nil {
-			return "", err
-		}
-		return strconv.FormatUint(lamports, 10), nil
-	case "evm":
-		urls := s.resolveEVMRPCs(chainID)
-		if len(urls) == 0 {
-			return "", fmt.Errorf("no EVM RPC available for chain %d", chainID)
-		}
-		wei, err := s.evm.Balance(ctx, urls, address)
-		if err != nil {
-			return "", err
-		}
-		return wei.String(), nil
-	default:
-		return "", fmt.Errorf("unsupported chainKind %q", chainKind)
-	}
-}
-
-// solanaCAIP2 is the CAIP-2 id the gateway forwards to ika-backend
-// prepare-message. Only the namespace ("solana") matters there — Solana applies
-// no signing envelope and the approval digest is keccak256 regardless — so the
-// mainnet genesis reference is a stable, correct value across clusters.
-const solanaCAIP2 = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"
-
-// solanaSignScheme is EddsaSha512 (Ed25519). Matches ika-backend chains.ts.
-const solanaSignScheme = 5
 
 // InvariantError marks a safety check that failed on the LI.FI tx (wrong fee
 // payer, unexpected signer, cross-chain route, …). The handler maps it to 422
@@ -69,13 +33,15 @@ func invariant(format string, args ...any) error {
 
 // Service is the swap builder/broadcaster.
 type Service struct {
-	lifi              *lifi.Client
-	solana            *chains.SolanaBroadcaster
-	evm               *chains.EVMBroadcaster
-	solanaRPCOverride string
-	evmOverrides      map[int]string // chainId → RPC URL override
-	metrics           *metrics.Metrics
-	logger            *slog.Logger
+	lifi     *lifi.Client
+	metrics  *metrics.Metrics
+	logger   *slog.Logger
+	adapters *registry
+
+	// evm is kept as a direct field because EVMReceipt is exposed as an
+	// EVM-specific HTTP endpoint (/evm/receipt) — Solana has no analog and
+	// the operation does not fit the ChainAdapter contract.
+	evmAdapter *evmAdapter
 }
 
 // Options wires the swap dependencies. The RPC overrides take priority over the
@@ -84,42 +50,51 @@ type Options struct {
 	Lifi              *lifi.Client
 	Solana            *chains.SolanaBroadcaster
 	EVM               *chains.EVMBroadcaster
+	Sui               *chains.SuiBroadcaster
 	SolanaRPCOverride string
 	EVMOverrides      map[int]string
+	SuiRPCOverride    string
 	Metrics           *metrics.Metrics
 	Logger            *slog.Logger
 }
 
 func NewService(o Options) *Service {
+	r := newRegistry()
+	sol := newSolanaAdapter(o.Solana, o.Lifi, o.SolanaRPCOverride)
+	evm := newEVMAdapter(o.EVM, o.Lifi, o.EVMOverrides)
+	r.register(sol)
+	r.register(evm)
+	if o.Sui != nil {
+		r.register(newSuiAdapter(o.Sui, o.Lifi, o.SuiRPCOverride))
+	}
 	return &Service{
-		lifi: o.Lifi, solana: o.Solana, evm: o.EVM,
-		solanaRPCOverride: o.SolanaRPCOverride, evmOverrides: o.EVMOverrides,
-		metrics: o.Metrics, logger: o.Logger,
+		lifi:       o.Lifi,
+		metrics:    o.Metrics,
+		logger:     o.Logger,
+		adapters:   r,
+		evmAdapter: evm,
 	}
 }
 
-// resolveSolanaRPCs returns the broadcast endpoints for a Solana chain id:
-// the operator override first, then the cached public RPCs from LI.FI /chains.
-func (s *Service) resolveSolanaRPCs(chainID int) []string {
-	if s.solanaRPCOverride != "" {
-		return []string{s.solanaRPCOverride}
-	}
-	return s.lifi.RPC().RPCsFor(chainID)
+// RegisteredKinds returns the chainKinds the Service can serve. Used by the
+// DTO validator and by /v1/intents/capabilities so the public surface always
+// matches the actual code.
+func (s *Service) RegisteredKinds() []string {
+	return s.adapters.keys()
 }
 
-// resolveEVMRPCs returns the endpoints for an EVM chainId: the per-chain operator
-// override first, then the cached public RPCs from LI.FI /chains.
-func (s *Service) resolveEVMRPCs(chainID int) []string {
-	if url, ok := s.evmOverrides[chainID]; ok && url != "" {
-		return []string{url}
-	}
-	return s.lifi.RPC().RPCsFor(chainID)
+// IsKindRegistered reports whether a chainKind has a registered adapter.
+// Constant-time check used by the API handler to reject unsupported kinds
+// before any RPC or business logic runs.
+func (s *Service) IsKindRegistered(kind string) bool {
+	_, ok := s.adapters.get(kind)
+	return ok
 }
 
 // PrepareInput is the swap-prepare request.
 type PrepareInput struct {
 	Params    lifi.QuoteParams
-	ChainKind string // "solana" (MVP)
+	ChainKind string // any registered adapter key
 }
 
 // PrepareResult is everything the gateway needs to persist the intent, derive
@@ -129,16 +104,25 @@ type PrepareResult struct {
 	ChainKind          string `json:"chainKind"`
 	ChainID            int    `json:"chainId"`            // numeric LI.FI id (broadcast RPC key)
 	SignChainID        string `json:"signChainId"`        // CAIP-2 for prepare-message
-	SignScheme         int    `json:"signScheme"`         // 5 for Solana
+	SignScheme         int    `json:"signScheme"`         // 5 Solana, 0 EVM, ...
 	ChainNativeAddress string `json:"chainNativeAddress"` // dWallet address on the chain (== fee payer)
 
 	// UnsignedTxB64 is the full LI.FI transaction snapshot, re-serialized
 	// canonically. The gateway persists it and returns it verbatim at finalize.
 	UnsignedTxB64 string `json:"unsignedTxB64"`
 	// MessageToSignHex is the exact bytes the gateway feeds to ika
-	// prepare-message as payloadHex (the Solana message). preprocessedHex comes
-	// back equal to this; digestHex = keccak256(this).
+	// prepare-message as payloadHex. For families without an envelope (EVM,
+	// Solana) ika's preprocessedHex comes back EQUAL to this. For families
+	// with an envelope (Sui: blake2b(intent || txBytes); Bitcoin: BIP143
+	// sighash; …) ika applies the envelope itself — preprocessedHex differs,
+	// and the drift check is performed on MessageDigestHex instead.
 	MessageToSignHex string `json:"messageToSignHex"`
+	// MessageDigestHex is the keccak256 the gateway cross-checks against ika's
+	// returned digestHex. Populated by EVERY adapter — the canonical value the
+	// MessageApproval PDA is keyed by (see ika-backend chain/digest.ts).
+	// This is the single drift-check anchor: a mismatch here means the
+	// intents-backend and ika-backend disagree on what is being signed.
+	MessageDigestHex string `json:"messageDigestHex"`
 	// UnsignedTxHash is sha256(UnsignedTxB64 bytes) for snapshot integrity.
 	UnsignedTxHash string `json:"unsignedTxHash"`
 
@@ -178,4 +162,74 @@ type FinalizeInput struct {
 type FinalizeResult struct {
 	TxHash           string `json:"txHash,omitempty"`
 	BroadcastUnknown bool   `json:"broadcastUnknown"`
+}
+
+// DeriveResult is the re-derived signing material for an already-prepared tx.
+type DeriveResult struct {
+	MessageToSignHex string `json:"messageToSignHex"`
+	DigestHex        string `json:"digestHex"`
+	UnsignedTxHash   string `json:"unsignedTxHash"`
+}
+
+// Prepare fetches the LI.FI route and builds the unsigned tx + the bytes
+// the gateway must authorize/sign. Read-only against keys and policy. Same-chain
+// (fromChain == toChain) and cross-chain (bridge) both flow here: LI.FI returns
+// a SOURCE-chain tx in either case; we sign + broadcast it on the source chain
+// and the bridge delivers to the destination.
+func (s *Service) Prepare(ctx context.Context, in PrepareInput) (*PrepareResult, error) {
+	adapter, err := s.pickAdapter(in.ChainKind)
+	if err != nil {
+		return nil, err
+	}
+	step, err := s.lifi.Quote(ctx, in.Params)
+	if err != nil {
+		return nil, err
+	}
+	return adapter.Prepare(ctx, step, in.Params)
+}
+
+// DeriveMessage recomputes the message-to-sign + digest + snapshot hash from a
+// persisted unsignedTx, WITHOUT re-quoting LI.FI. It reproduces exactly what
+// prepare produced, so the gateway can re-validate the persisted snapshot
+// byte-for-byte before authorizing/signing (defense against snapshot tampering).
+func (s *Service) DeriveMessage(chainKind, unsignedTxB64 string) (*DeriveResult, error) {
+	adapter, err := s.pickAdapter(chainKind)
+	if err != nil {
+		return nil, err
+	}
+	return adapter.DeriveMessage(unsignedTxB64)
+}
+
+// Finalize inserts the dWallet signature into the prepared tx and broadcasts it.
+func (s *Service) Finalize(ctx context.Context, in FinalizeInput) (*FinalizeResult, error) {
+	adapter, err := s.pickAdapter(in.ChainKind)
+	if err != nil {
+		return nil, err
+	}
+	urls := adapter.ResolveRPCs(in.ChainID)
+	if len(urls) == 0 {
+		return nil, fmt.Errorf("no RPC available for chain %d (kind=%s) — set an override or wait for the /chains cache to load", in.ChainID, in.ChainKind)
+	}
+	return adapter.Finalize(ctx, in, urls)
+}
+
+// NativeBalance returns the dWallet's native-token balance on a chain, in base
+// units (lamports / wei / sun / …) as a decimal string.
+func (s *Service) NativeBalance(ctx context.Context, chainKind string, chainID int, address string) (string, error) {
+	adapter, err := s.pickAdapter(chainKind)
+	if err != nil {
+		return "", err
+	}
+	urls := adapter.ResolveRPCs(chainID)
+	if len(urls) == 0 {
+		return "", fmt.Errorf("no RPC available for chain %d (kind=%s)", chainID, chainKind)
+	}
+	return adapter.NativeBalance(ctx, urls, address)
+}
+
+// EVMReceipt reports whether an EVM tx is mined (found) and succeeded. Used by
+// the gateway to gate the swap on the ERC20 approve confirming. EVM-only — see
+// the EVMReceiptReader interface comment.
+func (s *Service) EVMReceipt(ctx context.Context, chainID int, txHash string) (bool, bool, error) {
+	return s.evmAdapter.Receipt(ctx, chainID, txHash)
 }

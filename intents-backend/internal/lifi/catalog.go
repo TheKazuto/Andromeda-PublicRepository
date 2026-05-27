@@ -79,7 +79,7 @@ func (c *Client) Chains(ctx context.Context, chainTypes string) ([]byte, error) 
 // RefreshChains loads /chains and updates the RPC cache. Used at boot and by the
 // periodic refresher; errors are returned for the caller to log (non-fatal).
 func (c *Client) RefreshChains(ctx context.Context) error {
-	_, err := c.Chains(ctx, "EVM,SVM")
+	_, err := c.Chains(ctx, "EVM,SVM,MVM,UTXO")
 	return err
 }
 
