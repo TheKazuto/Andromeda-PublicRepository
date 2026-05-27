@@ -38,8 +38,10 @@ type prepareRequest struct {
 	// public key and may be omitted.
 	ChainNativeAddress string `json:"chainNativeAddress" validate:"omitempty"`
 
-	// Swap.
-	ChainKind string `json:"chainKind" validate:"required,oneof=solana evm"`
+	// Swap. ChainKind is any registered family (see chain_kinds.go). The handler
+	// cross-checks it against the registry so the public surface always matches
+	// the actual code — no enum drift between DTO and resolver.
+	ChainKind string `json:"chainKind" validate:"required"`
 	FromChain string `json:"fromChain" validate:"required"`
 	ToChain   string `json:"toChain" validate:"required"`
 	FromToken string `json:"fromToken" validate:"required"`

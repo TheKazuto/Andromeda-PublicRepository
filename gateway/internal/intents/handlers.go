@@ -35,9 +35,12 @@ func MountWriteRoutes(r chi.Router, opts RouteOptions) {
 	r.With(charge("intent.swap.submit"), refund).Post("/v1/intents/swap/submit", h.submit)
 }
 
-// MountReadRoutes registers the read-class intent routes (simulate, status).
-// The enclosing server group applies read scope + read rate-limit (no
-// idempotency — these are read-only previews/queries).
+// MountReadRoutes registers the read-class intent routes (simulate, status,
+// capabilities). The enclosing server group applies read scope + read
+// rate-limit (no idempotency — these are read-only previews/queries).
+// /capabilities costs the same as the other discovery routes (chains/tokens):
+// 1 token per call. It is a one-shot discovery (response shape doesn't change
+// between requests), so an agent calls it once at startup and caches.
 func MountReadRoutes(r chi.Router, opts RouteOptions) {
 	h := &handlers{opts: opts}
 	charge := chargeOrNoop(opts.Charge)
@@ -45,6 +48,7 @@ func MountReadRoutes(r chi.Router, opts RouteOptions) {
 	r.With(charge("intent.simulate"), refund).Post("/v1/intents/simulate", h.simulate)
 	r.With(charge("intent.swap.challenge"), refund).Post("/v1/intents/swap/challenge", h.challenge)
 	r.With(charge("intent.status"), refund).Get("/v1/intents/status/{intentId}", h.status)
+	r.With(charge("intent.capabilities"), refund).Get("/v1/intents/capabilities", h.capabilities)
 }
 
 func chargeOrNoop(charge func(string) func(http.Handler) http.Handler) func(string) func(http.Handler) http.Handler {
@@ -135,6 +139,20 @@ func (h *handlers) submit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// capabilities returns the chainKinds the Intents engine serves in this
+// deployment. Agents call it before /quote to know which families are
+// supported (and to fail fast on a chainKind the public surface doesn't
+// expose). Source of truth: the gateway-side chain_kinds.go registry.
+//
+// For the full per-family chainId list, callers use the existing
+// `/v1/intents/chains` proxy (LI.FI /chains).
+func (h *handlers) capabilities(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"chainKinds": registeredChainKinds(),
+		"notice":     "each chainKind covers every chain LI.FI routes for that family; use /v1/intents/chains for the full chainId list",
+	})
 }
 
 func (h *handlers) status(w http.ResponseWriter, r *http.Request) {

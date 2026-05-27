@@ -13,7 +13,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gagliardetto/solana-go"
 	"github.com/google/uuid"
 
 	"github.com/shinkalabs/andromeda-gateway/internal/policy"
@@ -107,6 +106,7 @@ type ibPrepareResult struct {
 	ChainNativeAddress string          `json:"chainNativeAddress"`
 	UnsignedTxB64      string          `json:"unsignedTxB64"`
 	MessageToSignHex   string          `json:"messageToSignHex"`
+	MessageDigestHex   string          `json:"messageDigestHex"`
 	UnsignedTxHash     string          `json:"unsignedTxHash"`
 	AmountOut          string          `json:"amountOut"`
 	AmountOutMin       string          `json:"amountOutMin"`
@@ -122,6 +122,7 @@ type ibPrepareResult struct {
 type ibApproval struct {
 	UnsignedTxB64    string `json:"unsignedTxB64"`
 	MessageToSignHex string `json:"messageToSignHex"`
+	MessageDigestHex string `json:"messageDigestHex"`
 	Token            string `json:"token"`
 	Spender          string `json:"spender"`
 	Nonce            uint64 `json:"nonce"`
@@ -166,24 +167,11 @@ func (o *Orchestrator) buildSwap(ctx context.Context, userID string, req prepare
 		}
 	}
 	// Resolve the dWallet's address on the source chain (the fee payer / `from`
-	// LI.FI must use). Solana: base58 of the Ed25519 key. EVM: the 0x address the
-	// caller supplies (it cannot sign for an address it does not control, so a
-	// wrong value simply fails the swap — not a security hole).
-	var fromAddress string
-	switch req.ChainKind {
-	case "solana":
-		pkBytes, derr := hex.DecodeString(req.DwalletPublicKeyHex)
-		if derr != nil || len(pkBytes) != 32 {
-			return nil, nil, &userError{http.StatusBadRequest, "invalid_field", "dwalletPublicKeyHex must be 32-byte hex for Solana"}
-		}
-		fromAddress = solana.PublicKeyFromBytes(pkBytes).String()
-	case "evm":
-		if req.ChainNativeAddress == "" {
-			return nil, nil, &userError{http.StatusBadRequest, "invalid_field", "chainNativeAddress (the dWallet's 0x address) is required for EVM"}
-		}
-		fromAddress = req.ChainNativeAddress
-	default:
-		return nil, nil, &userError{http.StatusBadRequest, "invalid_field", "unsupported chainKind"}
+	// LI.FI must use). Per-family logic lives in chain_kinds.go so adding a
+	// new family is one entry in a registry.
+	fromAddress, uerr := resolveFromAddress(req)
+	if uerr != nil {
+		return nil, nil, uerr
 	}
 
 	ibBody := map[string]any{
@@ -218,8 +206,19 @@ func (o *Orchestrator) buildSwap(ctx context.Context, userID string, req prepare
 		return nil, nil, &userError{http.StatusBadGateway, "prepare_message_bad_response", "unreadable prepare-message response"}
 	}
 	pm := ikaEnv.Data
-	if pm.PreprocessedHex != pr.MessageToSignHex {
-		return nil, nil, &userError{http.StatusBadGateway, "sign_material_drift", "prepare-message preprocessed bytes do not match the swap message"}
+	// Drift check (fail-closed): the digest the on-chain MessageApproval PDA
+	// is keyed by MUST match what the intents-backend adapter computed
+	// locally. This is stronger than the legacy `preprocessedHex ==
+	// messageToSignHex` test because it works for envelope-applying families
+	// (Sui's BCS intent, future Bitcoin BIP143, …) and still equals the raw
+	// equality for envelope-less families (Solana, EVM). An empty digest is
+	// itself a drift symptom (broken upstream) — refuse to sign rather than
+	// silently degrade.
+	if pr.MessageDigestHex == "" {
+		return nil, nil, &userError{http.StatusBadGateway, "missing_digest", "intents-backend did not return messageDigestHex"}
+	}
+	if pm.DigestHex != pr.MessageDigestHex {
+		return nil, nil, &userError{http.StatusBadGateway, "sign_material_drift", "prepare-message digest does not match the swap digest"}
 	}
 	if pm.Scheme != pr.SignScheme {
 		return nil, nil, &userError{http.StatusBadGateway, "scheme_mismatch", "signature scheme mismatch between router and engine"}
@@ -326,8 +325,17 @@ func (o *Orchestrator) Prepare(ctx context.Context, userID, apiKeyID string, req
 		var apEnv struct {
 			Data ikaPrepareMsg `json:"data"`
 		}
-		if err := json.Unmarshal(apResp, &apEnv); err != nil || apEnv.Data.PreprocessedHex != pr.Approval.MessageToSignHex {
-			return nil, &userError{http.StatusBadGateway, "approve_drift", "approval signing material mismatch"}
+		if err := json.Unmarshal(apResp, &apEnv); err != nil {
+			return nil, &userError{http.StatusBadGateway, "approve_prepare_failed", "failed to read approval signing material"}
+		}
+		// Fail-closed drift check on the approve leg: the MessageApproval PDA
+		// is keyed by the digest, so an empty or mismatched value is a hard
+		// stop — same invariant the swap leg enforces just above.
+		if pr.Approval.MessageDigestHex == "" {
+			return nil, &userError{http.StatusBadGateway, "missing_approve_digest", "intents-backend did not return approval messageDigestHex"}
+		}
+		if apEnv.Data.DigestHex != pr.Approval.MessageDigestHex {
+			return nil, &userError{http.StatusBadGateway, "approve_drift", "approval digest does not match the approve tx digest"}
 		}
 		it.ApproveUnsignedTxB64 = pr.Approval.UnsignedTxB64
 		it.ApproveMessageHex = apEnv.Data.PreprocessedHex
@@ -577,38 +585,7 @@ func encodeChainTag(chainKind string) ([8]byte, error) {
 	return out, nil
 }
 
-// parseTokenAddress32 canonicalizes a token address into the 32-byte slot the
-// on-chain swap_metadata_digest binds. Solana: base58 pubkey. EVM: 0x-prefixed
-// 20-byte hex, left-padded to 32 bytes. Returns an error for unrecognised
-// formats (caller falls back to NORMAL signing).
-func parseTokenAddress32(token, chainKind string) ([32]byte, error) {
-	var out [32]byte
-	switch chainKind {
-	case "solana":
-		pk, err := solana.PublicKeyFromBase58(token)
-		if err != nil {
-			return out, fmt.Errorf("solana token %q: %w", token, err)
-		}
-		copy(out[:], pk.Bytes())
-		return out, nil
-	case "evm":
-		s := token
-		if len(s) >= 2 && (s[:2] == "0x" || s[:2] == "0X") {
-			s = s[2:]
-		}
-		if len(s) != 40 {
-			return out, fmt.Errorf("evm token %q: expected 20-byte hex", token)
-		}
-		b, err := hex.DecodeString(s)
-		if err != nil {
-			return out, fmt.Errorf("evm token %q: %w", token, err)
-		}
-		copy(out[12:], b) // left-pad 12 zero bytes, then 20-byte address
-		return out, nil
-	default:
-		return out, fmt.Errorf("unsupported chainKind %q", chainKind)
-	}
-}
+// parseTokenAddress32 lives in chain_kinds.go (per-family registry).
 
 // parseUintOrZero parses a decimal string into uint64; 0 on error or overflow.
 // Used for `QuotedAmountOutMin` → SwapMeta.MinAmountOut (the on-chain handler

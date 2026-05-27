@@ -183,7 +183,7 @@ func mockIntentsBackend(t *testing.T) *httptest.Server {
 		case r.Method == http.MethodPost && r.URL.Path == "/prepare":
 			_, _ = io.WriteString(w, `{"chainKind":"solana","chainId":1151111081099710,"signChainId":"solana:x",
 				"signScheme":5,"chainNativeAddress":"SoLaddr","unsignedTxB64":"`+mUnsignedB+`",
-				"messageToSignHex":"`+mMsgHex+`","unsignedTxHash":"`+mTxHash+`","amountOut":"5000000",
+				"messageToSignHex":"`+mMsgHex+`","messageDigestHex":"`+mDigestHex+`","unsignedTxHash":"`+mTxHash+`","amountOut":"5000000",
 				"amountOutMin":"4950000","transactionFeeUsd":"0.30","nativeFeeEstimate":"5000","routeSnapshot":{"tool":"jupiter"}}`)
 		case r.Method == http.MethodPost && r.URL.Path == "/derive-message":
 			_, _ = io.WriteString(w, `{"messageToSignHex":"`+mMsgHex+`","digestHex":"`+mDigestHex+`","unsignedTxHash":"`+mTxHash+`"}`)
@@ -440,13 +440,14 @@ func mockEvmIntentsBackend(t *testing.T) *httptest.Server {
 				"chainKind":"evm","chainId":1,"signChainId":"eip155:1",
 				"signScheme":1,"chainNativeAddress":"0xFromAddr",
 				"unsignedTxB64":"`+mUnsignedB+`",
-				"messageToSignHex":"`+mMsgHex+`","unsignedTxHash":"`+mTxHash+`",
+				"messageToSignHex":"`+mMsgHex+`","messageDigestHex":"`+mEvmSwapDigestHex+`","unsignedTxHash":"`+mTxHash+`",
 				"amountOut":"5000000","amountOutMin":"4950000",
 				"transactionFeeUsd":"0.30","nativeFeeEstimate":"5000",
 				"routeSnapshot":{"tool":"lifi"},
 				"evmNonce":42,
 				"approval":{"unsignedTxB64":"`+mEvmApproveUnsigned+`",
 				             "messageToSignHex":"`+mEvmApproveMsgHex+`",
+				             "messageDigestHex":"`+mEvmApproveDigestHex+`",
 				             "token":"0xTokenAddr","spender":"0xRouterAddr","nonce":41}
 			}`)
 		case r.Method == http.MethodPost && r.URL.Path == "/derive-message":

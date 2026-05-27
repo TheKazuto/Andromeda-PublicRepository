@@ -307,6 +307,7 @@ var All = []Route{
 	{Method: "POST", Path: "/v1/intents/swap/challenge", Upstream: UpstreamLocal, Local: true, Key: "intent.swap.challenge", RateClass: RateClassRead, MaxBodyBytes: 4 << 10},
 	{Method: "POST", Path: "/v1/intents/swap/submit", Upstream: UpstreamLocal, Local: true, Key: "intent.swap.submit", Idempotent: true, RequiresIdempotencyKey: true, RateClass: RateClassTx, TimeoutSeconds: 120, MaxBodyBytes: 16 << 10},
 	{Method: "GET", Path: "/v1/intents/status/{intentId}", Upstream: UpstreamLocal, Local: true, Key: "intent.status", RateClass: RateClassRead},
+	{Method: "GET", Path: "/v1/intents/capabilities", Upstream: UpstreamLocal, Local: true, Key: "intent.capabilities", RateClass: RateClassRead},
 }
 
 // EffectiveRateClass returns r.RateClass with a default of "tx" when
