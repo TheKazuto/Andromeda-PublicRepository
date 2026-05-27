@@ -3059,6 +3059,68 @@ paths:
             x-andromeda-rate-class: tx
             x-andromeda-required-scope: write
             x-andromeda-requires-idempotency-key: false
+    /v1/intents/capabilities:
+        get:
+            description: 'Handled locally by the gateway (PolicyEngine v3): builds Solana transactions in-process. Cost in tokens is set per route — see /v1/pricing.'
+            operationId: intentCapabilities
+            parameters: []
+            responses:
+                "200":
+                    content:
+                        application/json:
+                            schema:
+                                additionalProperties: true
+                                type: object
+                    description: Success
+                "401":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Missing or invalid API key.
+                "402":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Token quota exceeded for the current period.
+                "403":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Scope missing, IP not allowed, or no active subscription.
+                "413":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Request body exceeds 25 MiB.
+                "429":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Rate limit exceeded for this bucket.
+                "502":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Upstream engine unavailable.
+                "503":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                    description: Service temporarily unavailable (e.g. circuit breaker open).
+            summary: GET /v1/intents/capabilities
+            tags:
+                - policy-engine
+            x-andromeda-idempotent: false
+            x-andromeda-rate-class: read
+            x-andromeda-required-scope: read
+            x-andromeda-requires-idempotency-key: false
     /v1/intents/chains:
         get:
             description: Proxied to intents-backend. Cost in tokens is set per route — see /v1/pricing.
