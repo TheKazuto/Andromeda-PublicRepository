@@ -11,6 +11,7 @@ import { cosmosDecoder } from './cosmos.js'
 import { filecoinDecoder } from './filecoin.js'
 import { multiversxDecoder } from './multiversx.js'
 import { nearDecoder } from './near.js'
+import { suiDecoder } from './sui.js'
 import { vechainDecoder } from './vechain.js'
 import type { ChainDecoder } from './registry.js'
 
@@ -23,6 +24,7 @@ const DECODERS: readonly ChainDecoder[] = [
   multiversxDecoder,
   algorandDecoder,
   filecoinDecoder,
+  suiDecoder,
 ]
 
 const BY_FAMILY: ReadonlyMap<string, ChainDecoder> = new Map(
