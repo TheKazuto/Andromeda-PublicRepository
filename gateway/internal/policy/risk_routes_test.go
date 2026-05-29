@@ -135,17 +135,24 @@ func TestGetRiskConfigWithoutTenantResolver(t *testing.T) {
 }
 
 // Mock implementation of RiskConfigService for testing.
-type mockRiskConfigService struct{}
+type mockRiskConfigService struct {
+	// getResult is returned by GetDWalletConfig (nil = not found).
+	getResult *risk.RiskConfig
+	// deletedTenantID captures the tenantID passed to DeleteDWalletConfig so a
+	// test can assert the handler scopes the delete to the caller's tenant.
+	deletedTenantID string
+}
 
 func (m *mockRiskConfigService) UpsertDWalletConfig(ctx context.Context, dwalletAddress, tenantID, warnLevel string, simulationEnabled bool) (*risk.RiskConfig, error) {
 	return nil, nil
 }
 
 func (m *mockRiskConfigService) GetDWalletConfig(ctx context.Context, dwalletAddress string) (*risk.RiskConfig, error) {
-	return nil, nil
+	return m.getResult, nil
 }
 
-func (m *mockRiskConfigService) DeleteDWalletConfig(ctx context.Context, dwalletAddress string) error {
+func (m *mockRiskConfigService) DeleteDWalletConfig(ctx context.Context, dwalletAddress, tenantID string) error {
+	m.deletedTenantID = tenantID
 	return nil
 }
 
@@ -178,6 +185,69 @@ func (s *Service) newTestRouter() chi.Router {
 	r := chi.NewRouter()
 	subRouter := chi.NewRouter()
 	subRouter.Get("/config/{dwalletAddress}", s.getRiskConfig)
+	subRouter.Delete("/config/{dwalletAddress}", s.deleteRiskConfig)
 	r.Mount("/v1/policy/risk", subRouter)
 	return r
+}
+
+// TestGetRiskConfigCrossTenantReturns404 verifies that a caller cannot read the
+// risk config of a dWallet owned by a different tenant (IDOR / tenant
+// isolation): the handler returns 404, indistinguishable from "does not exist".
+func TestGetRiskConfigCrossTenantReturns404(t *testing.T) {
+	mockConfigSvc := &mockRiskConfigService{
+		getResult: &risk.RiskConfig{DWalletAddress: "wallet", TenantID: "tenant-OTHER", WarnLevel: "medium"},
+	}
+	svc := NewService(solana.PublicKey{})
+	svc.tenantResolver = func(r *http.Request) (string, error) { return "tenant-456", nil }
+	svc.riskConfigService = mockConfigSvc
+
+	r := svc.newTestRouter()
+	req := httptest.NewRequest(http.MethodGet, "/v1/policy/risk/config/11111111111111111111111111111112", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("cross-tenant read must return 404, got %d", w.Code)
+	}
+}
+
+// TestGetRiskConfigOwnedReturns200 verifies the owning tenant can read its own
+// config.
+func TestGetRiskConfigOwnedReturns200(t *testing.T) {
+	mockConfigSvc := &mockRiskConfigService{
+		getResult: &risk.RiskConfig{DWalletAddress: "wallet", TenantID: "tenant-456", WarnLevel: "medium"},
+	}
+	svc := NewService(solana.PublicKey{})
+	svc.tenantResolver = func(r *http.Request) (string, error) { return "tenant-456", nil }
+	svc.riskConfigService = mockConfigSvc
+
+	r := svc.newTestRouter()
+	req := httptest.NewRequest(http.MethodGet, "/v1/policy/risk/config/11111111111111111111111111111112", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("owning tenant read must return 200, got %d", w.Code)
+	}
+}
+
+// TestDeleteRiskConfigScopedToTenant verifies the handler passes the caller's
+// tenant to the store so the delete is scoped (the store filters by tenant_id).
+func TestDeleteRiskConfigScopedToTenant(t *testing.T) {
+	mockConfigSvc := &mockRiskConfigService{}
+	svc := NewService(solana.PublicKey{})
+	svc.tenantResolver = func(r *http.Request) (string, error) { return "tenant-456", nil }
+	svc.riskConfigService = mockConfigSvc
+
+	r := svc.newTestRouter()
+	req := httptest.NewRequest(http.MethodDelete, "/v1/policy/risk/config/11111111111111111111111111111112", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Errorf("delete must return 204, got %d", w.Code)
+	}
+	if mockConfigSvc.deletedTenantID != "tenant-456" {
+		t.Errorf("delete must be scoped to caller tenant, got %q", mockConfigSvc.deletedTenantID)
+	}
 }

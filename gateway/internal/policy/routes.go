@@ -113,7 +113,7 @@ type RiskService interface {
 type RiskConfigService interface {
 	UpsertDWalletConfig(ctx context.Context, dwalletAddress, tenantID, warnLevel string, simulationEnabled bool) (*risk.RiskConfig, error)
 	GetDWalletConfig(ctx context.Context, dwalletAddress string) (*risk.RiskConfig, error)
-	DeleteDWalletConfig(ctx context.Context, dwalletAddress string) error
+	DeleteDWalletConfig(ctx context.Context, dwalletAddress, tenantID string) error
 	UpsertTenantDefaults(ctx context.Context, tenantID, warnLevel string) (*risk.RiskTenantDefaults, error)
 	GetTenantDefaults(ctx context.Context, tenantID string) (*risk.RiskTenantDefaults, error)
 	AddToDenylist(ctx context.Context, tenantID, destination, reason string) error

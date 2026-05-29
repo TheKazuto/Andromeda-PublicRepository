@@ -74,9 +74,10 @@ func (a *StoreAdapter) UpsertRiskConfig(ctx context.Context, cfg *risk.RiskConfi
 	return a.store.UpsertRiskConfig(ctx, storeCfg)
 }
 
-// DeleteRiskConfig deletes a risk config from the store.
-func (a *StoreAdapter) DeleteRiskConfig(ctx context.Context, dwalletAddress string) error {
-	return a.store.DeleteRiskConfig(ctx, dwalletAddress)
+// DeleteRiskConfig deletes a risk config from the store, scoped to the owning
+// tenant (deny-by-default).
+func (a *StoreAdapter) DeleteRiskConfig(ctx context.Context, dwalletAddress, tenantID string) error {
+	return a.store.DeleteRiskConfig(ctx, dwalletAddress, tenantID)
 }
 
 // UpsertRiskTenantDefaults converts risk.RiskTenantDefaults → store.RiskTenantDefaults and upserts.

@@ -40,9 +40,10 @@ func (cs *ConfigService) GetDWalletConfig(ctx context.Context, dwalletAddress st
 	return cs.store.GetRiskConfig(ctx, dwalletAddress)
 }
 
-// DeleteDWalletConfig removes the risk config for a dWallet.
-func (cs *ConfigService) DeleteDWalletConfig(ctx context.Context, dwalletAddress string) error {
-	return cs.store.DeleteRiskConfig(ctx, dwalletAddress)
+// DeleteDWalletConfig removes the risk config for a dWallet, scoped to the
+// owning tenant (deny-by-default: a cross-tenant delete is a no-op).
+func (cs *ConfigService) DeleteDWalletConfig(ctx context.Context, dwalletAddress, tenantID string) error {
+	return cs.store.DeleteRiskConfig(ctx, dwalletAddress, tenantID)
 }
 
 // UpsertTenantDefaults creates or updates the default risk policy for a tenant.
@@ -105,7 +106,7 @@ type ConfigStoreWrite interface {
 
 	// Write operations
 	UpsertRiskConfig(ctx context.Context, cfg *RiskConfig) error
-	DeleteRiskConfig(ctx context.Context, dwalletAddress string) error
+	DeleteRiskConfig(ctx context.Context, dwalletAddress, tenantID string) error
 
 	UpsertRiskTenantDefaults(ctx context.Context, defaults *RiskTenantDefaults) error
 	DeleteRiskTenantDefaults(ctx context.Context, tenantID string) error

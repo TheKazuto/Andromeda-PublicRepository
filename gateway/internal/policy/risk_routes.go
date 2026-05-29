@@ -82,8 +82,10 @@ type allowlistRequest struct {
 // evaluateRisk evaluates transaction risk and returns advisory information.
 // POST /v1/policy/risk/evaluate
 // All fields in the request are optional — the dev provides what they have.
-// Risk evaluation is best-effort and never blocks the response (HTTP 200 always).
-// If riskService is unavailable, returns 503.
+// When the Risk Layer is configured, evaluation is advisory and best-effort:
+// it ALWAYS returns HTTP 200 with a (possibly empty) advisory and never blocks.
+// The only non-200 here is 503 when the feature itself is not wired
+// (riskService == nil) — i.e. "advisory unavailable", not "request rejected".
 func (s *Service) evaluateRisk(w http.ResponseWriter, r *http.Request) {
 	if s.riskService == nil {
 		httpx.WriteError(w, http.StatusServiceUnavailable, "risk_unavailable",
@@ -134,10 +136,11 @@ func (s *Service) getRiskConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate dWallet→tenant ownership (via context from upstream middleware).
-	// The actual validation must be done by the caller's middleware; here we
-	// just verify the tenant is present and retrieve the config.
-	_, ok := s.resolveTenantID(r)
+	// Resolve the caller's tenant and enforce dWallet→tenant ownership here:
+	// the config row carries the owning tenant_id, so a config that does not
+	// belong to the caller is reported as 404 (indistinguishable from "does
+	// not exist" — never leak another tenant's config or its existence).
+	tenantID, ok := s.resolveTenantID(r)
 	if !ok {
 		httpx.WriteError(w, http.StatusUnauthorized, "unauthorized", "tenant_id not in context")
 		return
@@ -155,7 +158,7 @@ func (s *Service) getRiskConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if cfg == nil {
+	if cfg == nil || cfg.TenantID != tenantID {
 		httpx.WriteError(w, http.StatusNotFound, "config_not_found", "no configuration for this dWallet")
 		return
 	}
@@ -219,7 +222,7 @@ func (s *Service) deleteRiskConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, ok := s.resolveTenantID(r)
+	tenantID, ok := s.resolveTenantID(r)
 	if !ok {
 		httpx.WriteError(w, http.StatusUnauthorized, "unauthorized", "tenant_id not in context")
 		return
@@ -230,7 +233,10 @@ func (s *Service) deleteRiskConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.riskConfigService.DeleteDWalletConfig(r.Context(), dwalletAddress); err != nil {
+	// Tenant-scoped delete (deny-by-default): the store filters by tenant_id,
+	// so a caller can only remove its own config — a cross-tenant delete is a
+	// no-op rather than wiping another tenant's row.
+	if err := s.riskConfigService.DeleteDWalletConfig(r.Context(), dwalletAddress, tenantID); err != nil {
 		slog.Error("delete risk config failed", "dwallet", dwalletAddress, "err", err)
 		httpx.WriteError(w, http.StatusInternalServerError, "config_delete_failed", "failed to delete configuration")
 		return
