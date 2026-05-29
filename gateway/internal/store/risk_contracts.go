@@ -122,8 +122,9 @@ type RiskConfigStore interface {
 	// UpsertRiskConfig creates or replaces the risk config for a dWallet (idempotent).
 	UpsertRiskConfig(ctx context.Context, cfg *RiskConfig) error
 
-	// DeleteRiskConfig removes the risk config for a dWallet.
-	DeleteRiskConfig(ctx context.Context, dwalletAddress string) error
+	// DeleteRiskConfig removes the risk config for a dWallet, scoped to the
+	// owning tenant. A cross-tenant delete affects 0 rows (no-op).
+	DeleteRiskConfig(ctx context.Context, dwalletAddress, tenantID string) error
 }
 
 // RiskTenantDefaultsStore manages per-tenant default risk policies.

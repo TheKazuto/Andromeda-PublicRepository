@@ -97,9 +97,15 @@ func (s *pgStore) UpsertRiskConfig(ctx context.Context, cfg *RiskConfig) error {
 	return mapErr(err)
 }
 
-// DeleteRiskConfig removes the risk config for a dWallet.
-func (s *pgStore) DeleteRiskConfig(ctx context.Context, dwalletAddress string) error {
+// DeleteRiskConfig removes the risk config for a dWallet, scoped to the owning
+// tenant. The `tenant_id` filter is deny-by-default tenant isolation: a caller
+// can only delete a config that belongs to it. A cross-tenant delete affects 0
+// rows (idempotent no-op) instead of wiping another tenant's config.
+func (s *pgStore) DeleteRiskConfig(ctx context.Context, dwalletAddress, tenantID string) error {
 	if err := validateInput(dwalletAddress, "dwalletAddress"); err != nil {
+		return err
+	}
+	if err := validateInput(tenantID, "tenantId"); err != nil {
 		return err
 	}
 
@@ -110,8 +116,8 @@ func (s *pgStore) DeleteRiskConfig(ctx context.Context, dwalletAddress string) e
 	}
 
 	_, err = s.pool.Exec(ctx,
-		`DELETE FROM risk_config WHERE dwallet_address = $1`,
-		dwalletAddress,
+		`DELETE FROM risk_config WHERE dwallet_address = $1 AND tenant_id = $2`,
+		dwalletAddress, tenantID,
 	)
 	return mapErr(err)
 }

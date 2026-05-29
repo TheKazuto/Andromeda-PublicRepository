@@ -30,10 +30,12 @@ func (s *pgStore) GetUsageReport(ctx context.Context, userID string, since, unti
 	}
 
 	report := &UsageReport{
-		Since:     since.UTC(),
-		Until:     until.UTC(),
-		Daily:     []UsageDailyBucket{},
-		TopRoutes: []UsageRouteBucket{},
+		Since: since.UTC(),
+		Until: until.UTC(),
+		// Pre-size (non-nil, so the JSON stays [] not null): Daily is bounded by
+		// the day-range, TopRoutes by the already-clamped routeLimit.
+		Daily:     make([]UsageDailyBucket, 0, 32),
+		TopRoutes: make([]UsageRouteBucket, 0, routeLimit),
 	}
 
 	// 1. Totals — single query

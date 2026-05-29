@@ -75,7 +75,9 @@ func (s *pgStore) ListActiveCredits(ctx context.Context, userID string) ([]Credi
 		return nil, err
 	}
 	defer rows.Close()
-	out := []Credit{}
+	// Pre-size for the common case (a handful of active credits) while staying
+	// non-nil so the JSON encodes as [] rather than null.
+	out := make([]Credit, 0, 16)
 	for rows.Next() {
 		var c Credit
 		if err := rows.Scan(&c.ID, &c.UserID, &c.Amount, &c.Consumed,
