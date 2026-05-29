@@ -241,29 +241,38 @@ func (s *Store) MarkFailed(ctx context.Context, id uuid.UUID, reason string) err
 	return nil
 }
 
-// ExpireOverdue marks all armed triggers past expires_at as expired.
-// Returns the IDs of triggers that transitioned, so callers can fan out
-// future_sign.expired webhooks.
-func (s *Store) ExpireOverdue(ctx context.Context, now time.Time) ([]uuid.UUID, error) {
+// ExpiredTrigger identifies a trigger that transitioned to expired, with the
+// owning tenant so callers can fan out future_sign.expired to the right
+// endpoints (the webhook Publisher scopes deliveries by api_key_id).
+type ExpiredTrigger struct {
+	ID       uuid.UUID
+	APIKeyID uuid.UUID
+}
+
+// ExpireOverdue marks all armed triggers past expires_at as expired and returns
+// each transitioned trigger together with its owning api_key_id, so callers fan
+// out future_sign.expired to the owning tenant (publishing with uuid.Nil would
+// match no endpoint and silently drop the event).
+func (s *Store) ExpireOverdue(ctx context.Context, now time.Time) ([]ExpiredTrigger, error) {
 	rows, err := s.pool.Query(ctx, `
 		UPDATE future_sign_triggers
 		SET status = 'expired'
 		WHERE status = 'armed' AND expires_at <= $1
-		RETURNING id
+		RETURNING id, api_key_id
 	`, now)
 	if err != nil {
 		return nil, fmt.Errorf("expire overdue: %w", err)
 	}
 	defer rows.Close()
-	var ids []uuid.UUID
+	var out []ExpiredTrigger
 	for rows.Next() {
-		var id uuid.UUID
-		if err := rows.Scan(&id); err != nil {
+		var e ExpiredTrigger
+		if err := rows.Scan(&e.ID, &e.APIKeyID); err != nil {
 			return nil, err
 		}
-		ids = append(ids, id)
+		out = append(out, e)
 	}
-	return ids, rows.Err()
+	return out, rows.Err()
 }
 
 // ----- internal -----

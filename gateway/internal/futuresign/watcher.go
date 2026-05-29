@@ -288,15 +288,17 @@ func (w *Watcher) runExpiryLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			ids, err := w.opts.Store.ExpireOverdue(ctx, time.Now().UTC())
+			expired, err := w.opts.Store.ExpireOverdue(ctx, time.Now().UTC())
 			if err != nil {
 				w.opts.Logger.Warn("expire overdue failed", "err", err)
 				continue
 			}
-			for _, id := range ids {
+			for _, e := range expired {
 				if w.opts.Publisher != nil {
-					_, _ = w.opts.Publisher.Publish(ctx, uuid.Nil, "future_sign.expired", map[string]any{
-						"trigger_id": id.String(),
+					// Publish to the owning tenant (api_key_id) so the
+					// future_sign.expired event reaches that tenant's endpoints.
+					_, _ = w.opts.Publisher.Publish(ctx, e.APIKeyID, "future_sign.expired", map[string]any{
+						"trigger_id": e.ID.String(),
 					})
 				}
 			}

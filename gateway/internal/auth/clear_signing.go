@@ -117,9 +117,16 @@ func timeLockModeLabel(mode uint8) string {
 
 // HumanLenLE returns the u16 LE length prefix of a rendered humanMessage.
 // Used by the admin-hash helper to bind `humanMessage` into the challenge.
+//
+// The panic is intentional and is an unreachable invariant assertion, not a
+// recoverable error: every `human` passed here comes from a msgWriter capped at
+// MaxHumanMessageBytes (768), which fits in a u16 many times over. If that
+// invariant were ever violated, a silent u16 wrap would emit a length prefix
+// that diverges from the Rust/TS mirrors and corrupt the challenge hash
+// (producing a bad signature) — failing loud is strictly safer than that, so we
+// do NOT clamp or swallow it.
 func HumanLenLE(human []byte) []byte {
 	if len(human) > 0xffff {
-		// Should be unreachable: MaxHumanMessageBytes (768) fits in u16.
 		panic(fmt.Sprintf("human message too long: %d", len(human)))
 	}
 	return U16LE(uint16(len(human)))

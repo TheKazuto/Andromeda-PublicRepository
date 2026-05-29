@@ -232,7 +232,10 @@ func (s *Snapshotter) fetchRange(ctx context.Context, fromSeq int64) (rows []sna
 			r.SignatureHex = hexEncodeBytes(sig)
 		}
 		totalBytes += int64(len(payload))
-		if totalBytes >= s.maxBytes {
+		// Always take at least one row before honoring the byte cap: a single
+		// row larger than maxBytes must still make progress, otherwise the
+		// cursor would stall on it forever and never snapshot anything past it.
+		if len(rows) > 0 && totalBytes >= s.maxBytes {
 			break
 		}
 		if len(rows) == 0 {
