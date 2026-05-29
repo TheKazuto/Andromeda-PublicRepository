@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"math/rand/v2"
 	"net/http"
 	"os"
 	"strconv"
@@ -323,8 +324,10 @@ func (d *Dispatcher) deliver(ctx context.Context, dlv *Delivery) {
 		d.recordRateLimited()
 		// Small jittered delay: 200-700ms. Long enough that the token
 		// bucket refills, short enough that legitimate traffic isn't
-		// starved.
-		delay := 200*time.Millisecond + time.Duration(dlv.ID[0])*2*time.Millisecond
+		// starved. Real randomness (not a function of the delivery ID) so a
+		// delivery requeued repeatedly doesn't always get the same backoff
+		// and a burst of requeues spreads out instead of clustering.
+		delay := 200*time.Millisecond + time.Duration(rand.IntN(500))*time.Millisecond
 		if err := d.store.RequeueWithDelay(ctx, dlv.ID, delay); err != nil {
 			d.logger.Warn("requeue rate-limited delivery failed", "delivery_id", dlv.ID, "err", err)
 		}

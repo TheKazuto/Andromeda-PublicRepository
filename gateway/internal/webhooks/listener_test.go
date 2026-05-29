@@ -121,7 +121,7 @@ func TestListener_FanoutOnPolicyDeployed(t *testing.T) {
 		"Program PROG success",
 	}
 	raw := makeNotification(t, 100, "sig-1", logs, nil)
-	l.handle(raw)
+	l.handle(context.Background(),raw)
 
 	calls := pub.callsByType("policy.deployed")
 	if len(calls) != 1 {
@@ -160,7 +160,7 @@ func TestListener_NoFanoutWhenTenantUnknown(t *testing.T) {
 	logs := []string{
 		"Program data: " + base64.StdEncoding.EncodeToString(body),
 	}
-	l.handle(makeNotification(t, 0, "sig-2", logs, nil))
+	l.handle(context.Background(),makeNotification(t, 0, "sig-2", logs, nil))
 
 	if len(pub.calls) != 0 {
 		t.Fatalf("expected zero publishes, got %d", len(pub.calls))
@@ -190,7 +190,7 @@ func TestListener_IkaEventRoutesByDwallet(t *testing.T) {
 		"Program data: " + base64.StdEncoding.EncodeToString(body),
 		"Program 87W54... success",
 	}
-	l.handle(makeNotification(t, 5, "sig-ika", logs, nil))
+	l.handle(context.Background(),makeNotification(t, 5, "sig-ika", logs, nil))
 
 	calls := pub.callsByType("dwallet.created")
 	if len(calls) != 1 {
@@ -226,7 +226,7 @@ func TestListener_SkipsFailedTransactions(t *testing.T) {
 	// Tx-level err set — the listener must NOT publish anything from a failed tx.
 	raw := makeNotification(t, 0, "sig-failed", logs,
 		map[string]any{"InstructionError": []any{0, map[string]any{"Custom": 6002}}})
-	l.handle(raw)
+	l.handle(context.Background(),raw)
 
 	if len(pub.calls) != 0 {
 		t.Fatalf("expected zero publishes for failed tx, got %d", len(pub.calls))
@@ -257,7 +257,7 @@ func TestListener_MultipleEventsInOneTransaction(t *testing.T) {
 		"Program data: " + base64.StdEncoding.EncodeToString(approved),
 		"Program PROG success",
 	}
-	l.handle(makeNotification(t, 0, "sig-multi", logs, nil))
+	l.handle(context.Background(),makeNotification(t, 0, "sig-multi", logs, nil))
 
 	if got := len(pub.callsByType("signature.requested")); got != 1 {
 		t.Errorf("signature.requested = %d, want 1", got)
@@ -278,7 +278,7 @@ func TestListener_PublisherErrorDoesNotPanic(t *testing.T) {
 	logs := []string{"Program data: " + base64.StdEncoding.EncodeToString(body)}
 
 	// Must not panic; published count must be 0; parsed count must be 1.
-	l.handle(makeNotification(t, 0, "sig-err", logs, nil))
+	l.handle(context.Background(),makeNotification(t, 0, "sig-err", logs, nil))
 
 	parsed, _, published, _ := l.Stats()
 	if parsed != 1 {

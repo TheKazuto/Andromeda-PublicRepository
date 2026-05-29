@@ -223,13 +223,15 @@ func (l *Listener) runOnce(ctx context.Context, wsURL string) error {
 		}
 		// Any inbound frame proves the link is alive — extend the window.
 		_ = conn.SetReadDeadline(time.Now().Add(readWindow))
-		l.handle(raw)
+		l.handle(ctx, raw)
 	}
 }
 
 // handle inspects a single inbound JSON-RPC message. Subscription confirmations
 // are logged once at debug level; notifications go through observeNotification.
-func (l *Listener) handle(raw []byte) {
+// ctx is the connection's context so downstream resolver/publish calls are
+// cancelled on shutdown instead of running until their own timeouts.
+func (l *Listener) handle(ctx context.Context, raw []byte) {
 	// Notifications carry `method`; subscription confirmations carry `result`.
 	var probe struct {
 		Method string          `json:"method"`
@@ -241,7 +243,7 @@ func (l *Listener) handle(raw []byte) {
 		return
 	}
 	if probe.Method == "logsNotification" {
-		l.observeNotification(raw)
+		l.observeNotification(ctx, raw)
 		return
 	}
 	if len(probe.Result) > 0 {
@@ -267,7 +269,7 @@ type LogNotification struct {
 // observeNotification is the Phase 2 sink: extract every `Program data:` line
 // from the notification, decode against the canonical event schema, and (when
 // a tenant resolver is configured) fan out the event via Publisher.
-func (l *Listener) observeNotification(raw []byte) {
+func (l *Listener) observeNotification(ctx context.Context, raw []byte) {
 	l.notificationsReceived.Add(1)
 	var env struct {
 		Params LogNotification `json:"params"`
@@ -327,8 +329,8 @@ func (l *Listener) observeNotification(raw []byte) {
 		if lookupKey == "" {
 			continue
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		apiKeyID, ok := l.resolver(ctx, lookupKey)
+		resolveCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		apiKeyID, ok := l.resolver(resolveCtx, lookupKey)
 		cancel()
 		if !ok || apiKeyID == uuid.Nil {
 			continue
@@ -346,7 +348,7 @@ func (l *Listener) observeNotification(raw []byte) {
 			continue
 		}
 
-		pubCtx, pubCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		pubCtx, pubCancel := context.WithTimeout(ctx, 10*time.Second)
 		_, perr := l.publisher.Publish(pubCtx, apiKeyID, ev.Type, ev)
 		pubCancel()
 		if perr != nil {
