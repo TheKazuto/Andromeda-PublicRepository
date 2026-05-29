@@ -222,6 +222,9 @@ Response: `{ "risk": { "level": "none|low|medium|high|critical", "reasons": [...
 Per-dWallet config (`GET/PUT/DELETE /v1/policy/risk/config/{dwalletAddress}`), tenant defaults
 (`GET/PUT /v1/policy/risk/defaults`) and the destination denylist/allowlist
 (`POST/DELETE /v1/policy/risk/{denylist,allowlist}`) tune the `warn` level and false-positive overrides.
+All of these are tenant-scoped (deny-by-default object ownership): a per-dWallet config is only
+readable or removable by the tenant that owns it (a cross-tenant `GET` returns `404`, a cross-tenant
+`DELETE` is a no-op), so one tenant can never read or wipe another tenant's risk configuration.
 
 ## MCP server (`/mcp`)
 
