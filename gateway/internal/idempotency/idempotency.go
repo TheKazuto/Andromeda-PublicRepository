@@ -279,11 +279,25 @@ type storedEntry struct {
 	SavedAt     string            `json:"saved_at"`
 }
 
+// skipCachedHeader reports headers that must never be persisted in the
+// idempotency cache nor replayed: hop-by-hop headers we recompute, plus
+// credential-bearing headers (defence in depth — a handler should not be
+// emitting these on an idempotent route, but if one ever does we neither store
+// it in Redis nor hand it back to the client on replay).
+func skipCachedHeader(k string) bool {
+	switch strings.ToLower(k) {
+	case "content-length", "transfer-encoding",
+		"set-cookie", "authorization", "www-authenticate",
+		"proxy-authenticate", "x-api-key":
+		return true
+	default:
+		return false
+	}
+}
+
 func replayCached(w http.ResponseWriter, entry *storedEntry) {
 	for k, v := range entry.Header {
-		// Skip hop-by-hop headers and any header we will overwrite.
-		switch strings.ToLower(k) {
-		case "content-length", "transfer-encoding":
+		if skipCachedHeader(k) {
 			continue
 		}
 		w.Header().Set(k, v)
@@ -296,6 +310,10 @@ func replayCached(w http.ResponseWriter, entry *storedEntry) {
 func flattenHeader(h http.Header) map[string]string {
 	out := make(map[string]string, len(h))
 	for k, v := range h {
+		// Never persist credential/hop-by-hop headers to Redis.
+		if skipCachedHeader(k) {
+			continue
+		}
 		if len(v) > 0 {
 			out[k] = v[0]
 		}

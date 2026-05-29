@@ -147,10 +147,12 @@ func resolveSuiFromAddress(req prepareRequest) (string, *userError) {
 
 // suiTokenAddress32 hashes a Sui Move coin type ("0x...::module::Coin") into a
 // 32-byte slot. Sui token "addresses" are full Move type strings, not raw
-// 32-byte object IDs, so we keccak the canonical form to bind it into the
+// 32-byte object IDs, so we sha256 the canonical form to bind it into the
 // on-chain swap_metadata_digest. The on-chain handler renders the bytes only
-// in the human message — never for value comparison — so a stable hash is
-// sufficient and avoids guessing which Move-type substring to slice.
+// in the human message — never for value comparison — so any stable hash is
+// sufficient (the same function runs on the prepare and submit legs, so the
+// value is internally consistent) and avoids guessing which Move-type
+// substring to slice.
 func suiTokenAddress32(token string) ([32]byte, error) {
 	var out [32]byte
 	if token == "" {
