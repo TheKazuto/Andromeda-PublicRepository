@@ -199,7 +199,7 @@ func (b *EVMBroadcaster) TransactionReceipt(ctx context.Context, urls []string, 
 			Status string `json:"status"`
 		}
 		if err := json.Unmarshal(result, &r); err != nil {
-			return true, false, nil
+			return true, false, fmt.Errorf("decode receipt: %w", err)
 		}
 		return true, r.Status == "0x1", nil
 	}

@@ -195,10 +195,10 @@ func (h *Handlers) deriveMessage(w http.ResponseWriter, r *http.Request) {
 // chain — the gateway pre-checks it can pay the swap gas.
 func (h *Handlers) nativeBalance(w http.ResponseWriter, r *http.Request) {
 	chainKind := r.URL.Query().Get("chainKind")
-	chainID, _ := strconv.Atoi(r.URL.Query().Get("chainId"))
+	chainID, err := strconv.Atoi(r.URL.Query().Get("chainId"))
 	address := r.URL.Query().Get("address")
-	if chainKind == "" || chainID == 0 || address == "" {
-		httpx.WriteError(w, http.StatusBadRequest, "invalid_params", "chainKind, chainId and address are required")
+	if chainKind == "" || err != nil || chainID <= 0 || address == "" {
+		httpx.WriteError(w, http.StatusBadRequest, "invalid_params", "chainKind, a positive chainId and address are required")
 		return
 	}
 	if !h.swap.IsKindRegistered(chainKind) {
@@ -217,9 +217,9 @@ func (h *Handlers) nativeBalance(w http.ResponseWriter, r *http.Request) {
 // succeeded — the gateway gates the swap on it.
 func (h *Handlers) evmReceipt(w http.ResponseWriter, r *http.Request) {
 	txHash := r.URL.Query().Get("txHash")
-	chainID, _ := strconv.Atoi(r.URL.Query().Get("chainId"))
-	if txHash == "" || chainID == 0 {
-		httpx.WriteError(w, http.StatusBadRequest, "invalid_params", "txHash and chainId are required")
+	chainID, err := strconv.Atoi(r.URL.Query().Get("chainId"))
+	if txHash == "" || err != nil || chainID <= 0 {
+		httpx.WriteError(w, http.StatusBadRequest, "invalid_params", "txHash and a positive chainId are required")
 		return
 	}
 	found, success, err := h.swap.EVMReceipt(r.Context(), chainID, txHash)

@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"github.com/joho/godotenv"
+
+	"github.com/shinkalabs/andromeda-intents/internal/netguard"
 )
 
 type Config struct {
@@ -99,6 +101,20 @@ func (c *Config) validate() error {
 		return fmt.Errorf("LIFI_TIMEOUT_SECONDS must be positive")
 	}
 
+	// RPC overrides are operator-controlled (loopback/private targets are
+	// legitimate in dev), so we only enforce URL format here — a typo should
+	// fail the boot, not silently fall back to the public RPCs.
+	if c.SolanaRPCURL != "" {
+		if err := netguard.ValidateURLFormat(c.SolanaRPCURL); err != nil {
+			return fmt.Errorf("SOLANA_RPC_URL is invalid: %w", err)
+		}
+	}
+	if c.SuiRPCURL != "" {
+		if err := netguard.ValidateURLFormat(c.SuiRPCURL); err != nil {
+			return fmt.Errorf("SUI_RPC_URL is invalid: %w", err)
+		}
+	}
+
 	if c.Env == "production" {
 		if c.InternalAPIKey == "" {
 			return fmt.Errorf("INTERNAL_API_KEY is required in production (shared with the gateway)")
@@ -136,7 +152,12 @@ func (c *Config) EVMRPCOverrides() map[int]string {
 		if err != nil || strings.TrimSpace(v) == "" {
 			continue
 		}
-		out[id] = strings.TrimRight(strings.TrimSpace(v), "/")
+		clean := strings.TrimRight(strings.TrimSpace(v), "/")
+		if err := netguard.ValidateURLFormat(clean); err != nil {
+			c.Warnings = append(c.Warnings, fmt.Sprintf("EVM_RPC_URLS_JSON: ignoring chain %d (%v)", id, err))
+			continue
+		}
+		out[id] = clean
 	}
 	return out
 }

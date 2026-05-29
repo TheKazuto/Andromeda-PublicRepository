@@ -146,7 +146,10 @@ func (a *evmAdapter) Prepare(ctx context.Context, step *lifi.Step, p lifi.QuoteP
 	if err != nil || gasBig.Sign() == 0 {
 		return nil, invariant("EVM tx gas is missing")
 	}
-	valueBig, _ := parseBig(tr.Value)
+	valueBig, err := parseBig(tr.Value)
+	if err != nil {
+		return nil, invariant("EVM tx value is invalid")
+	}
 	dataBytes, err := hexBytes(tr.Data)
 	if err != nil {
 		return nil, invariant("EVM tx data is not valid hex")
@@ -174,7 +177,10 @@ func (a *evmAdapter) Prepare(ctx context.Context, step *lifi.Step, p lifi.QuoteP
 	if allowance, spender, checked := a.evmAllowance(ctx, p, tr.From, step.Estimate.ApprovalAddress, urls); checked {
 		need, ok := new(big.Int).SetString(p.FromAmount, 10)
 		if ok && allowance.Cmp(need) < 0 {
-			approval = buildApprove(chainID, baseNonce, p.FromToken, spender, need, maxPriorityBig, maxFeeBig, gasPriceBig, useLegacy)
+			approval, err = buildApprove(chainID, baseNonce, p.FromToken, spender, need, maxPriorityBig, maxFeeBig, gasPriceBig, useLegacy)
+			if err != nil {
+				return nil, err
+			}
 			swapNonce = baseNonce + 1
 		}
 	}
@@ -248,9 +254,15 @@ var erc20ApproveSelector = []byte{0x09, 0x5e, 0xa7, 0xb3}
 // buildApprove constructs an ERC20 approve(spender, amount) tx on the same tx
 // type as the swap (legacy or EIP-1559) so the dWallet signs both with the
 // same scheme path.
-func buildApprove(chainID, nonce uint64, token, spender string, amount, maxPriority, maxFee, gasPrice *big.Int, useLegacy bool) *EVMApproval {
-	tokenBytes, _ := hexAddr(token)
-	spenderBytes, _ := hexAddr(spender)
+func buildApprove(chainID, nonce uint64, token, spender string, amount, maxPriority, maxFee, gasPrice *big.Int, useLegacy bool) (*EVMApproval, error) {
+	tokenBytes, err := hexAddr(token)
+	if err != nil {
+		return nil, invariant("approve token is not a 20-byte address")
+	}
+	spenderBytes, err := hexAddr(spender)
+	if err != nil {
+		return nil, invariant("approve spender is not a 20-byte address")
+	}
 	data := make([]byte, 0, 4+64)
 	data = append(data, erc20ApproveSelector...)
 	data = append(data, leftPad32(spenderBytes)...)
@@ -279,7 +291,7 @@ func buildApprove(chainID, nonce uint64, token, spender string, amount, maxPrior
 		Token:            strings.ToLower(token),
 		Spender:          strings.ToLower(spender),
 		Nonce:            nonce,
-	}
+	}, nil
 }
 
 // EVMReceiptReader exposes the EVM-only operation the gateway calls on
@@ -313,16 +325,31 @@ func (a *evmAdapter) DeriveMessage(unsignedTxB64 string) (*DeriveResult, error) 
 	if err != nil {
 		return nil, invariant("snapshot `to` is invalid")
 	}
-	value, _ := parseBig(snap.Value)
-	data, _ := hexBytes(snap.Data)
+	value, err := parseBig(snap.Value)
+	if err != nil {
+		return nil, invariant("snapshot value is invalid")
+	}
+	data, err := hexBytes(snap.Data)
+	if err != nil {
+		return nil, invariant("snapshot data is invalid")
+	}
 
 	var unsigned []byte
 	if snap.TxType == 0 && snap.GasPrice != "" {
-		gasPrice, _ := parseBig(snap.GasPrice)
+		gasPrice, err := parseBig(snap.GasPrice)
+		if err != nil {
+			return nil, invariant("snapshot gasPrice is invalid")
+		}
 		unsigned = encodeLegacyUnsigned(snap.ChainID, snap.Nonce, gasPrice, snap.Gas, toBytes, value, data)
 	} else {
-		maxFee, _ := parseBig(snap.MaxFee)
-		maxPriority, _ := parseBig(snap.MaxPriorityFee)
+		maxFee, err := parseBig(snap.MaxFee)
+		if err != nil {
+			return nil, invariant("snapshot maxFeePerGas is invalid")
+		}
+		maxPriority, err := parseBig(snap.MaxPriorityFee)
+		if err != nil {
+			return nil, invariant("snapshot maxPriorityFeePerGas is invalid")
+		}
 		unsigned = encodeEIP1559(snap.ChainID, snap.Nonce, maxPriority, maxFee, snap.Gas, toBytes, value, data, nil)
 	}
 	sum := sha256.Sum256(raw)
@@ -356,12 +383,21 @@ func (a *evmAdapter) Finalize(ctx context.Context, in FinalizeInput, urls []stri
 	if err != nil {
 		return nil, invariant("snapshot `to` is invalid")
 	}
-	value, _ := parseBig(snap.Value)
-	data, _ := hexBytes(snap.Data)
+	value, err := parseBig(snap.Value)
+	if err != nil {
+		return nil, invariant("snapshot value is invalid")
+	}
+	data, err := hexBytes(snap.Data)
+	if err != nil {
+		return nil, invariant("snapshot data is invalid")
+	}
 
 	var signed []byte
 	if snap.TxType == 0 && snap.GasPrice != "" {
-		gasPrice, _ := parseBig(snap.GasPrice)
+		gasPrice, err := parseBig(snap.GasPrice)
+		if err != nil {
+			return nil, invariant("snapshot gasPrice is invalid")
+		}
 		// EIP-155 v = 35 + 2*chainId + parity. Use big.Int multiplication so
 		// chain ids that overflow uint64/2 (none today, but defensive) stay
 		// correct.
@@ -371,8 +407,14 @@ func (a *evmAdapter) Finalize(ctx context.Context, in FinalizeInput, urls []stri
 		v.Add(v, big.NewInt(int64(parity)))
 		signed = encodeLegacySigned(snap.Nonce, gasPrice, snap.Gas, toBytes, value, data, v, r, sVal)
 	} else {
-		maxFee, _ := parseBig(snap.MaxFee)
-		maxPriority, _ := parseBig(snap.MaxPriorityFee)
+		maxFee, err := parseBig(snap.MaxFee)
+		if err != nil {
+			return nil, invariant("snapshot maxFeePerGas is invalid")
+		}
+		maxPriority, err := parseBig(snap.MaxPriorityFee)
+		if err != nil {
+			return nil, invariant("snapshot maxPriorityFeePerGas is invalid")
+		}
 		yParity := big.NewInt(int64(parity))
 		signed = encodeEIP1559Signed(snap.ChainID, snap.Nonce, maxPriority, maxFee, snap.Gas, toBytes, value, data, nil, yParity, r, sVal)
 	}

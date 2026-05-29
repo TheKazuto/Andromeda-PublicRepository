@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gagliardetto/solana-go"
@@ -14,16 +15,37 @@ import (
 	"github.com/shinkalabs/andromeda-intents/internal/metrics"
 )
 
+// solanaCallTimeout bounds a single RPC call so a hung node cannot pin a
+// goroutine for the whole request window; failover then moves to the next URL.
+const solanaCallTimeout = 20 * time.Second
+
 // SolanaBroadcaster sends a signed VersionedTransaction, failing over across the
 // RPC URLs the caller resolved (operator override, else the public list from
 // LI.FI /chains). It never holds keys — it only relays bytes.
 type SolanaBroadcaster struct {
 	metrics *metrics.Metrics
 	logger  *slog.Logger
+
+	mu      sync.Mutex
+	clients map[string]*rpc.Client
 }
 
 func NewSolanaBroadcaster(m *metrics.Metrics, logger *slog.Logger) *SolanaBroadcaster {
-	return &SolanaBroadcaster{metrics: m, logger: logger}
+	return &SolanaBroadcaster{metrics: m, logger: logger, clients: make(map[string]*rpc.Client)}
+}
+
+// client returns a pooled rpc.Client for url, building it once. rpc.Client wraps
+// a connection-pooling HTTP transport, so reusing it across calls avoids a fresh
+// TCP/TLS handshake on every broadcast and balance read.
+func (b *SolanaBroadcaster) client(url string) *rpc.Client {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if c, ok := b.clients[url]; ok {
+		return c
+	}
+	c := rpc.New(url)
+	b.clients[url] = c
+	return c
 }
 
 // Broadcast tries each RPC URL in order. Returns (signature, unknown, err):
@@ -41,9 +63,11 @@ func (b *SolanaBroadcaster) Broadcast(ctx context.Context, urls []string, tx *so
 		if i > 0 && b.metrics != nil {
 			b.metrics.RPCFailover.WithLabelValues("solana", idLabel).Inc()
 		}
-		client := rpc.New(url)
+		client := b.client(url)
+		callCtx, cancel := context.WithTimeout(ctx, solanaCallTimeout)
 		start := time.Now()
-		sig, err := client.SendTransactionWithOpts(ctx, tx, opts)
+		sig, err := client.SendTransactionWithOpts(callCtx, tx, opts)
+		cancel()
 		if b.metrics != nil {
 			b.metrics.BroadcastDuration.WithLabelValues("solana").Observe(time.Since(start).Seconds())
 		}
@@ -73,8 +97,10 @@ func (b *SolanaBroadcaster) Balance(ctx context.Context, urls []string, address 
 	}
 	var lastErr error
 	for _, url := range urls {
-		client := rpc.New(url)
-		out, err := client.GetBalance(ctx, pk, rpc.CommitmentConfirmed)
+		client := b.client(url)
+		callCtx, cancel := context.WithTimeout(ctx, solanaCallTimeout)
+		out, err := client.GetBalance(callCtx, pk, rpc.CommitmentConfirmed)
+		cancel()
 		if err != nil {
 			lastErr = err
 			continue

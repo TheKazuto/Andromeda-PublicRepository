@@ -2,6 +2,7 @@ package swap
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -247,5 +248,30 @@ func TestEVMSignedEncodingShape(t *testing.T) {
 	}
 	if len(keccak256(signed)) != 32 {
 		t.Error("keccak256 must be 32 bytes")
+	}
+}
+
+// A persisted snapshot with an unparseable numeric field must fail loudly on
+// DeriveMessage (InvariantError → 422), never silently encode it as zero.
+func TestEVMDeriveRejectsCorruptSnapshot(t *testing.T) {
+	adapter := newEVMAdapter(nil, nil, nil)
+	cases := map[string]string{
+		"bad value":    `{"chainId":8453,"nonce":0,"gas":21000,"to":"0x2222222222222222222222222222222222222222","value":"not-a-number","data":"0x","txType":2,"maxFeePerGas":"1","maxPriorityFeePerGas":"1"}`,
+		"bad maxFee":   `{"chainId":8453,"nonce":0,"gas":21000,"to":"0x2222222222222222222222222222222222222222","value":"0","data":"0x","txType":2,"maxFeePerGas":"zzz","maxPriorityFeePerGas":"1"}`,
+		"bad gasPrice": `{"chainId":8453,"nonce":0,"gas":21000,"to":"0x2222222222222222222222222222222222222222","value":"0","data":"0x","txType":0,"gasPrice":"oops"}`,
+		"bad data":     `{"chainId":8453,"nonce":0,"gas":21000,"to":"0x2222222222222222222222222222222222222222","value":"0","data":"0xZZ","txType":2,"maxFeePerGas":"1","maxPriorityFeePerGas":"1"}`,
+	}
+	for name, snap := range cases {
+		t.Run(name, func(t *testing.T) {
+			b64 := base64.StdEncoding.EncodeToString([]byte(snap))
+			_, err := adapter.DeriveMessage(b64)
+			if err == nil {
+				t.Fatalf("expected an error for %s", name)
+			}
+			var inv *InvariantError
+			if !asInvariant(err, &inv) {
+				t.Errorf("expected InvariantError, got %T", err)
+			}
+		})
 	}
 }

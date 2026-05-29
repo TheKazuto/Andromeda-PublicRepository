@@ -7,6 +7,8 @@ import (
 	"net/url"
 	"sync"
 	"time"
+
+	"github.com/shinkalabs/andromeda-intents/internal/netguard"
 )
 
 // RPCCache holds the chainId → public RPC URL map derived from GET /chains.
@@ -39,17 +41,27 @@ func (c *RPCCache) Loaded() bool {
 	return !c.loadedAt.IsZero()
 }
 
-func (c *RPCCache) set(chains []Chain) {
+// set replaces the cache with the RPC URLs from a /chains response, dropping
+// any URL that fails the SSRF guard (loopback/private/metadata). It returns the
+// number dropped so the caller can surface a warning — a poisoned feed must not
+// silently redirect a broadcast, and dropping per-URL (not per-chain) keeps the
+// good endpoints usable.
+func (c *RPCCache) set(chains []Chain) (dropped int) {
 	m := make(map[int][]string, len(chains))
 	for _, ch := range chains {
-		if len(ch.Metamask.RPCUrls) > 0 {
-			m[ch.ID] = ch.Metamask.RPCUrls
+		for _, rpcURL := range ch.Metamask.RPCUrls {
+			if err := netguard.ValidateRPCURL(rpcURL); err != nil {
+				dropped++
+				continue
+			}
+			m[ch.ID] = append(m[ch.ID], rpcURL)
 		}
 	}
 	c.mu.Lock()
 	c.byChainID = m
 	c.loadedAt = time.Now()
 	c.mu.Unlock()
+	return dropped
 }
 
 // RPC exposes the client's RPC cache (one per client).
@@ -71,7 +83,9 @@ func (c *Client) Chains(ctx context.Context, chainTypes string) ([]byte, error) 
 	}
 	var parsed chainsResponse
 	if err := json.Unmarshal(body, &parsed); err == nil && len(parsed.Chains) > 0 {
-		c.RPC().set(parsed.Chains)
+		if dropped := c.RPC().set(parsed.Chains); dropped > 0 && c.logger != nil {
+			c.logger.Warn("dropped unsafe RPC URLs from LI.FI /chains", "count", dropped)
+		}
 	}
 	return body, nil
 }
