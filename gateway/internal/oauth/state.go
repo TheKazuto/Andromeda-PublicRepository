@@ -71,12 +71,13 @@ type StateClaims struct {
 	// enforce StateCookieTTL on the callback side. We don't trust the
 	// browser's clock — we check against the server's now.
 	IssuedAt int64 `json:"iat"`
-
-	// CSRF is a 16-byte random nonce that the /callback hands back as
-	// a hidden field. Combined with the cookie being HttpOnly+SameSite,
-	// this defeats any cross-site forgery of /callback.
-	CSRF string `json:"x"`
 }
+
+// CSRF protection for the handshake does not need a dedicated claim: the
+// `state` echoed by the provider is compared (constant-time) against the
+// HMAC-signed `__Host-` cookie, and the cookie is HttpOnly + SameSite=Lax.
+// A forged /callback cannot present a state matching a cookie it cannot read
+// or mint, so the binding itself is the CSRF defence.
 
 // errInvalidState is the only error /callback surfaces to the user; the
 // real reason lives in the audit log. Distinguishing "expired" from "bad

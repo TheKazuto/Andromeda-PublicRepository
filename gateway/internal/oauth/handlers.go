@@ -192,7 +192,6 @@ func (h *Handler) Authorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	csrf := randomURLSafe(16)
 	claims := StateClaims{
 		TenantID:      tenant.UserID,
 		Provider:      string(providerName),
@@ -201,7 +200,6 @@ func (h *Handler) Authorize(w http.ResponseWriter, r *http.Request) {
 		CodeChallenge: codeChallenge,
 		Nonce:         nonce,
 		IssuedAt:      time.Now().Unix(),
-		CSRF:          csrf,
 	}
 	cookie, err := SignState(h.opts.StateHMACSecret, claims)
 	if err != nil {

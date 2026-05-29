@@ -17,7 +17,6 @@ func sampleClaims(now int64) StateClaims {
 		CodeChallenge: "K_OBYRRPnFmJZG3MWv-VPyzU0R2gZqYbVm54iUg2C2A",
 		Nonce:         "pAqtrYL_Am8SKcwcG9vvIU6k4VoVNsC7V_i2a2cWuaU",
 		IssuedAt:      now,
-		CSRF:          "x",
 	}
 }
 
@@ -35,7 +34,7 @@ func TestSignVerifyRoundTrip(t *testing.T) {
 	if out.TenantID != in.TenantID || out.Provider != in.Provider ||
 		out.RedirectURI != in.RedirectURI || out.AppState != in.AppState ||
 		out.CodeChallenge != in.CodeChallenge || out.Nonce != in.Nonce ||
-		out.CSRF != in.CSRF || out.IssuedAt != in.IssuedAt {
+		out.IssuedAt != in.IssuedAt {
 		t.Fatalf("claims mismatch:\n in=%+v\nout=%+v", in, out)
 	}
 }
