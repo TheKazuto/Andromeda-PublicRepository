@@ -95,6 +95,22 @@ SUI on Sui) for gas; `/prepare` returns `nativeFeeEstimate` (and
 | GET | `/health`, `/health/ready` | Liveness / readiness (ready once the `/chains` cache is warm and the LI.FI breaker is closed). |
 | GET | `/metrics` | Prometheus. |
 
+## Request validation
+
+The gateway is the only caller, but every request is still validated strictly at
+this boundary (defense in depth, returning a clean `400` instead of a deep failure):
+
+- `fromAmount` must be a **base-unit integer**: ASCII digits only, non-negative,
+  no decimal point, no sign (amounts are base units, so there is no float in the
+  money path).
+- `/finalize` requires `unsignedTxB64` and `signatureB64` to be valid base64,
+  `signerPubkeyHex` to be valid hex, and `chainId` to be a positive integer.
+- `chainKind` must match a registered adapter (`evm`, `solana`, `sui`).
+
+The signed-tx snapshot is also re-parsed strictly on `/derive-message` and
+`/finalize`: a malformed numeric field fails loudly (`422`) instead of being
+silently encoded as zero.
+
 ## Signing model (Solana)
 
 1. LI.FI returns `transactionRequest.data` = base64 `VersionedTransaction` with
@@ -144,6 +160,18 @@ LI.FI publishes in `/chains`. The integrator fee (`LIFI_FEE_BPS`) is capped by
 `LIFI_FEE_MAX_BPS` and validated at boot. `QUOTE_CACHE_TTL_SECONDS` (default 5,
 0 to disable) sets a short per-replica cache for quote PREVIEWS only; the
 transaction is never cached (prepare always re-quotes fresh).
+
+Every broadcast RPC URL is screened before use (see `internal/netguard`):
+
+- URLs harvested from the LI.FI `/chains` feed that resolve to a loopback,
+  private, link-local or cloud-metadata IP literal are **dropped**, so a
+  poisoned feed cannot redirect a broadcast at internal infrastructure. A
+  dropped URL is logged; the remaining (public) URLs for that chain stay usable.
+- Operator overrides are **format-checked** (must be a valid `http(s)` URL with
+  a host) but not range-checked, since a local dev node or a private RPC
+  provider is a legitimate override. A malformed `SOLANA_RPC_URL` / `SUI_RPC_URL`
+  fails the boot; a malformed entry in `EVM_RPC_URLS_JSON` is skipped with a
+  warning.
 
 ## Run
 
